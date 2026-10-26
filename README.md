@@ -123,17 +123,18 @@ installing the dependencies listed in [the Windows build guide](packaging/window
 .\out\PS4RT-Launcher.exe
 ```
 
-Le launcher graphique Cockpit 0.3.5 mémorise le dossier du jeu PS4, prépare et lance le jeu sans
-fenêtre PowerShell, gère les copies et emplacements de sauvegarde, applique les réglages vidéo
-déjà pris en charge par le runtime et fournit des diagnostics exportables. `CUSA03219` est
-l’édition testée (voyant vert). Les éditions PS4 `CUSA03246`, `CUSA01722` et `CUSA03567` sont
-reconnues avec un avertissement « non testée » (voyant orange). Tout autre `TITLE_ID` est refusé
-et ne peut pas être lancé (voyant rouge).
-Le bouton `.pkg` lance l’extracteur ShadPS4Plus intégré, utilise par défaut
-`%LOCALAPPDATA%\PS4RT\Games\Imports` ou l’emplacement choisi par l’utilisateur, détecte
-automatiquement le `TITLE_ID` PS4 et mémorise le dossier extrait.
-Le préparateur SELF/linker est intégré au launcher en C++ natif et ne requiert pas Python sur la
-machine du joueur.
+The Cockpit 0.3.5 graphical launcher remembers the PS4 game directory, prepares and starts the
+game without opening a PowerShell window, manages save locations and backups, applies the video
+settings supported by the runtime, and provides exportable diagnostics. `CUSA03219` is the tested
+edition and receives a green status indicator. The `CUSA03246`, `CUSA01722`, and `CUSA03567` PS4
+editions are recognized as untested and receive an orange warning. Every other `TITLE_ID` is
+rejected with a red indicator and cannot be prepared or launched.
+
+The `.pkg` button starts the integrated ShadPS4Plus extractor. Imports are stored under
+`%LOCALAPPDATA%\PS4RT\Games\Imports` by default or in a directory selected by the user. The
+launcher detects the PS4 `TITLE_ID` and remembers the extracted game directory automatically.
+The native C++ SELF/link preparer is built into the launcher and does not require Python on the
+player's computer.
 
 The Release executables are `out\PS4RT-Launcher.exe`, `out\ps4rt.exe` and
 `out\PS4RT-PkgExtractor.exe`. To create the versioned
