@@ -17,6 +17,10 @@ contributors remain credited here even where their game-specific features were r
   emulator video core, GPU drivers and shader-recompiler foundations.
 - [cuesta4 / shadPS4](https://github.com/cuesta4/shadPS4/tree/eltutz):
   related renderer and compatibility contributions.
+- [AzaharPlus / shadPS4Plus PKG Extractor](https://github.com/AzaharPlus/shadPS4Plus):
+  bundled GPL-2.0 PKG extraction utility used by the Windows launcher. The upstream
+  executable remains isolated under `tools/pkg-extractor`; its libc++ and zlib notices
+  are distributed alongside it.
 
 ## Research and reverse-engineering tools
 

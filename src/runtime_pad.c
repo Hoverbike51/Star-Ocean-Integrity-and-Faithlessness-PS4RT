@@ -190,6 +190,10 @@ static ButtonMap key_map={{
     {SDL_SCANCODE_RETURN,BTN_OPTIONS}, {SDL_SCANCODE_TAB,CLICK_LEFT}, {SDL_SCANCODE_BACKSPACE,CLICK_RIGHT},
     {SDL_SCANCODE_I,BTN_UP}, {SDL_SCANCODE_K,BTN_DOWN}, {SDL_SCANCODE_J,BTN_LEFT}, {SDL_SCANCODE_L,BTN_RIGHT},
 },17};
+static SDL_Scancode key_axes[8]={
+    SDL_SCANCODE_A,SDL_SCANCODE_D,SDL_SCANCODE_W,SDL_SCANCODE_S,
+    SDL_SCANCODE_LEFT,SDL_SCANCODE_RIGHT,SDL_SCANCODE_UP,SDL_SCANCODE_DOWN
+};
 
 static char *trim(char *text) {
     while (*text==' ' || *text=='\t') ++text;
@@ -240,7 +244,37 @@ static void load_button_maps(void) {
     loaded=true;
     const int pad=apply_button_map(&pad_map,getenv("PS4RT_PAD_MAP"),false);
     const int keys=apply_button_map(&key_map,getenv("PS4RT_KEY_MAP"),true);
-    if (pad || keys) printf("Runtime: pad map: %d gamepad and %d keyboard buttons remapped\n",pad,keys);
+    const char *axes=getenv("PS4RT_KEY_AXES");
+    int axis_count=0;
+    if (axes && *axes) {
+        static const char *axis_names[]={"left_left","left_right","left_up","left_down",
+                                         "right_left","right_right","right_up","right_down"};
+        char copy[1024];
+        snprintf(copy,sizeof(copy),"%s",axes);
+        char *entry=copy;
+        while (entry) {
+            char *next=strchr(entry,',');
+            if (next) *next++=0;
+            char *eq=strchr(entry,'=');
+            if (eq) {
+                *eq=0;
+                const char *axis_name=trim(entry), *key_name=trim(eq+1);
+                const SDL_Scancode key=SDL_GetScancodeFromName(key_name);
+                for (size_t i=0;i<sizeof(axis_names)/sizeof(*axis_names);++i) {
+                    if (!SDL_strcasecmp(axis_name,axis_names[i]) && key!=SDL_SCANCODE_UNKNOWN) {
+                        key_axes[i]=key; ++axis_count; break;
+                    }
+                }
+            }
+            entry=next;
+        }
+    } else {
+        const char *profile=getenv("PS4RT_KEY_PROFILE");
+        if (profile && !SDL_strcasecmp(profile,"azerty")) {
+            key_axes[0]=SDL_SCANCODE_Q; key_axes[2]=SDL_SCANCODE_Z;
+        }
+    }
+    if (pad || keys || axis_count) printf("Runtime: pad map: %d gamepad buttons, %d keyboard buttons and %d keyboard axes remapped\n",pad,keys,axis_count);
 }
 
 static void key_axis(uint8_t *axis, bool negative, bool positive) {
@@ -285,10 +319,10 @@ static void sample_host(PadData *d) {
     for (size_t i=0;i<key_map.count;++i) if (k[key_map.entries[i].source]) d->buttons|=key_map.entries[i].ps;
     if (d->buttons & BTN_L2) d->l2=255;
     if (d->buttons & BTN_R2) d->r2=255;
-    key_axis(&d->left_x,k[SDL_SCANCODE_A],k[SDL_SCANCODE_D]);
-    key_axis(&d->left_y,k[SDL_SCANCODE_W],k[SDL_SCANCODE_S]);
-    key_axis(&d->right_x,k[SDL_SCANCODE_LEFT],k[SDL_SCANCODE_RIGHT]);
-    key_axis(&d->right_y,k[SDL_SCANCODE_UP],k[SDL_SCANCODE_DOWN]);
+    key_axis(&d->left_x,k[key_axes[0]],k[key_axes[1]]);
+    key_axis(&d->left_y,k[key_axes[2]],k[key_axes[3]]);
+    key_axis(&d->right_x,k[key_axes[4]],k[key_axes[5]]);
+    key_axis(&d->right_y,k[key_axes[6]],k[key_axes[7]]);
 }
 
 /* PS4RT_PAD_FILE=<file>: scripted input for automated runs. The file holds whitespace-separated

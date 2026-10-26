@@ -4,8 +4,12 @@
 !/.gitattributes
 !/LICENSE
 !/README.md
+!/VERSION
 !/build.sh
+!/build-windows.ps1
+!/msys2-env.sh
 !/run.sh
+!/run.ps1
 !/src/
 !/gpu/
 !/scripts/
@@ -15,6 +19,7 @@
 !/docs/
 !/packaging/
 !/tools/
+!/launcher/
 
 # Original games, private state, diagnostics and generated outputs at any depth.
 **/out/
@@ -334,3 +339,12 @@ secrets*
 !/docs/images/
 !/docs/images/readme/
 !/docs/images/readme/sample.png
+
+# Native Windows launcher artwork supplied for this project.
+!/launcher/assets/
+!/launcher/assets/**
+
+# Exact, licensed ShadPS4Plus extractor payload used by the native launcher.
+# Hashes and upstream licensing information are documented beside the files.
+!/tools/pkg-extractor/
+!/tools/pkg-extractor/**

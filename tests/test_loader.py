@@ -7,8 +7,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
-EXE = Path(os.environ.get('PS4RT_EXECUTABLE', ROOT / 'out/ps4rt'))
-HOST_EXE = Path(os.environ.get('PS4RT_EXECUTABLE', ROOT / ('out/ps4rt' + ('.exe' if sys.platform == 'win32' else ''))))
+EXE = Path(os.environ.get(
+    'PS4RT_EXECUTABLE', ROOT / ('out/ps4rt' + ('.exe' if sys.platform == 'win32' else ''))))
 
 def package(code, relocs=(), names=(), capabilities=None):
     image = code.ljust(4096, b'\x00')
@@ -43,7 +43,8 @@ class LoaderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'boot.bin'
             path.write_bytes(data)
-            return subprocess.run([str(EXE.resolve()), str(path), '--cpu-only', *options], capture_output=True, text=True, timeout=5)
+            return subprocess.run([str(EXE.resolve()), str(path), '--cpu-only', *options],
+                                  capture_output=True, text=True, timeout=5, env=host_env())
 
     def test_original_instruction_reaches_named_import(self):
         r = self.run_image(package(b'\xff%\x02\x00\x00\x00\x90\x90', [(8, 1, 0, 0)], ['fixture-import']))
@@ -99,8 +100,11 @@ class LoaderTests(unittest.TestCase):
 
     def test_illegal_instruction_reports_guest_offset(self):
         r = self.run_image(package(b'\x0f\x0b'))
-        self.assertEqual(r.returncode, 132)
-        self.assertIn('at guest offset 0x0,', r.stderr)
+        # POSIX reports SIGILL as 128 + signal (132).  The Windows vectored
+        # exception handler emits the same diagnostic and terminates with the
+        # loader's documented fatal-exception status instead.
+        self.assertEqual(r.returncode, 3 if sys.platform == 'win32' else 132)
+        self.assertIn('at guest offset 0x0', r.stderr)
 
     def test_runtime_returns_from_verified_init_env(self):
         code = b'H\x83\xec\x08\xff\x15\x16\x00\x00\x00H\x83\xc4\x08\xff%\x14\x00\x00\x00'
@@ -136,7 +140,7 @@ class LoaderTests(unittest.TestCase):
 
 def host_env():
     env = dict(os.environ)
-    if sys.platform == 'win32' and (not (HOST_EXE.parent / 'SDL3.dll').is_file()):
+    if sys.platform == 'win32' and (not (EXE.parent / 'SDL3.dll').is_file()):
         clang64 = Path(env.get('MSYS2_ROOT', 'C:\\msys64')) / 'clang64' / 'bin'
         env['PATH'] = f"{clang64}{os.pathsep}{env.get('PATH', '')}"
     return env

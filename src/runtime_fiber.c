@@ -6,7 +6,6 @@
  * No host scheduler or signal-mask changes. TLS belongs to the running thread.
  */
 #include "runtime.h"
-#ifndef _WIN32
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,27 +56,36 @@ void ABI runtime_fiber_returned(void) {
 }
 /* Save only SysV callee-preserved registers and FP control. XMM registers are
  * caller-saved. Separate assembly avoids moving RSP inside a C stack frame. */
+#ifdef _WIN32
+#define PS4RT_ASM_TYPE(name)
+#define PS4RT_ASM_SIZE(name)
+#else
+#define PS4RT_ASM_TYPE(name) ".type " #name ",@function\n"
+#define PS4RT_ASM_SIZE(name) ".size " #name ",.-" #name "\n"
+#endif
 __asm__(".text\n"
-        ".type runtime_fiber_save,@function\n"
+        PS4RT_ASM_TYPE(runtime_fiber_save)
         ".globl runtime_fiber_save\nruntime_fiber_save:\n"
         "mov %rbx,0(%rdi)\nmov %rbp,8(%rdi)\nmov %r12,16(%rdi)\nmov %r13,24(%rdi)\n"
         "mov %r14,32(%rdi)\nmov %r15,40(%rdi)\nlea 8(%rsp),%rax\nmov %rax,48(%rdi)\n"
         "mov (%rsp),%rax\nmov %rax,56(%rdi)\nfnstcw 64(%rdi)\nstmxcsr 68(%rdi)\nxor %eax,%eax\nret\n"
-        ".size runtime_fiber_save,.-runtime_fiber_save\n"
-        ".type runtime_fiber_restore,@function\n"
+        PS4RT_ASM_SIZE(runtime_fiber_save)
+        PS4RT_ASM_TYPE(runtime_fiber_restore)
         ".globl runtime_fiber_restore\nruntime_fiber_restore:\n"
         "fldcw 64(%rdi)\nldmxcsr 68(%rdi)\n"
         "mov 0(%rdi),%rbx\nmov 8(%rdi),%rbp\nmov 16(%rdi),%r12\nmov 24(%rdi),%r13\n"
         "mov 32(%rdi),%r14\nmov 40(%rdi),%r15\nmov 48(%rdi),%rsp\nmov $1,%eax\njmp *56(%rdi)\n"
-        ".size runtime_fiber_restore,.-runtime_fiber_restore\n"
-        ".type runtime_fiber_start,@function\n"
+        PS4RT_ASM_SIZE(runtime_fiber_restore)
+        PS4RT_ASM_TYPE(runtime_fiber_start)
         ".globl runtime_fiber_start\nruntime_fiber_start:\n"
         "mov %rdi,%r11\nmov %rsi,%rdi\nmov %rdx,%rsi\nmov %rcx,%rsp\nand $-16,%rsp\nxor %ebp,%ebp\n"
         "test %r8,%r8\njz 1f\nmovl $2,(%r8)\n1:\n"
         "test %r9d,%r9d\njz 2f\nmovw $0x37f,-16(%rsp)\nfldcw -16(%rsp)\n"
         "movl $0x9fc0,-12(%rsp)\nldmxcsr -12(%rsp)\n2:\n"
         "call *%r11\ncall runtime_fiber_returned\nud2\n"
-        ".size runtime_fiber_start,.-runtime_fiber_start\n");
+        PS4RT_ASM_SIZE(runtime_fiber_start));
+#undef PS4RT_ASM_TYPE
+#undef PS4RT_ASM_SIZE
 
 static int32_t validate(Fiber *fiber) {
     if (!fiber) return FERR(1);
@@ -195,7 +203,3 @@ static const RuntimeExport exports[]={
     {"sceFiberSwitch",fiber_switch}, {"sceFiberReturnToThread",fiber_return},
 };
 uintptr_t runtime_fiber_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
-#else
-uintptr_t runtime_fiber_resolve(const char *name) { (void)name; return 0; }
-void runtime_fiber_report(void) {}
-#endif

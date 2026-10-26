@@ -4,9 +4,18 @@
 #include <cstdint>
 #include <cstddef>
 #include <setjmp.h>
+#ifdef _WIN32
+typedef unsigned long long sigjmp_buf[32];
+#endif
 // Renderer tests have no guest process. Clock/host-thread services work; guest accesses abort.
 extern "C" {
 thread_local sigjmp_buf* runtime_fault_recover = nullptr;
+#ifdef _WIN32
+int ps4rt_setjmp(unsigned long long buffer[32]) {
+    (void)buffer;
+    return 0;
+}
+#endif
 uint32_t runtime_disabled_optimizations = 0;
 void runtime_report() {}
 uint64_t runtime_tsc_frequency() { return 1000000000; }

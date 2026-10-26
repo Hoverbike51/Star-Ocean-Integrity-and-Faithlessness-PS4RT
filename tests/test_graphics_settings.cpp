@@ -9,7 +9,7 @@
 
 int main() {
     using namespace Ps4RtSettings;
-    char path[] = "/tmp/ps4rt-scene-settings-XXXXXX";
+    char path[] = "ps4rt-scene-settings-XXXXXX";
     const int fd = mkstemp(path);
     assert(fd >= 0);
     close(fd);

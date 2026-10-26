@@ -86,7 +86,16 @@ static int make_dirs(const char *path) {
     return mkdir(buffer,0755) && errno!=EEXIST ? -1 : 0;
 }
 static void root(int32_t user, const char *title, char *out, size_t size) {
-    snprintf(out,size,"%s/savedata/%d/%s",runtime_file_user_dir(),user,title && *title ? title : title_id);
+    const char *title_dir=getenv("PS4RT_SAVEDATA_TITLE_DIR");
+    if (title_dir && *title_dir) {
+        snprintf(out,size,"%s",title_dir);
+        return;
+    }
+    const char *override=getenv("PS4RT_SAVEDATA_ROOT");
+    if (override && *override)
+        snprintf(out,size,"%s/%d/%s",override,user,title && *title ? title : title_id);
+    else
+        snprintf(out,size,"%s/savedata/%d/%s",runtime_file_user_dir(),user,title && *title ? title : title_id);
 }
 static int valid_name(const char *name, size_t max) {
     size_t n=strnlen(name,max);
@@ -309,6 +318,49 @@ done:
     pthread_mutex_unlock(&lock);
     return result ? ERR_INTERNAL : 0;
 }
+#else
+/* Win32 equivalent of the descriptor-based Linux snapshot. Reparse points are
+ * rejected by compat_copy_tree, so guest-created links cannot escape the save. */
+static ABI int32_t save_umount_backup(const MountPoint *point) {
+    if (!initialized) return ERR_NOT_INITIALIZED;
+    if (!point) return ERR_PARAMETER;
+    pthread_mutex_lock(&lock);
+    int slot=slot_of(point);
+    if (slot<0) { pthread_mutex_unlock(&lock); return ERR_NOT_FOUND; }
+    backup_progress=0;
+    const char *user=runtime_file_user_dir();
+    char prefix[720],base[800],snapshot[850],complete[850];
+    snprintf(prefix,sizeof(prefix),"%s/savedata/",user);
+    int result=-1;
+    if (strncmp(slots[slot].host,prefix,strlen(prefix))) goto done;
+    int n=snprintf(base,sizeof(base),"%s/savedata-backups/%s",user,slots[slot].host+strlen(prefix));
+    if (n<0 || (size_t)n>=sizeof(base) || make_dirs(base)) goto done;
+    int created=0;
+    for (unsigned attempt=0;attempt<100 && !created;++attempt) {
+        n=snprintf(snapshot,sizeof(snapshot),"%s/incomplete-%lld-%u",base,
+                   (long long)time(NULL),attempt);
+        if (n<0 || (size_t)n>=sizeof(snapshot)) goto done;
+        if (!mkdir(snapshot,0700)) created=1;
+        else if (errno!=EEXIST) goto done;
+    }
+    if (!created) goto done;
+    char data[900],meta[900];
+    snprintf(data,sizeof(data),"%s/data",snapshot);
+    snprintf(meta,sizeof(meta),"%s/sce_sys",snapshot);
+    if (compat_copy_tree(slots[slot].host,data)) goto done;
+    struct stat metadata;
+    if (!stat(slots[slot].meta,&metadata) && compat_copy_tree(slots[slot].meta,meta)) goto done;
+    const char *leaf=strrchr(snapshot,'/');
+    n=snprintf(complete,sizeof(complete),"%s/backup-%s",base,leaf ? leaf+12 : "snapshot");
+    if (n<0 || (size_t)n>=sizeof(complete) || rename(snapshot,complete)) goto done;
+    runtime_file_unmount(point->data); slots[slot].used=0;
+    backup_progress=1;
+    printf("Runtime: save backup completed: %s\n",complete);
+    result=0;
+done:
+    pthread_mutex_unlock(&lock);
+    return result ? ERR_INTERNAL : 0;
+}
 #endif
 static ABI int32_t save_get_param(const MountPoint *point, uint32_t type, void *buffer,
                                   uint64_t size, uint64_t *got) {
@@ -482,9 +534,7 @@ static const RuntimeExport exports[]={
     {"sceSaveDataInitialize3",save_initialize}, {"sceSaveDataTerminate",save_terminate},
     {"sceSaveDataClearProgress",save_clear_progress}, {"sceSaveDataGetProgress",save_get_progress},
     {"sceSaveDataMount",save_mount}, {"sceSaveDataMount2",save_mount2}, {"sceSaveDataUmount",save_umount},
-#ifndef _WIN32
     {"sceSaveDataUmountWithBackup",save_umount_backup},
-#endif
     {"sceSaveDataSetParam",save_set_param}, {"sceSaveDataSaveIcon",save_icon}, {"sceSaveDataDelete",save_delete},
     {"sceSaveDataGetParam",save_get_param},
     {"sceSaveDataDirNameSearch",save_search},

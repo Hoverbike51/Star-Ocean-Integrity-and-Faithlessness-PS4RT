@@ -5,7 +5,9 @@
 #if defined(ANDROID)
 #define VK_USE_PLATFORM_ANDROID_KHR
 #elif defined(_WIN64)
+#ifndef VK_USE_PLATFORM_WIN32_KHR
 #define VK_USE_PLATFORM_WIN32_KHR
+#endif
 #elif defined(__APPLE__)
 #define VK_USE_PLATFORM_METAL_EXT
 #else
@@ -23,6 +25,13 @@
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
+
+#ifdef _WIN32
+// vk_common.h deliberately uses VK_NO_PROTOTYPES, but Windows builds link the
+// loader import library and use this one entry point to seed vulkan-hpp.
+extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance,
+                                                                           const char* name);
+#endif
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
@@ -268,9 +277,15 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
     setenv("VK_DRIVER_FILES", icd_path.c_str(), true);
 #endif
 
+#ifdef _WIN32
+    // Vulkan::Vulkan links the Windows loader explicitly. Using its import avoids a
+    // DynamicLoader/LoadLibrary lookup that can return null in MinGW GUI executables.
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(vkGetInstanceProcAddr);
+#else
     static vk::detail::DynamicLoader dl;
     VULKAN_HPP_DEFAULT_DISPATCHER.init(
         dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr"));
+#endif
 
     const auto [available_version_result, available_version] =
         VULKAN_HPP_DEFAULT_DISPATCHER.vkEnumerateInstanceVersion
@@ -419,7 +434,13 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
     ASSERT_MSG(instance_result == vk::Result::eSuccess, "Failed to create instance: {}",
                vk::to_string(instance_result));
 
+#ifdef _WIN32
+    // Pass the entry point again: some MinGW link combinations do not preserve
+    // the member set by the global-only init across createInstanceUnique().
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(static_cast<VkInstance>(*instance), vkGetInstanceProcAddr);
+#else
     VULKAN_HPP_DEFAULT_DISPATCHER.init(*instance);
+#endif
 
     return std::move(instance);
 }

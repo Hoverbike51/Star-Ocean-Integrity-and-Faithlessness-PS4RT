@@ -10,6 +10,15 @@ if (NOT CMAKE_BUILD_TYPE)
 endif()
 # Frame pointers keep the loader's thread dumps (watchdog, SIGUSR2 sampling) walkable.
 add_compile_options(-fno-omit-frame-pointer)
+if (WIN32)
+    # FidelityFX sources use a few MSVC CRT spellings even when built with clang/MinGW.
+    # Force the compatibility header and a single vulkan-hpp platform layout for this
+    # directory and all third-party subdirectories. Mixing layouts lets a COMDAT copy of
+    # DispatchLoaderDynamic::init use the wrong member offsets at run time.
+    add_compile_options(-include ${CMAKE_CURRENT_SOURCE_DIR}/shim/ps4rt_win_compat.h)
+    add_compile_definitions(VK_USE_PLATFORM_WIN32_KHR VK_ENABLE_BETA_EXTENSIONS
+                            WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
 
 # ps4rt: link-time optimization (PS4RT_LTO, default on) and profile-guided optimization
 # (PS4RT_PGO: off, generate = instrumented build writing into PS4RT_PGO_DIR, use = build with that
@@ -63,6 +72,16 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(XXHASH REQUIRED IMPORTED_TARGET libxxhash)
 pkg_check_modules(SDL3 REQUIRED IMPORTED_TARGET sdl3)
+if (WIN32)
+    # The MSYS2 SDL3 pkg-config file adds -mwindows.  ps4rt is also a command-line
+    # loader whose diagnostics must remain visible, so retain the console subsystem;
+    # SDL still creates the native Win32 game window normally.
+    get_target_property(SDL3_LINK_OPTIONS PkgConfig::SDL3 INTERFACE_LINK_OPTIONS)
+    if (SDL3_LINK_OPTIONS)
+        list(FILTER SDL3_LINK_OPTIONS EXCLUDE REGEX "^-mwindows$")
+        set_property(TARGET PkgConfig::SDL3 PROPERTY INTERFACE_LINK_OPTIONS "${SDL3_LINK_OPTIONS}")
+    endif()
+endif()
 if (NOT WIN32)
     pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
 endif()
@@ -186,11 +205,55 @@ target_include_directories(ps4rtgpu PRIVATE third_party/xbyak)
 if (WIN32)
     # Guest code is entered with the System V ABI; NOMINMAX/WIN32_LEAN_AND_MEAN keep
     # <windows.h> out of the way of std::min/max and the Vulkan/SDL headers.
+    # Every translation unit must see the same vulkan-hpp dispatcher layout.
+    # Defining the Win32 platform only in vk_platform.cpp corrupts access to the
+    # global dynamic dispatcher stored in vk_common.cpp.
     target_compile_definitions(ps4rtgpu PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_compile_options(ps4rtgpu PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/shim/ps4rt_win_compat.h)
-    target_link_libraries(ps4rtgpu PUBLIC Vulkan::Vulkan ws2_32 bcrypt ntdll synchronization winmm pdh)
+    target_link_libraries(ps4rtgpu PUBLIC Vulkan::Vulkan onecore ws2_32 bcrypt ntdll synchronization winmm pdh)
 else()
     target_link_libraries(ps4rtgpu PUBLIC PkgConfig::X11)
+endif()
+
+# Native Windows loader. MSVC cannot compile the System V ABI guest entry points or the GNU
+# x86-64 assembly used by the fault recovery bridge, so Windows builds intentionally use
+# clang/MinGW-w64 (normally the MSYS2 CLANG64 environment) with CMake/Ninja.
+if (WIN32)
+    enable_language(RC)
+    file(GLOB PS4RT_RUNTIME CONFIGURE_DEPENDS ../src/runtime*.c)
+    file(GLOB PS4RT_ATRAC9 CONFIGURE_DEPENDS ../third_party/LibAtrac9/C/src/*.c)
+
+    add_library(atrac9 STATIC ${PS4RT_ATRAC9})
+    target_compile_options(atrac9 PRIVATE -w)
+    set_target_properties(atrac9 PROPERTIES C_STANDARD 99 INTERPROCEDURAL_OPTIMIZATION OFF)
+
+    add_executable(ps4rt ../src/loader.c ${PS4RT_RUNTIME} ../src/compat_win.c
+        ../src/cpu_check.c ../src/isa_rewrite.c ../src/isa_emulate.c
+        ../packaging/windows/ps4rt.rc)
+    set_target_properties(ps4rt PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF OUTPUT_NAME ps4rt)
+    target_compile_definitions(ps4rt PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN PS4RT_RUNTIME)
+    target_compile_options(ps4rt PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror>)
+    set_source_files_properties(../src/isa_emulate.c PROPERTIES COMPILE_OPTIONS "-mgeneral-regs-only")
+    target_include_directories(ps4rt PRIVATE .. ../src)
+    target_link_libraries(ps4rt PRIVATE ps4rtgpu atrac9 onecore bcrypt ws2_32 -pthread)
+    # Keep ordinary heaps/stacks out of the fixed 64 GiB-1 TiB guest address range. Guest code
+    # has no Windows stack probes, therefore the main stack is committed in full.
+    target_link_options(ps4rt PRIVATE -Wl,--disable-high-entropy-va
+        "SHELL:-Xlinker --stack -Xlinker 16777216,16777216")
+
+    # Native, dependency-light graphical launcher.  It deliberately remains a separate
+    # executable so the runtime keeps its console diagnostics while normal users see no shell.
+    add_executable(ps4rt-launcher WIN32 ../launcher/main.cpp ../launcher/native_preparer.cpp ../launcher/localization.cpp
+        ../launcher/launcher.rc)
+    set_target_properties(ps4rt-launcher PROPERTIES OUTPUT_NAME "PS4RT-Launcher")
+    target_compile_definitions(ps4rt-launcher PRIVATE UNICODE _UNICODE)
+    target_link_libraries(ps4rt-launcher PRIVATE PkgConfig::SDL3 gdiplus ole32 shell32 comdlg32 shlwapi user32 gdi32 winhttp dwmapi)
+
+    # Branded console-compatible front end for the bundled GPL-2.0 ShadPS4Plus
+    # extractor. The upstream binary and its private DLLs stay isolated below tools/.
+    add_executable(ps4rt-pkg-extractor ../launcher/pkg_extractor_wrapper.cpp ../launcher/pkg_extractor.rc)
+    set_target_properties(ps4rt-pkg-extractor PROPERTIES OUTPUT_NAME "PS4RT-PkgExtractor")
+    target_compile_definitions(ps4rt-pkg-extractor PRIVATE UNICODE _UNICODE)
+    target_link_options(ps4rt-pkg-extractor PRIVATE -municode)
 endif()
 
 
