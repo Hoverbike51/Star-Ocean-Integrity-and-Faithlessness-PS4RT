@@ -1,3 +1,7 @@
+> [!IMPORTANT]
+> The Windows version is experimental and still requires extensive testing, particularly by playing through the entire game and verifying its compatibility with a wider range of drivers and hardware. <br>
+> Tested with a `Ryzen 9 9950X3D2` CPU and a `Radeon RX 9070 XT` GPU running Windows 11 x64
+
 # Star Ocean 5: Integrity and Faithlessness — PS4RT for PC
 
 An experimental, game-specific compatibility runtime for **Star Ocean: Integrity and Faithlessness**
