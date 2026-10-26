@@ -1,21 +1,21 @@
-# Build Windows x64 natif
+# Native Windows x64 build
 
-Le runtime produit est un exécutable Windows 10/11 x64 natif. MSYS2 sert uniquement de chaîne
-de compilation et n'est pas nécessaire sur la machine du joueur après empaquetage.
+The resulting runtime is a native Windows 10/11 x64 executable. MSYS2 is used only as the build
+toolchain and is not required on the player's computer after packaging.
 
-## Pourquoi pas MSVC / le générateur Visual Studio
+## Why not MSVC or the Visual Studio generator?
 
-Le code invité PS4 utilise l'ABI x86-64 System V. Le chargeur dépend de
-`__attribute__((sysv_abi))`, d'assembleur GNU et d'un `setjmp` Win64 spécialisé qui traverse des
-trames invitées sans informations SEH. MSVC ne fournit pas ces mécanismes. Le port utilise donc
-CMake/Ninja avec clang/MinGW-w64 dans **MSYS2 CLANG64**. Visual Studio peut servir d'éditeur, mais
-son compilateur/linker ne doit pas être sélectionné pour cette cible.
+The PS4 guest code uses the x86-64 System V ABI. The loader relies on
+`__attribute__((sysv_abi))`, GNU assembly, and a specialized Win64 `setjmp` implementation that
+crosses guest frames without SEH unwind information. MSVC does not provide these mechanisms.
+The port therefore uses CMake/Ninja with clang/MinGW-w64 in **MSYS2 CLANG64**. Visual Studio can
+be used as an editor, but its compiler and linker must not be selected for this target.
 
-## Dépendances de compilation
+## Build dependencies
 
-Activez d'abord les chemins longs Git (`git config --global core.longpaths true`) ; les fichiers
-générés de FSR 3 dépassent sinon la limite classique de Windows. Installez MSYS2, ouvrez le terminal
-**MSYS2 CLANG64**, puis exécutez :
+First enable long paths in Git (`git config --global core.longpaths true`); generated FSR 3 files
+otherwise exceed the traditional Windows path-length limit. Install MSYS2, open an
+**MSYS2 CLANG64** terminal, and run:
 
 ```bash
 pacman -S --needed git patch \
@@ -25,63 +25,63 @@ pacman -S --needed git patch \
   mingw-w64-clang-x86_64-{spirv-tools,spirv-headers,spirv-cross}
 ```
 
-Depuis la racine du dépôt :
+From the repository root:
 
 ```bash
 bash build.sh
 bash build.sh --test
 ```
 
-Ou depuis PowerShell :
+Alternatively, from PowerShell:
 
 ```powershell
 .\build-windows.ps1
 .\build-windows.ps1 -Test
 ```
 
-Le binaire Release est `out\ps4rt.exe`. Pour lancer avec une extraction personnelle :
+The Release binary is `out\ps4rt.exe`. To run it with your own extracted game files:
 
 ```powershell
-.\run.ps1 -Game "D:\Jeux\CUSA03219"
+.\run.ps1 -Game "D:\Games\CUSA03219"
 ```
 
-Le lanceur ajoute automatiquement `C:\msys64\clang64\bin` (ou
-`$env:MSYS2_ROOT\clang64\bin`) au `PATH` d'un build source. Un paquet utilise en priorité les DLL
-placées à côté de `ps4rt.exe`.
+The launcher automatically adds `C:\msys64\clang64\bin` (or
+`$env:MSYS2_ROOT\clang64\bin`) to the `PATH` for a source build. A packaged build gives priority
+to the DLLs placed next to `ps4rt.exe`.
 
-## Paquet autonome des bibliothèques
+## Self-contained library package
 
-Dans MSYS2 CLANG64 :
+From MSYS2 CLANG64:
 
 ```bash
 bash packaging/windows/package.sh
 ```
 
-Le ZIP versionné est créé sous `dist/` (par exemple
-`ps4rt-star-ocean-5-windows-x64-v0.3.5.zip`). Il contient le runtime, toutes ses DLL CLANG64,
-le préparateur C++ natif, l'extracteur PKG intégré avec ses bibliothèques privées, les ressources
-visuelles du launcher et les assets de FSR 4. Le joueur n'a besoin ni de Python, ni de MSYS2,
-ni de PowerShell : le runtime, le launcher et leurs bibliothèques sont fournis dans le ZIP.
+The versioned ZIP is created under `dist/` (for example,
+`ps4rt-star-ocean-5-windows-x64-v0.3.5.zip`). It contains the runtime, all required CLANG64 DLLs,
+the native C++ preparer, the integrated PKG extractor with its private libraries, the launcher's
+visual resources, and the FSR 4 assets. Players do not need Python, MSYS2, or PowerShell: the
+runtime, launcher, and their libraries are all included in the ZIP.
 
-Testez le ZIP depuis PowerShell avec un `PATH` dépourvu de MSYS2 :
+Test the ZIP from PowerShell with a `PATH` that does not contain MSYS2:
 
 ```powershell
 .\packaging\windows\smoke-test.ps1 .\dist\ps4rt-star-ocean-5-windows-x64-v0.3.5.zip
 ```
 
-## Différences de plate-forme
+## Platform differences
 
-- `mmap`/`mprotect` deviennent `VirtualAlloc2`, `MapViewOfFile3` et `VirtualProtect`.
-- Les fautes mémoire et instructions non prises en charge passent par un gestionnaire d'exception
-  vectorisé au lieu de `SIGSEGV`/`SIGILL`.
-- Le TCB invité occupe un slot TLS du TEB Windows ; le chargeur réécrit l'accès `fs:[0]`.
-- Les threads restent fournis par winpthreads, avec piles entièrement validées ; les temporisations
-  courtes utilisent des waitable timers haute résolution.
-- Les sockets utilisent WinSock2, l'aléatoire BCrypt, et les opérations de fichiers ont des
-  équivalents Win32/CRT. Le manifeste active UTF-8, les chemins longs et le DPI PerMonitorV2.
-- Le watchdog et les dumps par signaux restent Linux uniquement.
+- `mmap`/`mprotect` are replaced by `VirtualAlloc2`, `MapViewOfFile3`, and `VirtualProtect`.
+- Memory faults and unsupported instructions are handled by a vectored exception handler instead
+  of `SIGSEGV`/`SIGILL`.
+- The guest TCB occupies a TLS slot in the Windows TEB; the loader rewrites `fs:[0]` accesses.
+- Threads are still provided by winpthreads with fully validated stacks; short waits use
+  high-resolution waitable timers.
+- Sockets use WinSock2, random data uses BCrypt, and file operations have Win32/CRT equivalents.
+  The manifest enables UTF-8, long paths, and PerMonitorV2 DPI awareness.
+- The watchdog and signal-based dumps remain Linux-only features.
 
-Ce port ne fournit ni fichiers de jeu, ni firmware, ni clés. L'extracteur PKG sous licence GPL-2.0
-est intégré uniquement pour importer localement les paquets PS4 appartenant à l'utilisateur. Le
-démarrage, le rendu Vulkan, l'audio WASAPI, l'entrée DualSense et la sauvegarde ont été validés
-avec CUSA03219 ; une partie complète reste à valider.
+This port does not provide game files, firmware, or keys. The GPL-2.0-licensed PKG extractor is
+integrated only for locally importing PS4 packages owned by the user. Startup, Vulkan rendering,
+WASAPI audio, DualSense input, and save data have been validated with CUSA03219; a complete
+playthrough still needs to be validated.
