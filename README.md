@@ -123,9 +123,13 @@ guest frames), so the Visual Studio compiler/generator is not supported. From Po
 installing the dependencies listed in [the Windows build guide](packaging/windows/README.md):
 
 ```powershell
-.\build-windows.ps1
+.\build-windows.cmd
 .\out\PS4RT-Launcher.exe
 ```
+
+The `.cmd` entry point works with the default Windows PowerShell execution policy. It also
+detects and regenerates a stale CMake build cache when a previously compiled checkout has been
+copied or moved. To run the complete test suite, use `.\build-windows.cmd -Test`.
 
 The Cockpit 0.3.5 graphical launcher remembers the PS4 game directory, prepares and starts the
 game without opening a PowerShell window, manages save locations and backups, applies the video

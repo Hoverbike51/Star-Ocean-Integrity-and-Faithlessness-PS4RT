@@ -6,6 +6,7 @@
 !/README.md
 !/VERSION
 !/build.sh
+!/build-windows.cmd
 !/build-windows.ps1
 !/msys2-env.sh
 !/run.sh

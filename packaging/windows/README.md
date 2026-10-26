@@ -32,12 +32,16 @@ bash build.sh
 bash build.sh --test
 ```
 
-Alternatively, from PowerShell:
+Alternatively, use the wrapper that is compatible with the default Windows PowerShell execution
+policy:
 
 ```powershell
-.\build-windows.ps1
-.\build-windows.ps1 -Test
+.\build-windows.cmd
+.\build-windows.cmd -Test
 ```
+
+The wrapper also detects and regenerates a stale CMake build cache when a previously compiled
+checkout has been copied or moved.
 
 The Release binary is `out\ps4rt.exe`. To run it with your own extracted game files:
 

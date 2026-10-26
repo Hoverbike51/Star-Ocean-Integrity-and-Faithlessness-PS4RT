@@ -3,6 +3,37 @@ set -euo pipefail
 cd -- "$(dirname -- "$0")"
 mkdir -p out
 
+reset_relocated_cmake_build_tree() {
+    local build_dir="$PWD/out/gpu"
+    local cache_file="$build_dir/CMakeCache.txt"
+    local cached_source cached_build current_source current_build
+
+    [[ -f "$cache_file" ]] || return 0
+
+    cached_source=$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$cache_file" | tail -n 1)
+    cached_build=$(sed -n 's/^CMAKE_CACHEFILE_DIR:INTERNAL=//p' "$cache_file" | tail -n 1)
+    current_source="$PWD/gpu"
+    current_build="$build_dir"
+
+    normalize_windows_path() {
+        printf '%s' "$1" | sed 's#\\#/#g; s#/$##' | tr '[:upper:]' '[:lower:]'
+    }
+
+    if [[ -z "$cached_source" || -z "$cached_build" ||
+          "$(normalize_windows_path "$cached_source")" != "$(normalize_windows_path "$current_source")" ||
+          "$(normalize_windows_path "$cached_build")" != "$(normalize_windows_path "$current_build")" ]]; then
+        printf 'Relocated or invalid CMake cache detected.\n' >&2
+        printf 'Recreating the generated build directory: %s\n' "$build_dir" >&2
+        [[ "$build_dir" == "$PWD/out/gpu" ]] || {
+            echo "Refusing to remove an unexpected build directory: $build_dir" >&2
+            exit 1
+        }
+        rm -rf -- "$build_dir"
+    fi
+}
+
+reset_relocated_cmake_build_tree
+
 # Native Windows build: clang/MinGW-w64 supplies the System V ABI attribute, GNU assembly and
 # winpthreads required by the guest-code bridge. MSVC is not ABI-compatible with that bridge.
 case $(uname -s) in

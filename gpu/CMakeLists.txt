@@ -11,6 +11,16 @@ endif()
 # Frame pointers keep the loader's thread dumps (watchdog, SIGUSR2 sampling) walkable.
 add_compile_options(-fno-omit-frame-pointer)
 if (WIN32)
+    # Release binaries must not expose the absolute path of the developer's checkout through
+    # __FILE__, assertions, diagnostics, or debug metadata. Keep stable project-relative paths
+    # regardless of where the repository is cloned or built.
+    get_filename_component(PS4RT_REPOSITORY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+    file(TO_CMAKE_PATH "${PS4RT_REPOSITORY_ROOT}" PS4RT_REPOSITORY_ROOT)
+    add_compile_options(
+        "-ffile-prefix-map=${PS4RT_REPOSITORY_ROOT}=PS4RT"
+        "-fmacro-prefix-map=${PS4RT_REPOSITORY_ROOT}=PS4RT"
+        "-fdebug-prefix-map=${PS4RT_REPOSITORY_ROOT}=PS4RT")
+
     # FidelityFX sources use a few MSVC CRT spellings even when built with clang/MinGW.
     # Force the compatibility header and a single vulkan-hpp platform layout for this
     # directory and all third-party subdirectories. Mixing layouts lets a COMDAT copy of
