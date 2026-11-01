@@ -1,6 +1,7 @@
 > [!IMPORTANT]
 > The Windows version is experimental and still requires extensive testing, particularly by playing through the entire game and verifying its compatibility with a wider range of drivers and hardware. <br>
-> Tested with a `Ryzen 9 9950X3D2` CPU with `Radeon RX 9070 XT` GPU running Windows 11 x64 and `Intel i5 7th Gen` CPU with `Nvidia GTX 1050` GPU running Windows 10 x64 (laptop)
+> Tested with `Ryzen 9 9950X3D2` CPU with `Radeon RX 9070 XT` GPU running Windows 11 x64 <br>
+> Tested with `Intel i5 7th Gen` CPU with `Nvidia GTX 1050` GPU running Windows 10 x64 (laptop)
 
 # Star Ocean 5 — experimental Windows port
 
