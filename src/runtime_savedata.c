@@ -16,10 +16,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#ifndef _WIN32
-#include <ftw.h>
-#include <fcntl.h>
-#endif
+#include <windows.h>
 
 #define ERR_PARAMETER ((int32_t)0x809F0000)
 #define ERR_NOT_INITIALIZED ((int32_t)0x809F0001)
@@ -67,11 +64,11 @@ _Static_assert(sizeof(SearchCond)==64 && sizeof(SearchResult)==56,"dir name sear
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static int initialized;
 static char title_id[16]="UNKNOWN";
-static struct { int used; char host[700], meta[700]; } slots[SLOTS];
+static struct { int used; int32_t user; char title[16], name[32], host[700], meta[700]; } slots[SLOTS];
 static char memory_path[720];
 static uint64_t memory_size;
 static size_t mounts_done, memory_writes;
-/* Unmount-with-backup completes synchronously on Linux. This counter follows
+/* Unmount-with-backup completes synchronously. This counter follows
  * backup progress, not the application's own file-write progress. */
 static _Atomic float backup_progress;
 
@@ -118,14 +115,7 @@ static int read_param(const char *meta, Param *p) {
     if (!stat(path,&st)) p->mtime=st.st_mtime;
     return n==1 ? 0 : -1;
 }
-#ifdef _WIN32
 static void remove_tree(const char *path) { compat_remove_tree(path); }
-#else
-static int remove_entry(const char *path, const struct stat *st, int flag, struct FTW *ftw) {
-    (void)st; (void)flag; (void)ftw; return remove(path);
-}
-static void remove_tree(const char *path) { nftw(path,remove_entry,16,FTW_DEPTH|FTW_PHYS); }
-#endif
 
 /* A save's param (title, subtitle, date) for the save dialog; 0 when it exists. */
 int runtime_savedata_param(int32_t user, const char *dir, void *param) {
@@ -181,6 +171,9 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     if (!exists && (make_dirs(host) || make_dirs(meta))) { pthread_mutex_unlock(&lock); return ERR_INTERNAL; }
     if (!exists) { Param empty={0}; write_param(meta,&empty); }
     slots[slot].used=1;
+    slots[slot].user=user;
+    snprintf(slots[slot].title,sizeof(slots[slot].title),"%s",title && *title ? title : title_id);
+    snprintf(slots[slot].name,sizeof(slots[slot].name),"%s",dir->data);
     snprintf(slots[slot].host,sizeof(slots[slot].host),"%s",host);
     snprintf(slots[slot].meta,sizeof(slots[slot].meta),"%s",meta);
     memset(result,0,sizeof(*result));
@@ -216,129 +209,30 @@ static ABI int32_t save_umount(const MountPoint *point) {
     pthread_mutex_unlock(&lock);
     return slot>=0 ? 0 : ERR_NOT_FOUND;
 }
-#ifndef _WIN32
-/* Copy through directory descriptors: never follow links from a guest save.
- * Destinations are new snapshots; failures preserve the mounted source and an
- * explicitly incomplete snapshot for diagnosis. No previous backup is deleted. */
-static int backup_tree(int source,int dest,unsigned depth,unsigned char *buffer) {
-    if (depth>32) return -1;
-    DIR *dir=fdopendir(dup(source));
-    if (!dir) return -1;
-    int result=0;
-    for (;;) {
-        errno=0;
-        struct dirent *entry=readdir(dir);
-        if (!entry) { if (errno) result=-1; break; }
-        const char *name=entry->d_name;
-        if (!strcmp(name,".") || !strcmp(name,"..")) continue;
-        struct stat st;
-        if (fstatat(source,name,&st,AT_SYMLINK_NOFOLLOW)) { result=-1; break; }
-        int in=-1,out=-1;
-        if (S_ISDIR(st.st_mode)) {
-            if (mkdirat(dest,name,0700)) { result=-1; break; }
-            in=openat(source,name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
-            out=openat(dest,name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
-            if (in<0 || out<0 || backup_tree(in,out,depth+1,buffer)) result=-1;
-        } else if (S_ISREG(st.st_mode)) {
-            in=openat(source,name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);
-            out=openat(dest,name,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
-            struct stat opened;
-            if (in<0 || out<0 || fstat(in,&opened) || !S_ISREG(opened.st_mode)) result=-1;
-            while (!result) {
-                ssize_t n=read(in,buffer,65536);
-                if (n<0) { if (errno==EINTR) continue; result=-1; break; }
-                if (!n) break;
-                for (ssize_t at=0;at<n;) {
-                    ssize_t wrote=write(out,buffer+at,(size_t)(n-at));
-                    if (wrote<0 && errno==EINTR) continue;
-                    if (wrote<=0) { result=-1; break; }
-                    at+=wrote;
-                }
-            }
-            if (!result && fsync(out)) result=-1;
-        } else result=-1;
-        if (in>=0) close(in);
-        if (out>=0 && close(out)) result=-1;
-        if (result) break;
-    }
-    closedir(dir);
-    return result || fsync(dest) ? -1 : 0;
+static int backups_enabled(void) {
+    const char *value=getenv("PS4RT_SAVEDATA_BACKUP");
+    return !value || strcmp(value,"0");
 }
-static ABI int32_t save_umount_backup(const MountPoint *point) {
-    if (!initialized) return ERR_NOT_INITIALIZED;
-    if (!point) return ERR_PARAMETER;
-    pthread_mutex_lock(&lock);
-    int slot=slot_of(point);
-    if (slot<0) { pthread_mutex_unlock(&lock); return ERR_NOT_FOUND; }
-    backup_progress=0;
-    const char *user=runtime_file_user_dir();
-    char prefix[720],base[800],snapshot[850],complete[850];
-    snprintf(prefix,sizeof(prefix),"%s/savedata/",user);
-    int result=-1;
-    unsigned char *buffer=malloc(65536);
-    if (!buffer) goto done;
-    if (strncmp(slots[slot].host,prefix,strlen(prefix))) goto done;
-    int n=snprintf(base,sizeof(base),"%s/savedata-backups/%s",user,slots[slot].host+strlen(prefix));
-    if (n<0 || n>=700 || make_dirs(base)) goto done;
-    n=snprintf(snapshot,sizeof(snapshot),"%s/incomplete-XXXXXX",base);
-    if (n<0 || (size_t)n>=sizeof(snapshot) || !mkdtemp(snapshot)) goto done;
-    int dest=open(snapshot,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
-    if (dest<0) goto done;
-    const char *sources[]={slots[slot].host,slots[slot].meta};
-    const char *names[]={"data","sce_sys"};
-    result=0;
-    for (unsigned i=0;i<2 && !result;++i) {
-        int source=open(sources[i],O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
-        if (source<0) {
-            if (i==1 && errno==ENOENT) continue; /* saves may have no metadata */
-            result=-1; break;
-        }
-        int target=-1;
-        if (!mkdirat(dest,names[i],0700)) target=openat(dest,names[i],O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
-        if (target<0 || backup_tree(source,target,0,buffer)) result=-1;
-        if (target>=0) close(target);
-        close(source);
-    }
-    if (fsync(dest)) result=-1;
-    close(dest);
-    snprintf(complete,sizeof(complete),"%s/backup-%s",base,snapshot+strlen(snapshot)-6);
-    if (!result && rename(snapshot,complete)) result=-1;
-    if (!result) {
-        int parent=open(base,O_RDONLY|O_DIRECTORY|O_CLOEXEC);
-        if (parent<0 || fsync(parent)) result=-1;
-        if (parent>=0) close(parent);
-    }
-    if (!result) {
-        runtime_file_unmount(point->data); slots[slot].used=0;
-        backup_progress=1;
-        printf("Runtime: save backup completed: %s\n",complete);
-    }
-done:
-    free(buffer);
-    pthread_mutex_unlock(&lock);
-    return result ? ERR_INTERNAL : 0;
+static int backup_base(int slot,char *out,size_t size) {
+    // Use the mounted save identity, including when its files live in a custom directory.
+    if (!valid_name(slots[slot].title,sizeof(slots[slot].title))) return -1;
+    int n=snprintf(out,size,"%s/savedata-backups/%d/%s/%s",runtime_file_user_dir(),
+                   slots[slot].user,slots[slot].title,slots[slot].name);
+    return n<0 || n>=700 || (size_t)n>=size ? -1 : make_dirs(out);
 }
-#else
-/* Win32 equivalent of the descriptor-based Linux snapshot. Reparse points are
- * rejected by compat_copy_tree, so guest-created links cannot escape the save. */
-static ABI int32_t save_umount_backup(const MountPoint *point) {
-    if (!initialized) return ERR_NOT_INITIALIZED;
-    if (!point) return ERR_PARAMETER;
-    pthread_mutex_lock(&lock);
-    int slot=slot_of(point);
-    if (slot<0) { pthread_mutex_unlock(&lock); return ERR_NOT_FOUND; }
-    backup_progress=0;
-    const char *user=runtime_file_user_dir();
-    char prefix[720],base[800],snapshot[850],complete[850];
-    snprintf(prefix,sizeof(prefix),"%s/savedata/",user);
+/* One transaction engine for startup snapshots and unmount-with-backup.
+ * Reparse points are rejected; incomplete copies never replace completed ones. */
+static int snapshot_slot_windows(int slot) {
+    char base[800],snapshot[850],complete[850];
     int result=-1;
-    if (strncmp(slots[slot].host,prefix,strlen(prefix))) goto done;
-    int n=snprintf(base,sizeof(base),"%s/savedata-backups/%s",user,slots[slot].host+strlen(prefix));
-    if (n<0 || (size_t)n>=sizeof(base) || make_dirs(base)) goto done;
+    if (backup_base(slot,base,sizeof(base))) goto done;
+    int n;
     int created=0;
     for (unsigned attempt=0;attempt<100 && !created;++attempt) {
-        n=snprintf(snapshot,sizeof(snapshot),"%s/incomplete-%lld-%u",base,
-                   (long long)time(NULL),attempt);
+        uint64_t nonce;
+        if (compat_random(&nonce,sizeof(nonce))) goto done;
+        n=snprintf(snapshot,sizeof(snapshot),"%s/incomplete-%lld-%016llx",base,
+                   (long long)time(NULL),(unsigned long long)nonce);
         if (n<0 || (size_t)n>=sizeof(snapshot)) goto done;
         if (!mkdir(snapshot,0700)) created=1;
         else if (errno!=EEXIST) goto done;
@@ -349,19 +243,68 @@ static ABI int32_t save_umount_backup(const MountPoint *point) {
     snprintf(meta,sizeof(meta),"%s/sce_sys",snapshot);
     if (compat_copy_tree(slots[slot].host,data)) goto done;
     struct stat metadata;
-    if (!stat(slots[slot].meta,&metadata) && compat_copy_tree(slots[slot].meta,meta)) goto done;
+    if (!stat(slots[slot].meta,&metadata)) {
+        if (compat_copy_tree(slots[slot].meta,meta)) goto done;
+    } else if (errno!=ENOENT) goto done;
     const char *leaf=strrchr(snapshot,'/');
     n=snprintf(complete,sizeof(complete),"%s/backup-%s",base,leaf ? leaf+12 : "snapshot");
     if (n<0 || (size_t)n>=sizeof(complete) || rename(snapshot,complete)) goto done;
-    runtime_file_unmount(point->data); slots[slot].used=0;
-    backup_progress=1;
     printf("Runtime: save backup completed: %s\n",complete);
     result=0;
 done:
-    pthread_mutex_unlock(&lock);
-    return result ? ERR_INTERNAL : 0;
+    return result;
 }
-#endif
+
+static ABI int32_t save_umount_backup(const MountPoint *point) {
+    if (!initialized) return ERR_NOT_INITIALIZED;
+    if (!point) return ERR_PARAMETER;
+    if (!backups_enabled()) {
+        int32_t result=save_umount(point);
+        if (!result) backup_progress=1;
+        return result;
+    }
+    pthread_mutex_lock(&lock);
+    int slot=slot_of(point);
+    if (slot<0) {pthread_mutex_unlock(&lock);return ERR_NOT_FOUND;}
+    backup_progress=0;
+    const int result=snapshot_slot_windows(slot);
+    if(!result) {runtime_file_unmount(point->data);slots[slot].used=0;backup_progress=1;}
+    pthread_mutex_unlock(&lock);
+    return result?ERR_INTERNAL:0;
+}
+
+/* Called before guest threads and GPU startup. This does not mount or rewrite
+ * live saves; it uses the same per-user/title/slot snapshot layout as the API. */
+int runtime_savedata_backup_at_launch(void) {
+    if(!backups_enabled()) return 0;
+    char directory[700];root(1,title_id,directory,sizeof(directory));
+    DIR* dir=opendir(directory);
+    if(!dir) return errno==ENOENT?0:-1;
+    const __typeof__(slots[0]) previous=slots[0];
+    int result=0;unsigned copied=0;
+    struct dirent* entry;
+    for(;;) {
+        errno=0;entry=readdir(dir);
+        if(!entry) {if(errno) result=-1;break;}
+        const char* name=entry->d_name;
+        if(!strcmp(name,".")||!strcmp(name,"..")||strstr(name,".sce_sys")) continue;
+        char path[800];
+        if(snprintf(path,sizeof(path),"%s/%s",directory,name)>=(int)sizeof(path)) {result=-1;break;}
+        const DWORD attributes=GetFileAttributesA(path);
+        if(attributes==INVALID_FILE_ATTRIBUTES) {result=-1;break;}
+        if(!(attributes&FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if((attributes&FILE_ATTRIBUTE_REPARSE_POINT)||!valid_name(name,sizeof(slots[0].name))) {result=-1;break;}
+        memset(&slots[0],0,sizeof(slots[0]));slots[0].user=1;
+        snprintf(slots[0].title,sizeof(slots[0].title),"%s",title_id);
+        snprintf(slots[0].name,sizeof(slots[0].name),"%s",name);
+        if(snprintf(slots[0].host,sizeof(slots[0].host),"%s/%s",directory,name)>=(int)sizeof(slots[0].host) ||
+            snprintf(slots[0].meta,sizeof(slots[0].meta),"%s/%s.sce_sys",directory,name)>=(int)sizeof(slots[0].meta) || snapshot_slot_windows(0)) {result=-1;break;}
+        ++copied;
+    }
+    closedir(dir);slots[0]=previous;
+    printf("Runtime: launch save backups: %u slot(s), %s\n",copied,result?"failed (launch cancelled)":"complete");
+    return result;
+}
 static ABI int32_t save_get_param(const MountPoint *point, uint32_t type, void *buffer,
                                   uint64_t size, uint64_t *got) {
     if (!initialized) return ERR_NOT_INITIALIZED;

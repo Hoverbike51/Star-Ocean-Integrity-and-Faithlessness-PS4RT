@@ -16,6 +16,14 @@ int main() {
     assert(!pads.Trigger(2, 32767)); // trigger jitter cannot toggle twice
     assert(!pads.RightStick(2, false));
     assert(pads.RightStick(2, true)); // intentional second stick click works
+    Controllers reverse_order;
+    assert(!reverse_order.RightStick(7, true));
+    assert(reverse_order.Trigger(7, 32767)); // holding R3 and then L2 also opens the menu
+    assert(!reverse_order.Trigger(7, 32767));
+    assert(!reverse_order.RightStick(7, false));
+    assert(!reverse_order.Trigger(7, 0));
+    assert(!reverse_order.Trigger(7, 32767));
+    assert(reverse_order.RightStick(7, true)); // documented L2 hold followed by an R3 click
     pads.Focus(2);
     assert(!pads.Accept(1) && pads.Accept(2));
     pads.Release();

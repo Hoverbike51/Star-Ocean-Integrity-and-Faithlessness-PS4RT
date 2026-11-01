@@ -24,6 +24,8 @@ public:
     SceneTargets(const Instance&, Scheduler&, Runtime&, Lookup);
     ~SceneTargets();
     bool SetSize(SceneResolution::Size);
+    bool TrySetSize(SceneResolution::Size);
+    void Observe(VideoCore::ImageId);
     SceneResolution::Size Size() const { return size; }
     bool Reduced() const { return size != SceneResolution::Size{}; }
     /// A reduced proxy can stand in for the image: a 1920x1080 scene target or, scaled by
@@ -50,6 +52,7 @@ public:
     std::optional<Target> SampleProxy(const VideoCore::Image& image,
                                       const VideoCore::ImageViewInfo& info);
     /// Whether SampleProxy would return the proxy of `image` for these levels.
+    [[nodiscard]] bool RasterCurrent(const VideoCore::Image& image, u32 level = 0) const;
     [[nodiscard]] bool ProxyCurrent(const VideoCore::Image& image, u32 level = 0,
                                     u32 levels = 1) const;
     /// SampleProxy for a view obtained before (valid while Generation() is unchanged): the
@@ -99,6 +102,7 @@ private:
     SceneResolution::Size size;
     std::unordered_map<u64, std::unique_ptr<Entry>> entries; ///< by Key(uid, level)
     std::unordered_set<u64> tracked; ///< uids with proxies
+    std::unordered_map<u64,VideoCore::ImageId> observed;
     bool copying = false;
     bool force_stencil_bits = false; ///< test the portable resampler on any driver
     u64 generation = 0;

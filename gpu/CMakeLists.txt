@@ -2,6 +2,20 @@
 # drivers, adapted to the PS4RT runtime through shims in shim/.
 cmake_minimum_required(VERSION 3.24)
 project(ps4rtgpu LANGUAGES C CXX)
+if (NOT WIN32)
+    message(FATAL_ERROR "This source checkout targets native Windows 10/11 x64. Use MSYS2 CLANG64.")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" PS4RT_VERSION)
+string(STRIP "${PS4RT_VERSION}" PS4RT_VERSION)
+if (NOT PS4RT_VERSION MATCHES "^([0-9]+)[.]([0-9]+)[.]([0-9]+)$")
+    message(FATAL_ERROR "VERSION must contain major.minor.patch")
+endif()
+set(PS4RT_VERSION_MAJOR "${CMAKE_MATCH_1}")
+set(PS4RT_VERSION_MINOR "${CMAKE_MATCH_2}")
+set(PS4RT_VERSION_PATCH "${CMAKE_MATCH_3}")
+configure_file(../packaging/windows/version.h.in include/ps4rt_version.h @ONLY)
+include_directories("${CMAKE_CURRENT_BINARY_DIR}/include")
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -32,8 +46,8 @@ endif()
 
 # ps4rt: link-time optimization (PS4RT_LTO, default on) and profile-guided optimization
 # (PS4RT_PGO: off, generate = instrumented build writing into PS4RT_PGO_DIR, use = build with that
-# profile). Covers ps4rtgpu and the static libraries linked into it. No -march: the same build
-# runs on the Steam Deck.
+# profile). Covers ps4rtgpu and the static libraries linked into it. No -march: retain
+# compatibility across supported Windows x64 processors.
 option(PS4RT_LTO "Link-time optimization of ps4rtgpu" ON)
 set(PS4RT_PGO "off" CACHE STRING "Profile-guided optimization: off, generate, use")
 set(PS4RT_PGO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../pgo" CACHE PATH "Profile directory")
@@ -91,9 +105,6 @@ if (WIN32)
         list(FILTER SDL3_LINK_OPTIONS EXCLUDE REGEX "^-mwindows$")
         set_property(TARGET PkgConfig::SDL3 PROPERTY INTERFACE_LINK_OPTIONS "${SDL3_LINK_OPTIONS}")
     endif()
-endif()
-if (NOT WIN32)
-    pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
 endif()
 find_package(miniz QUIET)
 if (NOT miniz_FOUND)
@@ -178,14 +189,8 @@ set(COMMON
 file(GLOB AVPLAYER CONFIGURE_DEPENDS shadps4/core/libraries/avplayer/*.cpp)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale libswresample)
 file(GLOB SHIM_SOURCES CONFIGURE_DEPENDS shim/*.cpp shim/*/*.cpp)
-# Windows: a DLL cannot leave the runtime_* symbols for ps4rt-probe.exe to resolve, so the
-# library is static there and linked into the executable.
-if (WIN32)
-    set(PS4RTGPU_KIND STATIC)
-else()
-    set(PS4RTGPU_KIND SHARED)
-endif()
-add_library(ps4rtgpu ${PS4RTGPU_KIND} ${VIDEO_CORE} ${RECOMPILER} ${COMMON} ${SHIM_SOURCES}
+# Runtime symbols resolve inside the native executable through this static library.
+add_library(ps4rtgpu STATIC ${VIDEO_CORE} ${RECOMPILER} ${COMMON} ${SHIM_SOURCES} ../launcher/localization.cpp
     shadps4/core/libraries/gnmdriver/gnmdriver.cpp
     shadps4/core/libraries/videoout/driver.cpp shadps4/core/libraries/videoout/video_out.cpp
     shadps4/core/libraries/kernel/equeue.cpp shadps4/core/libraries/kernel/event_flag.cpp ${AVPLAYER}
@@ -204,10 +209,6 @@ set_source_files_properties(shim/ps4rt_overlay.cpp PROPERTIES
 target_include_directories(ps4rtgpu PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include third_party/half/include)
 target_compile_definitions(ps4rtgpu PRIVATE BOOST_ASIO_STANDALONE NDEBUG)
 target_compile_options(ps4rtgpu PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)
-# Runtime symbols (runtime_memory_*, runtime_process_*) resolve against ps4rt-probe.
-if (NOT WIN32)
-    target_link_options(ps4rtgpu PRIVATE -Wl,--allow-shlib-undefined)
-endif()
 target_link_libraries(ps4rtgpu PRIVATE ffx-vulkan::portable ffx-vulkan::fsr4-v07-vulkan)
 target_link_libraries(ps4rtgpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
     tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit)
@@ -220,8 +221,6 @@ if (WIN32)
     # global dynamic dispatcher stored in vk_common.cpp.
     target_compile_definitions(ps4rtgpu PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(ps4rtgpu PUBLIC Vulkan::Vulkan onecore ws2_32 bcrypt ntdll synchronization winmm pdh)
-else()
-    target_link_libraries(ps4rtgpu PUBLIC PkgConfig::X11)
 endif()
 
 # Native Windows loader. MSVC cannot compile the System V ABI guest entry points or the GNU
@@ -239,7 +238,7 @@ if (WIN32)
     add_executable(ps4rt ../src/loader.c ${PS4RT_RUNTIME} ../src/compat_win.c
         ../src/cpu_check.c ../src/isa_rewrite.c ../src/isa_emulate.c
         ../packaging/windows/ps4rt.rc)
-    set_target_properties(ps4rt PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF OUTPUT_NAME ps4rt)
+    set_target_properties(ps4rt PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF OUTPUT_NAME "Star Ocean 5")
     target_compile_definitions(ps4rt PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN PS4RT_RUNTIME)
     target_compile_options(ps4rt PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror>)
     set_source_files_properties(../src/isa_emulate.c PROPERTIES COMPILE_OPTIONS "-mgeneral-regs-only")
@@ -252,23 +251,80 @@ if (WIN32)
 
     # Native, dependency-light graphical launcher.  It deliberately remains a separate
     # executable so the runtime keeps its console diagnostics while normal users see no shell.
+    add_library(so5-update STATIC ../launcher/updater.cpp)
+    target_compile_definitions(so5-update PRIVATE UNICODE _UNICODE)
+    target_link_libraries(so5-update PUBLIC Boost::headers miniz::miniz winhttp bcrypt version ole32 shell32)
     add_executable(ps4rt-launcher WIN32 ../launcher/main.cpp ../launcher/native_preparer.cpp ../launcher/localization.cpp
         ../launcher/launcher.rc)
-    set_target_properties(ps4rt-launcher PROPERTIES OUTPUT_NAME "PS4RT-Launcher")
+    set_target_properties(ps4rt-launcher PROPERTIES OUTPUT_NAME "Star Ocean 5 Launcher")
     target_compile_definitions(ps4rt-launcher PRIVATE UNICODE _UNICODE)
-    target_link_libraries(ps4rt-launcher PRIVATE PkgConfig::SDL3 gdiplus ole32 shell32 comdlg32 shlwapi user32 gdi32 winhttp dwmapi)
+    target_link_libraries(ps4rt-launcher PRIVATE so5-update PkgConfig::SDL3 Vulkan::Vulkan gdiplus ole32 shell32 comdlg32 shlwapi user32 gdi32 winhttp dwmapi comctl32 uxtheme)
 
-    # Branded console-compatible front end for the bundled GPL-2.0 ShadPS4Plus
-    # extractor. The upstream binary and its private DLLs stay isolated below tools/.
-    add_executable(ps4rt-pkg-extractor ../launcher/pkg_extractor_wrapper.cpp ../launcher/pkg_extractor.rc)
-    set_target_properties(ps4rt-pkg-extractor PROPERTIES OUTPUT_NAME "PS4RT-PkgExtractor")
+    # Root player entry point: static CRT, Windows-only imports, same branded PE resources.
+    add_executable(so5-bootstrap WIN32 ../launcher/bootstrap.c ../launcher/launcher.rc)
+    set_target_properties(so5-bootstrap PROPERTIES OUTPUT_NAME "Star Ocean 5 Launcher"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bootstrap")
+    target_link_libraries(so5-bootstrap PRIVATE user32)
+    target_link_options(so5-bootstrap PRIVATE -municode -static)
+
+    # Standalone native installer: no CLR, Python, shell, or application DLLs are needed
+    # after the launcher exits. A temporary copy can replace the installed helper safely.
+    add_executable(so5-updater WIN32 ../launcher/updater_main.cpp ../launcher/updater.rc)
+    set_target_properties(so5-updater PROPERTIES OUTPUT_NAME "SO5-Updater")
+    target_compile_definitions(so5-updater PRIVATE UNICODE _UNICODE)
+    target_link_libraries(so5-updater PRIVATE so5-update)
+    target_link_options(so5-updater PRIVATE -static)
+
+    # Independent native package reader; no upstream extractor subprocess or CLR.
+    add_library(hmv-pkg STATIC ../launcher/pkg/archive.cpp)
+    target_include_directories(hmv-pkg PUBLIC ../launcher/pkg)
+    target_compile_definitions(hmv-pkg PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(hmv-pkg PUBLIC miniz::miniz bcrypt)
+    add_executable(ps4rt-pkg-extractor ../launcher/pkg/main.cpp ../launcher/pkg_extractor.rc)
+    set_target_properties(ps4rt-pkg-extractor PROPERTIES OUTPUT_NAME "PkgExtractor")
     target_compile_definitions(ps4rt-pkg-extractor PRIVATE UNICODE _UNICODE)
-    target_link_options(ps4rt-pkg-extractor PRIVATE -municode)
+    target_link_libraries(ps4rt-pkg-extractor PRIVATE hmv-pkg)
+    target_link_options(ps4rt-pkg-extractor PRIVATE -municode -static)
 endif()
 
 
 # Focused regressions for the shipped title's rendering and transition fixes.
 enable_testing()
+add_executable(upscaler-support-test EXCLUDE_FROM_ALL ../tests/test_upscaler_support.cpp)
+target_include_directories(upscaler-support-test PRIVATE shim)
+target_compile_options(upscaler-support-test PRIVATE -UNDEBUG)
+target_link_libraries(upscaler-support-test PRIVATE Vulkan::Vulkan)
+add_test(NAME upscaler-support COMMAND upscaler-support-test)
+add_executable(window-presentation-test EXCLUDE_FROM_ALL ../tests/test_window_presentation.cpp)
+target_include_directories(window-presentation-test PRIVATE shim)
+target_compile_options(window-presentation-test PRIVATE -UNDEBUG)
+target_link_libraries(window-presentation-test PRIVATE PkgConfig::SDL3)
+add_test(NAME window-presentation COMMAND window-presentation-test)
+set_tests_properties(window-presentation PROPERTIES SKIP_RETURN_CODE 77)
+if (WIN32)
+    add_executable(native-pkg-test EXCLUDE_FROM_ALL ../tests/test_native_pkg.cpp)
+    target_compile_options(native-pkg-test PRIVATE -UNDEBUG)
+    target_link_libraries(native-pkg-test PRIVATE hmv-pkg)
+    add_test(NAME native-pkg COMMAND native-pkg-test)
+    add_executable(savedata-backups-test EXCLUDE_FROM_ALL ../tests/test_savedata_backups.c ../src/compat_win.c)
+    target_include_directories(savedata-backups-test PRIVATE .. ../src)
+    target_compile_definitions(savedata-backups-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(savedata-backups-test PRIVATE -UNDEBUG)
+    target_link_libraries(savedata-backups-test PRIVATE bcrypt -pthread)
+    add_test(NAME savedata-backups COMMAND savedata-backups-test)
+    add_executable(save-backup-guard-test EXCLUDE_FROM_ALL ../tests/test_save_backup_guard.cpp)
+    target_compile_definitions(save-backup-guard-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(save-backup-guard-test PRIVATE -UNDEBUG)
+    target_link_libraries(save-backup-guard-test PRIVATE gdiplus -pthread)
+    add_test(NAME save-backup-guard COMMAND save-backup-guard-test)
+    add_executable(launcher-updater-test EXCLUDE_FROM_ALL ../tests/test_launcher_updater.cpp ../launcher/updater.rc)
+    target_include_directories(launcher-updater-test PRIVATE ../launcher)
+    target_compile_definitions(launcher-updater-test PRIVATE UNICODE _UNICODE)
+    target_compile_options(launcher-updater-test PRIVATE -UNDEBUG)
+    target_link_libraries(launcher-updater-test PRIVATE so5-update)
+    add_dependencies(launcher-updater-test so5-updater)
+    add_test(NAME launcher-updater COMMAND launcher-updater-test "${CMAKE_CURRENT_SOURCE_DIR}/../out")
+endif()
 add_executable(display-sample-gpu-test EXCLUDE_FROM_ALL ../tests/test_display_sample_gpu.cpp ../tests/test_gpu_runtime_stubs.cpp)
 target_include_directories(display-sample-gpu-test PRIVATE shim shadps4 third_party/gcn/include)
 target_compile_options(display-sample-gpu-test PRIVATE -UNDEBUG -fPIC)
@@ -311,6 +367,11 @@ add_executable(menu-input-test EXCLUDE_FROM_ALL ../tests/test_menu_input.cpp)
 target_include_directories(menu-input-test PRIVATE shim shadps4)
 target_compile_options(menu-input-test PRIVATE -UNDEBUG)
 add_test(NAME menu-input COMMAND menu-input-test)
+add_executable(pad-input-test EXCLUDE_FROM_ALL ../tests/test_pad_input.c)
+target_include_directories(pad-input-test PRIVATE .. ../src)
+target_compile_options(pad-input-test PRIVATE -UNDEBUG)
+target_link_libraries(pad-input-test PRIVATE PkgConfig::SDL3 -pthread)
+add_test(NAME pad-input COMMAND pad-input-test)
 add_executable(menu-sounds-test EXCLUDE_FROM_ALL ../tests/test_menu_sounds.cpp)
 target_include_directories(menu-sounds-test PRIVATE shim)
 target_link_libraries(menu-sounds-test PRIVATE PkgConfig::SDL3)
@@ -320,6 +381,38 @@ add_executable(graphics-settings-test EXCLUDE_FROM_ALL ../tests/test_graphics_se
 target_include_directories(graphics-settings-test PRIVATE shim)
 target_compile_options(graphics-settings-test PRIVATE -UNDEBUG)
 add_test(NAME graphics-settings COMMAND graphics-settings-test)
+add_executable(cockpit-test EXCLUDE_FROM_ALL ../tests/test_cockpit.cpp ../tests/test_gpu_runtime_stubs.cpp)
+target_include_directories(cockpit-test PRIVATE shim shadps4 third_party/imgui third_party/imgui/backends)
+target_compile_options(cockpit-test PRIVATE -UNDEBUG)
+target_compile_definitions(cockpit-test PRIVATE IMGUI_IMPL_VULKAN_NO_PROTOTYPES
+    PS4RT_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf")
+target_link_libraries(cockpit-test PRIVATE ps4rtgpu)
+foreach(language RANGE 0 11)
+    add_test(NAME cockpit-language-${language} COMMAND cockpit-test ${language})
+endforeach()
+
+# Developer-only AHSL cache validation. Neither target is part of the player build or package.
+add_executable(ahsl-cache-test EXCLUDE_FROM_ALL ../tests/test_ahsl_cache.cpp
+    ../tests/test_gpu_runtime_stubs.cpp)
+target_include_directories(ahsl-cache-test PRIVATE shim shadps4)
+target_compile_options(ahsl-cache-test PRIVATE -UNDEBUG)
+target_link_libraries(ahsl-cache-test PRIVATE ps4rtgpu)
+add_test(NAME ahsl-cache COMMAND ahsl-cache-test)
+
+add_executable(shader-capture-test EXCLUDE_FROM_ALL ../tests/test_shader_capture.cpp
+    shim/ps4rt_shader_capture.cpp)
+target_include_directories(shader-capture-test PRIVATE shim)
+target_compile_options(shader-capture-test PRIVATE -UNDEBUG)
+add_test(NAME shader-capture COMMAND shader-capture-test)
+
+add_executable(ps4rt-shader-capture-inspector EXCLUDE_FROM_ALL
+    ../tools/shader_capture_inspector.cpp shim/ps4rt_shader_capture.cpp)
+target_include_directories(ps4rt-shader-capture-inspector PRIVATE shim)
+
+add_executable(ps4rt-ahsl-inspector EXCLUDE_FROM_ALL ../tools/ahsl_cache_native.cpp
+    ../tests/test_gpu_runtime_stubs.cpp)
+target_include_directories(ps4rt-ahsl-inspector PRIVATE shim shadps4)
+target_link_libraries(ps4rt-ahsl-inspector PRIVATE ps4rtgpu)
 
 set_source_files_properties(../tests/test_display_sample_gpu.cpp PROPERTIES COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
 
@@ -333,4 +426,15 @@ set_source_files_properties(../tests/test_image_subresource.cpp PROPERTIES COMPI
 
 set_source_files_properties(../tests/test_gpu_workarounds.cpp PROPERTIES COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
 
-target_sources(cpu-image-writeback-test PRIVATE ../tests/test_cpu_image_writeback_fault.cpp)
+
+add_executable(scene-targets-gpu-test EXCLUDE_FROM_ALL ../tests/test_scene_targets_gpu.cpp ../tests/test_gpu_runtime_stubs.cpp)
+target_include_directories(scene-targets-gpu-test PRIVATE shim shadps4 third_party/gcn/include)
+target_compile_options(scene-targets-gpu-test PRIVATE -UNDEBUG -fPIC)
+target_link_libraries(scene-targets-gpu-test PRIVATE ps4rtgpu)
+add_test(NAME scene-targets-gpu COMMAND scene-targets-gpu-test)
+
+add_executable(log-console-test EXCLUDE_FROM_ALL ../tests/test_log_console.cpp)
+target_compile_definitions(log-console-test PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(log-console-test PRIVATE -UNDEBUG)
+target_link_libraries(log-console-test PRIVATE user32 gdi32 comctl32 uxtheme)
+add_test(NAME log-console COMMAND log-console-test)

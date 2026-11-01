@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare and start the native Linux or Windows PS4RT runtime.
+"""Developer reference preparer and launcher for the native Windows runtime.
 
 Future games require reverse engineering and source changes. Not a general PS4 emulator.
 """
@@ -21,7 +21,7 @@ TITLE_ID_PATTERN = re.compile(r'CUSA\d{5}\Z')
 
 def wait_for_process(pid: int) -> None:
     """Wait for an old Windows runtime to release its GPU device during an in-game restart."""
-    if os.name != 'nt' or pid <= 0:
+    if pid <= 0:
         return
     synchronize = 0x00100000
     handle = ctypes.windll.kernel32.OpenProcess(synchronize, False, pid)
@@ -39,22 +39,23 @@ def main(argv=None) -> int:
     parser.add_argument('--prepare-only', action='store_true')
     parser.add_argument('--upscaler', choices=('off', 'fsr3', 'fsr4'),
                         help='Override the saved graphics setting for this launch')
-    parser.add_argument('--output-resolution', choices=('1080', '1440', '4k'))
+    parser.add_argument('--output-resolution', choices=('480', '720', '1080', '1440', '4k'))
     parser.add_argument('--language', type=int, choices=range(0, 23), default=1,
                         help='PS4 system language code exposed to the game')
     parser.add_argument('--save-root', type=Path,
                         help='Optional savedata root; slots are stored under <root>/<user>/<title>')
     parser.add_argument('--after', type=int, default=0, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if os.name != 'nt':
+        parser.error('This source checkout supports Windows 10/11 x64 only.')
     wait_for_process(args.after)
     game = args.game.expanduser().resolve()
     title_id = str(load_sfo(game / 'sce_sys/param.sfo').get('TITLE_ID', ''))
     if not TITLE_ID_PATTERN.fullmatch(title_id):
         parser.error('Expected a PS4 game with CUSAxxxxx TITLE_ID in param.sfo')
-    runtime = ROOT / 'out' / ('ps4rt.exe' if os.name == 'nt' else 'ps4rt')
+    runtime = ROOT / 'out' / 'Star Ocean 5.exe'
     if not args.prepare_only and not runtime.is_file():
-        parser.error('Build the runtime first: ' +
-                     (r'.\build-windows.ps1' if os.name == 'nt' else 'bash build.sh'))
+        parser.error(r'Build the runtime first: .\build-windows.cmd')
     out = ROOT / 'out' / title_id
     prepare(game, out)
     link(game, out)
@@ -101,32 +102,27 @@ def main(argv=None) -> int:
         env['PS4RT_UPSCALER'] = args.upscaler
     if args.output_resolution is not None:
         env['PS4RT_OUTPUT_RES'] = {
-            '1080': '1920x1080', '1440': '2560x1440', '4k': '3840x2160'
+            '480': '854x480', '720': '1280x720', '1080': '1920x1080', '1440': '2560x1440', '4k': '3840x2160'
         }[args.output_resolution]
-    if os.name == 'nt':
-        # Source builds load their DLLs from MSYS2. Packaged builds keep the same DLLs beside
-        # ps4rt.exe, which Windows resolves before PATH, so this remains harmless there.
-        msys2_bin = Path(os.environ.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
-        if msys2_bin.is_dir():
-            env['PATH'] = str(msys2_bin) + os.pathsep + env.get('PATH', '')
+    # Developer builds use MSYS2 DLLs; player packages place DLLs beside the runtime.
+    msys2_bin = Path(os.environ.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
+    if msys2_bin.is_dir():
+        env['PATH'] = str(msys2_bin) + os.pathsep + env.get('PATH', '')
     print(f'PS4RT native-port template: {title_id}', flush=True)
     command = [str(runtime), str(out / 'boot-linked.bin'), '--app0', str(game),
                '--user', str(user_dir), '--content-profile', str(out / 'content.bin'),
                '--timeout', '0']
-    if os.name == 'nt':
-        restart = [sys.executable, str(Path(__file__).resolve()), '--game', str(game),
-                   '--after', str(os.getpid())]
-        if args.upscaler is not None:
-            restart.extend(('--upscaler', args.upscaler))
-        if args.output_resolution is not None:
-            restart.extend(('--output-resolution', args.output_resolution))
-        restart.extend(('--language', str(args.language)))
-        if args.save_root is not None:
-            restart.extend(('--save-root', str(args.save_root)))
-        env['PS4RT_RESTART_COMMAND'] = subprocess.list2cmdline(restart)
-        return subprocess.run(command, env=env, cwd=ROOT, check=False).returncode
-    os.execve(str(runtime), command, env)
-    return 0
+    restart = [sys.executable, str(Path(__file__).resolve()), '--game', str(game),
+               '--after', str(os.getpid())]
+    if args.upscaler is not None:
+        restart.extend(('--upscaler', args.upscaler))
+    if args.output_resolution is not None:
+        restart.extend(('--output-resolution', args.output_resolution))
+    restart.extend(('--language', str(args.language)))
+    if args.save_root is not None:
+        restart.extend(('--save-root', str(args.save_root)))
+    env['PS4RT_RESTART_COMMAND'] = subprocess.list2cmdline(restart)
+    return subprocess.run(command, env=env, cwd=ROOT, check=False).returncode
 
 
 if __name__ == '__main__':

@@ -1,3 +1,4 @@
+#include "ps4rt_title_screen.h"
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -13,6 +14,7 @@
 
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "ps4rt_overlay.h"
+#include "ps4rt_performance_probe.h"
 #include "ps4rt_settings.h"
 #include "ps4rt_graphics.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
@@ -155,15 +157,34 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     fsr_pass.Create(device, instance.GetAllocator(), num_images);
     pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
     Ps4RtOverlay::Init(instance, swapchain.GetSurfaceFormat().format, num_images);
+    Ps4RtPerformanceProbe::Start(instance, *rasterizer);
 
     const bool binary_cache = EmulatorSettingsImpl::Flag("PS4RT_PIPELINE_BINARIES", true) &&
                               EmulatorSettings.IsPipelineCacheEnabled();
     const bool capture_only = false;
     const char* background_warmup = std::getenv("PS4RT_BACKGROUND_WARMUP");
     const bool explicit_warmup = background_warmup && *background_warmup == '1';
+    const char* one_time_warmup = std::getenv("PS4RT_WARMUP_ONCE");
+    auto& pipeline_cache = rasterizer->GetPipelineCache();
+    if (one_time_warmup && *one_time_warmup == '1' && pipeline_cache.NeedsOneTimeWarmUp()) {
+        std::printf("Pipeline warm-up: preparing the known cache before gameplay\n");
+        Ps4RtOverlay::SetLoading(true, 0, 0);
+        PresentLoadingFrame();
+        auto last = std::chrono::steady_clock::now();
+        pipeline_cache.WarmUp([&](u32 done, u32 total) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last < std::chrono::milliseconds(250)) return;
+            last = now;
+            Ps4RtOverlay::SetLoading(true, done, total);
+            PresentLoadingFrame();
+        });
+        pipeline_cache.MarkOneTimeWarmUpComplete();
+        Ps4RtOverlay::SetLoading(false, 0, 0);
+        return;
+    }
     if (UseOnDemandPipelines(binary_cache, instance.GetPipelineBinaryGlobalKey().keySize != 0,
                             capture_only, explicit_warmup)) {
-        rasterizer->GetPipelineCache().StartOnDemand();
+        pipeline_cache.StartOnDemand();
         return;
     }
 
@@ -171,13 +192,13 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     // progress). Otherwise rebuilding them takes up to minutes before the first game frame:
     // show what is happening instead of a black window.
     if ((!background_warmup || *background_warmup != '0') &&
-        rasterizer->GetPipelineCache().StartBackgroundWarmUp()) {
+        pipeline_cache.StartBackgroundWarmUp()) {
         return;
     }
     Ps4RtOverlay::SetLoading(true, 0, 0);
     PresentLoadingFrame();
     auto last = std::chrono::steady_clock::now();
-    rasterizer->GetPipelineCache().WarmUp([&](u32 done, u32 total) {
+    pipeline_cache.WarmUp([&](u32 done, u32 total) {
         const auto now = std::chrono::steady_clock::now();
         if (now - last < std::chrono::milliseconds(250)) {
             return;
@@ -366,6 +387,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     }
 
     Frame* frame = GetRenderFrame();
+    frame->title_screen=Ps4RtTitle::ConsumeFrame();
 
 
     const auto frame_subresources = vk::ImageSubresourceRange{
@@ -493,7 +515,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     SubmitInfo info{};
     draw_scheduler.Flush(info);
 
-    // ps4rt: the GPU command thread runs at most PS4RT_FRAMES_AHEAD (default 1) guest frames
+    // ps4rt: the GPU command thread runs at most PS4RT_FRAMES_AHEAD (default 2) guest frames
     // ahead of the GPU: it waits here for the frame that many flips back. When the GPU is the
     // bottleneck it finishes frames at an even rate; without this bound the command thread ran
     // ahead and then blocked wherever a resource ran out, so flips (and the guest's frame
@@ -518,6 +540,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 Frame* Presenter::PrepareBlankFrame(bool present_thread) {
     // Request a free presentation frame.
     Frame* frame = GetRenderFrame();
+    frame->title_screen=Ps4RtTitle::ConsumeFrame();
 
     auto& scheduler = present_thread ? present_scheduler : draw_scheduler;
 
@@ -648,6 +671,9 @@ void Presenter::PresentLoadingFrame() {
 }
 
 void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame) {
+    const bool capture_performance = Ps4RtPerformanceProbe::Active() && !is_reusing_frame && is_game_frame;
+    const auto performance_start = capture_performance ? std::chrono::steady_clock::now()
+                                                       : std::chrono::steady_clock::time_point{};
     // Free the frame for reuse
     const auto free_frame = [&] {
         if (!is_reusing_frame) {
@@ -743,14 +769,18 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer,
                                vk::DependencyFlagBits::eByRegion, clear_done, {}, {});
         
+        const auto& graphics = Ps4RtSettings::Get();
+        const auto blit = Ps4RtGraphics::StretchWindow(graphics.display_mode, graphics.window_stretch)
+            ? MakeImageBlitStretch(frame->width, frame->height, extent.width, extent.height)
+            : MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height);
         cmdbuf.blitImage(frame->image, vk::ImageLayout::eTransferSrcOptimal, swapchain_image,
                          vk::ImageLayout::eTransferDstOptimal,
-                         MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height),
+                         blit,
                          vk::Filter::eLinear);
         
         
         // ps4rt: the settings menu / FPS counter over the frame, at display resolution.
-        const bool overlay = Ps4RtOverlay::Visible();
+        const bool overlay = Ps4RtOverlay::Visible() || frame->title_screen;
         const std::array post_barriers{
             vk::ImageMemoryBarrier{
                 .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
@@ -780,7 +810,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                vk::PipelineStageFlagBits::eAllCommands,
                                vk::DependencyFlagBits::eByRegion, {}, {}, post_barriers);
         if (overlay) {
-            Ps4RtOverlay::Render(cmdbuf, swapchain.ImageView(), extent);
+            Ps4RtOverlay::Render(cmdbuf, swapchain.ImageView(), extent, frame->title_screen);
             const vk::ImageMemoryBarrier to_present{
                 .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
                 .dstAccessMask = vk::AccessFlagBits::eNone,
@@ -821,6 +851,11 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     if (!is_reusing_frame && is_game_frame) {
         DebugState.IncFlipFrameNum();
     }
+    if (capture_performance) {
+        const auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - performance_start).count();
+        Ps4RtPerformanceProbe::RecordFrame(static_cast<std::uint64_t>(nanoseconds));
+    }
 }
 
 Frame* Presenter::GetRenderFrame() {
@@ -840,7 +875,15 @@ Frame* Presenter::GetRenderFrame() {
     vk::Result result{};
 
     const auto wait = [&]() {
+        const bool capture_performance = Ps4RtPerformanceProbe::Active();
+        const auto started = capture_performance ? std::chrono::steady_clock::now()
+                                                 : std::chrono::steady_clock::time_point{};
         result = device.waitForFences(frame->present_done, false, std::numeric_limits<u64>::max());
+        if (capture_performance) {
+            const auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - started).count();
+            Ps4RtPerformanceProbe::AddPresentWait(static_cast<std::uint64_t>(nanoseconds));
+        }
         return result;
     };
 
@@ -866,8 +909,9 @@ void Presenter::SetExpectedGameSize(s32 width, s32 height) {
     const auto& graphics = Ps4RtSettings::Get();
     if (graphics.CompactGraphicsMenu()) {
         const int output = std::clamp(graphics.output_res.load(),0,Ps4RtSettings::OutputCount-1);
-        expected_frame_width = Ps4RtSettings::OutputWidths[output];
-        expected_frame_height = Ps4RtSettings::OutputHeights[output];
+        const auto content=Ps4RtOutput::Content(output);
+        expected_frame_width = content.width;
+        expected_frame_height = content.height;
         return;
     }
     if (width <= 0 || height <= 0) {

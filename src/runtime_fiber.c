@@ -1,7 +1,7 @@
 /* SPDX-FileCopyrightText: Copyright 2024-2025 shadPS4 Emulator Project
  * SPDX-License-Identifier: GPL-2.0-or-later
  * PS4 fiber contracts adapted from the pinned shadPS4 fiber implementation.
- * Linux SysV context switching uses the caller's guest stack. Explicit-stack
+ * System V guest context switching uses the caller's guest stack on Windows. Explicit-stack
  * fibers suspend/resume; stackless fibers restart their entry after yielding.
  * No host scheduler or signal-mask changes. TLS belongs to the running thread.
  */
@@ -56,13 +56,8 @@ void ABI runtime_fiber_returned(void) {
 }
 /* Save only SysV callee-preserved registers and FP control. XMM registers are
  * caller-saved. Separate assembly avoids moving RSP inside a C stack frame. */
-#ifdef _WIN32
 #define PS4RT_ASM_TYPE(name)
 #define PS4RT_ASM_SIZE(name)
-#else
-#define PS4RT_ASM_TYPE(name) ".type " #name ",@function\n"
-#define PS4RT_ASM_SIZE(name) ".size " #name ",.-" #name "\n"
-#endif
 __asm__(".text\n"
         PS4RT_ASM_TYPE(runtime_fiber_save)
         ".globl runtime_fiber_save\nruntime_fiber_save:\n"

@@ -37,6 +37,8 @@ int ps4rtgpu_choice_poll(void);
 int ps4rtgpu_overlay_captures_input(void);
 /* Controller vibration strength set in the menu, 0 (off) to 100 (the game's own). */
 int ps4rtgpu_vibration_percent(void);
+/* Flushes an active gameplay performance capture to its CSV and JSON reports. Safe when idle. */
+void ps4rtgpu_performance_finish(void);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned ps4rtgpu_symbol_count(void);
 #ifdef __cplusplus

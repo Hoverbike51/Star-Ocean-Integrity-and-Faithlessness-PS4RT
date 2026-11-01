@@ -3,6 +3,7 @@
 
 #include <filesystem>
 #include <xxhash.h>
+#include "ps4rt_title_screen.h"
 #include "video_core/amdgpu/liverpool.h"
 
 #include "ps4rt_toggles.h"
@@ -1322,6 +1323,11 @@ void TextureCache::RefreshImage(Image& image) {
         }
         image.hash = hash;
     }
+
+    const auto& title_info=image.info;
+    image.title_screen_atlas=False(image.flags & ImageFlagBits::GpuModified) &&
+        Ps4RtTitle::Atlas(title_info.size.width,title_info.size.height,u32(title_info.pixel_format),
+            u32(title_info.tile_mode),title_info.pitch,reinterpret_cast<const void*>(title_info.guest_address),title_info.guest_size);
 
     const u32 num_layers = image.info.resources.layers;
     const u32 num_mips = image.info.resources.levels;

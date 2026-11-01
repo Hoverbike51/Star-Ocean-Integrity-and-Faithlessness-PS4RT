@@ -4,6 +4,7 @@
 
 #include <bit>
 #include <xxhash.h>
+#include "ps4rt_title_screen.h"
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "video_core/renderer_vulkan/ps4rt_camera.h"
 #include "ps4rt_toggles.h"
@@ -421,14 +422,10 @@ bool Rasterizer::UseDrawPipe() const {
 }
 
 bool Rasterizer::OnStageA() const {
-#ifdef _WIN32
     // ps4rt (Windows): libc++ compares std::thread::id through winpthreads' pthread_equal,
     // which asks the kernel (GetThreadId) for both threads: two system calls per check, many
     // per draw. The numeric thread id comes from the TEB.
     return static_cast<u32>(gettid()) == liverpool->GetGpuCommandProcessorThreadId();
-#else
-    return std::this_thread::get_id() == liverpool->GetGpuCommandProcessorThread();
-#endif
 }
 
 namespace {
@@ -717,9 +714,14 @@ bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 to
 
 void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     auto& self = *static_cast<Rasterizer*>(context);
+    const bool profile = self.draw_pipe && self.draw_pipe->TelemetryEnabled();
+    u64 phase_started = profile ? __rdtsc() : 0;
     if (*reinterpret_cast<const PacketKind*>(data) == PacketKind::Task) {
         const auto& task = *reinterpret_cast<const TaskPacket*>(data);
         task.task(self, data + sizeof(TaskPacket));
+        if (profile) {
+            self.draw_pipe->RecordPhase(DrawPipe::PhaseOrderedTask, __rdtsc() - phase_started);
+        }
         return;
     }
     const auto& packet = *reinterpret_cast<const DrawPacket*>(data);
@@ -817,6 +819,10 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
         }
     }
     ASSERT(static_cast<u32>(in - data) == size);
+    if (profile) {
+        self.draw_pipe->RecordPhase(DrawPipe::PhasePacketDecode, __rdtsc() - phase_started);
+        phase_started = __rdtsc();
+    }
     stage_regs = &regs;
     self.pipe_cb_extent = packet.cb_extent;
     self.pipe_db_extent = packet.db_extent;
@@ -825,6 +831,9 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
         ;
         self.scheduler.PopPendingOperations();
         self.FilterDraw();
+        if (profile) {
+            self.draw_pipe->RecordPhase(DrawPipe::PhaseSpecialDraw, __rdtsc() - phase_started);
+        }
     } else if (cs) {
         stage_cs = cs;
         const auto* pipeline = static_cast<const ComputePipeline*>(packet.pipeline);
@@ -834,12 +843,21 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
             self.DispatchRecord(pipeline);
         }
         stage_cs = nullptr;
+        if (profile) {
+            self.draw_pipe->RecordPhase(DrawPipe::PhaseDispatch, __rdtsc() - phase_started);
+        }
     } else if (indirect) {
         self.DrawIndirectRecord(static_cast<const GraphicsPipeline*>(packet.pipeline),
                                 packet.is_indexed, *indirect);
+        if (profile) {
+            self.draw_pipe->RecordPhase(DrawPipe::PhaseIndirectDraw, __rdtsc() - phase_started);
+        }
     } else {
         self.DrawRecord(static_cast<const GraphicsPipeline*>(packet.pipeline), packet.prepared,
                         packet.is_indexed, packet.index_offset);
+        if (profile) {
+            self.draw_pipe->RecordPhase(DrawPipe::PhaseDirectDraw, __rdtsc() - phase_started);
+        }
     }
     Shader::Info::num_ud_snapshots = 0;
     self.num_ring_stages = 0;
@@ -913,6 +931,8 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
 
 void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
                             bool is_indexed, u32 index_offset) {
+    const bool profile = draw_pipe && draw_pipe->TelemetryEnabled();
+    u64 phase_started = profile ? __rdtsc() : 0;
     if (DrawPipe::OnStageB()) {
         ;
         scheduler.PopPendingOperations();
@@ -959,6 +979,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     motion_geometry = 0;
 
     PrepareRenderState(pipeline);
+    if (profile) {
+        draw_pipe->RecordPhase(DrawPipe::PhaseRenderState, __rdtsc() - phase_started);
+        phase_started = __rdtsc();
+    }
     ;
     if (upscaler->Enabled() && std::popcount(pipeline->GetGraphicsKey().mrt_mask) == 1) {
         const auto& viewport = Regs().viewports[0];
@@ -973,11 +997,23 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // commands are recorded after BeginRendering, as before).
     draw_inputs = {pipeline, draw_prepared, index_offset, is_indexed, true, false};
     const bool bound = BindResources(pipeline);
+    if (profile) {
+        draw_pipe->RecordPhase(DrawPipe::PhaseBindResources, __rdtsc() - phase_started);
+        phase_started = __rdtsc();
+    }
     bind_prepared = nullptr; // indirect draws and dispatches bind without prepared sharps
     const bool inputs_resolved = draw_inputs.resolved;
     draw_inputs.pending = false;
     if (!bound) {
         return;
+    }
+    if(Ps4RtTitle::UiShader(pipeline->GetStages()[u32(Shader::SwStage::Fragment)])) {
+        for(const auto id:bound_images) {
+            const auto& image=texture_cache.GetImage(id);
+            if(image.title_screen_atlas && False(image.flags & VideoCore::ImageFlagBits::GpuModified)) {
+                Ps4RtTitle::MarkDraw();break;
+            }
+        }
     }
     const auto state = BeginRendering(pipeline);
     
@@ -995,6 +1031,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
 
     if (needs_barrier) {
         runtime.FlushBarriers();
+    }
+    if (profile) {
+        draw_pipe->RecordPhase(DrawPipe::PhaseRenderSetup, __rdtsc() - phase_started);
+        phase_started = __rdtsc();
     }
 
     // ps4rt: screen-space (clip disabled) draws into the upscaler's output-size images.
@@ -1128,6 +1168,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
 
     ResetBindings(false);
     scheduler.KickRecording();
+    if (profile) {
+        draw_pipe->RecordPhase(DrawPipe::PhaseDrawEmit, __rdtsc() - phase_started);
+    }
 }
 
 void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u32 stride,
@@ -1431,12 +1474,10 @@ const PreparedStage* Rasterizer::FindPreparedStage(const Shader::Info& stage) co
 }
 
 bool Rasterizer::BindHelperWanted() {
-    // A spinning helper pays off only with cores to spare (the recording thread spins too).
-    const char* env = std::getenv("PS4RT_TEXTURE_HELPER");
-    if (env && env[0]) {
-        return env[0] == '1';
-    }
-    // Measured neutral on 16 threads (docs/parallel_gpu.md): opt-in.
+    // Quarantined after the Windows CUSA03219 capture: severe slowdown and rendering
+    // corruption. The helper does not install the draw's thread-local register/UD snapshots.
+    // Keep resource binding on its owning thread, including when an old environment override
+    // is present. Re-enable only after ownership and snapshot propagation are validated.
     return false;
 }
 
@@ -1562,6 +1603,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     
 
     // Bind resource buffers and textures.
+    const bool profile = draw_pipe && draw_pipe->TelemetryEnabled();
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(Regs());
     if (!HelperEligible(pipeline)) {
@@ -1574,8 +1616,16 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
                               stage->samplers.size());
             stage->PushUd(binding, push_data);
             const PreparedStage* prepared = FindPreparedStage(*stage);
+            const u64 buffer_started = profile ? __rdtsc() : 0;
             BindBuffers(*stage, prepared, binding, push_data, set_write_index);
+            if (profile) {
+                draw_pipe->RecordPhase(DrawPipe::PhaseBindBuffers, __rdtsc() - buffer_started);
+            }
+            const u64 texture_started = profile ? __rdtsc() : 0;
             BindTextures(*stage, prepared, binding, set_write_index, needs_barrier);
+            if (profile) {
+                draw_pipe->RecordPhase(DrawPipe::PhaseBindTextures, __rdtsc() - texture_started);
+            }
             uses_dma |= stage->uses_dma;
         }
     } else {
@@ -2290,7 +2340,18 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             }
         }
         const auto debug_native = [&](const VideoCore::Image& image) {
-            
+            // Never format or write a line for each texture in normal gameplay. In particular,
+            // stdout is a synchronous Windows pipe to the launcher, so logging here can stall
+            // DrawRec behind console parsing/painting. Explicit research traces are bounded.
+            static const bool enabled = [] {
+                const char* value = std::getenv("PS4RT_TRACE_TEXTURE_BINDINGS");
+                return value && value[0] == '1';
+            }();
+            static u32 reports = 0;
+            if (!enabled || reports >= 64) {
+                return;
+            }
+            ++reports;
             std::printf("Scene native read: %s %016llx %s %ux%u needs_native %d written %d "
                         "bindings %u mip_fallback %d\n",
                         stage.sw_stage == Shader::SwStage::Compute ? "cs" : "gfx",
@@ -2539,6 +2600,7 @@ Rasterizer::BeginSignature Rasterizer::MakeBeginSignature(const GraphicsPipeline
     sig.scene_started = scene_started;
     sig.raster_scaling = upscaler->RasterScaling();
     sig.upscaler_state = upscaler->RedirectState();
+    sig.scene_generation=scene_targets->Generation();
     sig.generation = texture_cache.RegistryGeneration();
     std::memcpy(&sig.depth_control, &regs.depth_control, sizeof(u32));
     sig.depth_valid = regs.depth_buffer.DepthValid();
@@ -2696,6 +2758,8 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     std::pair<vk::ImageView, vk::ImageLayout> original_color{};
     const auto& regs = Regs();
     const auto& key = pipeline->GetGraphicsKey();
+    for(const auto& [id,desc]:cb_descs) if(id) scene_targets->Observe(id);
+    if(db_desc.first) scene_targets->Observe(db_desc.first);
     if (std::popcount(key.mrt_mask & 0x7f) >= 5 && db_desc.first &&
         scene_targets->EligibleScene(texture_cache.GetImage(db_desc.first))) scene_started = true;
     // A proxy attachment cannot represent MSAA or a feedback loop that reads the
@@ -3527,11 +3591,9 @@ std::thread::id Rasterizer::GetGpuCommandProcessorThread() {
     return liverpool->GetGpuCommandProcessorThread();
 }
 
-#if defined(__linux__) || defined(_WIN32)
 u32 Rasterizer::GetGpuCommandProcessorThreadId() {
     return liverpool->GetGpuCommandProcessorThreadId();
 }
-#endif
 
 } // namespace Vulkan
 

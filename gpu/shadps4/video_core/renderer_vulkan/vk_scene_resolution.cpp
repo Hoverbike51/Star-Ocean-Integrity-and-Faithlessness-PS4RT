@@ -112,6 +112,43 @@ bool SceneTargets::SetSize(SceneResolution::Size next) {
                 "(live)\n", size.width, size.height, size.width / 2, size.height / 2);
     return true;
 }
+
+void SceneTargets::Observe(VideoCore::ImageId id) {
+    const auto* image=lookup(id,0);
+    if(image && Eligible(*image) && observed.size()<256) observed.try_emplace(image->image_uid,id);
+}
+
+bool SceneTargets::TrySetSize(SceneResolution::Size next) {
+    if(next==size) return true;
+    if(next.width<2 || next.height<2 || next.width>instance.GetMaxFramebufferWidth() || next.height>instance.GetMaxFramebufferHeight()) return false;
+    ResolveAll();scheduler.Finish();
+    decltype(entries) prepared;
+    std::unordered_set<u64> next_tracked;
+    if(next!=SceneResolution::Size{}) for(auto it=observed.begin();it!=observed.end();) {
+        auto* original=lookup(it->second,it->first);
+        if(!original) {it=observed.erase(it);continue;}
+        if(!Eligible(*original)) {++it;continue;}
+        const u32 divisor=SizeDivisor(original->info,next);
+        if(!divisor) {++it;continue;}
+        for(u32 level=0;level<original->info.resources.levels;++level) {
+            auto entry=std::make_unique<Entry>();
+            entry->source=it->second;entry->uid=it->first;entry->level=level;
+            entry->image=VideoCore::UniqueImage(instance.GetDevice(),instance.GetAllocator());
+            auto ci=original->backing->image.image_ci;ci.pNext=nullptr;ci.mipLevels=1;
+            ci.extent=vk::Extent3D{std::max(1u,(next.width/divisor)>>level),std::max(1u,(next.height/divisor)>>level),1};
+            const auto result=entry->image.TryCreate(ci);
+            if(result!=vk::Result::eSuccess) {
+                std::printf("Scene preset: allocation refused (%s); previous targets retained\n",vk::to_string(result).c_str());
+                return false;
+            }
+            prepared.emplace(Key(it->first,level),std::move(entry));
+        }
+        next_tracked.insert(it->first);++it;
+    }
+    entries.swap(prepared);tracked.swap(next_tracked);recent={};recent_next=0;size=next;++generation;
+    std::printf("Scene preset: real raster targets %ux%u; previous submissions complete, generation %llu\n",size.width,size.height,(unsigned long long)generation);
+    return true;
+}
 void SceneTargets::ResolveAll() {
     for (auto& [key, entry] : entries) {
         if (entry->state.dirty) {
@@ -448,12 +485,15 @@ SceneTargets::Target SceneTargets::Attachment(VideoCore::ImageId id,
     attachment_info.is_storage = true; // include stencil in attachment views
     return {e.image, View(e, original, attachment_info), e.layout, e.image.image_ci.usage};
 }
+bool SceneTargets::RasterCurrent(const VideoCore::Image& image,u32 level) const {
+    if(copying || !image.scene_proxy) return false;
+    const auto it=entries.find(Key(image.image_uid,level));
+    return it!=entries.end() && it->second->state.valid;
+}
 bool SceneTargets::ProxyCurrent(const VideoCore::Image& image, u32 level, u32 levels) const {
-    if (copying || !image.scene_proxy || image.info.props.is_depth || levels != 1) {
-        return false;
-    }
-    const auto it = entries.find(Key(image.image_uid, level));
-    return it != entries.end() && it->second->state.valid;
+    // Generic texture memoization deliberately excludes depth; the upscaler
+    // validates depth separately with RasterCurrent and a depth-only view.
+    return !image.info.props.is_depth && levels==1 && RasterCurrent(image,level);
 }
 vk::ImageLayout SceneTargets::PrepareSample(const VideoCore::Image& image, u32 level) {
     auto& e = *entries.find(Key(image.image_uid, level))->second;

@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include "ps4rt_output.h"
 
 namespace Ps4RtSettings {
 
@@ -21,9 +22,9 @@ enum Preset : int { NativeAA = 0, Quality, Balanced, Performance, UltraPerforman
 enum DebugView : int { DebugNone = 0, DebugReactive = 1, DebugMotion = 2, DebugViewCount };
 
 /// Live output resolutions: the upscaler's output and the UI host targets.
-inline constexpr int OutputWidths[] = {1280, 1920, 2560, 3840};
-inline constexpr int OutputHeights[] = {720, 1080, 1440, 2160};
-inline constexpr int OutputCount = 4;
+inline constexpr auto& OutputWidths = Ps4RtOutput::Widths;
+inline constexpr auto& OutputHeights = Ps4RtOutput::Heights;
+inline constexpr int OutputCount = Ps4RtOutput::Count;
 inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
 
 struct Values {
@@ -33,6 +34,9 @@ struct Values {
     std::atomic<bool> spatial_aa{false}; ///< Final game image AA before spatial upscaling.
     std::atomic<int> upscaler{UpscalerFsr3};
     std::atomic<int> preset{NativeAA};
+    // -1 preserves the validated fixed 1080p scene for existing installations.
+    std::atomic<int> scene_preset{-1},scene_preset_applied{-1};
+    std::atomic<bool> scene_preset_failed{false};
     std::atomic<bool> sharpen{true};
     std::atomic<float> sharpness{0.3f};
     std::atomic<bool> jitter{true};
@@ -51,6 +55,7 @@ struct Values {
     std::atomic<int> menu_tab{0};
     // Graphics (ps4rt_graphics.h). Live: applied on the next frame.
     std::atomic<int> display_mode{0};
+    std::atomic<bool> window_stretch{false};
     std::atomic<bool> vsync{true};
     std::atomic<int> fps_limit{0};
     // Prefer the visually correct path for a fresh Star Ocean user config.
@@ -64,10 +69,11 @@ struct Values {
     std::atomic<bool> rcas_applied{false};
     /// Set by the presenter: the game's image and the window it is shown in, in pixels.
     std::atomic<int> image_width{0}, image_height{0}, window_width{0}, window_height{0};
-    std::atomic<int> frames_queued{1};
+    // Two queued frames smooth GPU-bound delivery at the cost of one extra frame of latency.
+    std::atomic<int> frames_queued{2};
     /// Controller vibration strength in percent; 0 turns it off (runtime_pad.c). Live.
     std::atomic<int> vibration{100};
-    // Startup: run.py turns them into patches and environment variables; "Apply and restart".
+    // Startup-only compatibility settings shared with the developer preparation helper.
     std::atomic<int> render_resolution{0};
     std::atomic<int> engine_fps{120};
     std::atomic<bool> deferred_readback{true};
@@ -75,12 +81,11 @@ struct Values {
     /// Ps4RtGraphics::Anisotropies; the samplers read startup_anisotropy.
     std::atomic<int> anisotropy{0};
     int startup_anisotropy = 0;
-    /// Set before an "Apply and restart"; cleared once the new launch shows the game. run.py
-    /// restores the previous startup options when a launch never cleared it.
+    /// Developer restart handshake: cleared once the new launch displays the game.
+    /// The preparation helper can restore startup options after an unconfirmed restart.
     std::atomic<bool> restart_unconfirmed{false};
     int startup_render_resolution = 0, startup_engine_fps = 120;
-    /// The engine rate this launch really runs at (run.py's PS4RT_ENGINE_FPS): 60 when the frame
-    /// rate patch does not apply to this game build.
+    /// Engine rate reported by PS4RT_ENGINE_FPS; distinct from presentation frame limiting.
     std::atomic<int> applied_engine_fps{120};
     bool startup_deferred_readback = true, startup_stale_readback = true;
     // FSR 4 checks (menu): the provider's auto exposure, the jitter sign it is given.
@@ -88,14 +93,18 @@ struct Values {
     std::atomic<bool> fsr4_invert_jitter{false};
     std::atomic<int> active_render_width{1920}, active_render_height{1080};
     std::atomic<int> output_res{OutputDefault}; ///< index into OutputWidths
-    /// Live resolution and preset changes (run.sh): 0 off by default (startup patch, fastest
-    /// on the Steam Deck and older GPUs), -1 auto (strong discrete GPUs), 1 on. On restart.
+    std::atomic<int> display_max_width{3840}, display_max_height{2160};
+    std::atomic<std::uint64_t> display_window_modes{(1ull<<OutputCount)-1}, display_fullscreen_modes{(1ull<<OutputCount)-1};
+    std::atomic<int> output_aspect{Ps4RtOutput::All};
+    /// Startup selection for the legacy scene-target path: 0 off, -1 auto, 1 on.
+    /// The Cockpit preset path has separate validation and rollback.
     std::atomic<int> live_resolution{0};
     /// Why FSR 4 cannot run (assets, device features), or null. Set by the renderer.
     std::atomic<const char*> fsr4_problem{nullptr};
     /// Scene integration status, separate from provider/device support.
     std::atomic<const char*> temporal_problem{nullptr};
     std::atomic<bool> fsr4_supported{false}, fsr411_supported{false};
+    std::atomic<bool> fsr3_configured{false},fsr3_available{true};
     /// DLSS (ps4rt_dlss.dll, NVIDIA RTX) is ready, or why not (null before the device exists).
     std::atomic<bool> dlss_supported{false};
     std::atomic<const char*> dlss_problem{nullptr};
@@ -118,7 +127,7 @@ void SetSceneUpscaler(int selected, bool object_motion);
 void ConfigureUpscalerSupport(bool fsr4, bool fsr411);
 /// After device creation: DLSS availability; a DLSS setting falls back to FSR 3.1 without it.
 void ConfigureDlssSupport(bool available, const char* problem);
-/// Startup-patched scene dimensions cannot change until run.sh prepares a new image.
+/// Startup-patched scene dimensions require a newly prepared image.
 bool FixedRenderSession();
 int RenderPreset();
 bool ResolutionNeedsRestart();

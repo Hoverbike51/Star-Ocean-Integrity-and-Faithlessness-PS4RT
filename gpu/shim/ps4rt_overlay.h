@@ -27,6 +27,8 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count);
 bool HandleEvent(const SDL_Event& event);
 /// Turns SDL text input on while the menu edits a value (window thread, once per poll).
 void UpdateTextInput(SDL_Window* window);
+/// Window-thread cursor visibility and position recovery after display changes.
+void UpdateCursor(SDL_Window* window);
 
 /// Start-up loading screen (pipeline cache warm-up): `total` 0 shows no count.
 void SetLoading(bool active, u32 done, u32 total);
@@ -40,7 +42,7 @@ bool Visible();
 void ShowNotice(const std::string& text, int milliseconds = 3000);
 
 /// Present thread: draws into `view` (layout ColorAttachmentOptimal).
-void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent);
+void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent, bool title_screen = false);
 
 /// The menu is open or a text entry is shown: the game's input is held neutral.
 bool CapturesInput();

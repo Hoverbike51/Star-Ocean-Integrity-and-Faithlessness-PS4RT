@@ -1,49 +1,85 @@
 #!/usr/bin/env bash
-# Create a redistributable Windows tree and ZIP. Run in MSYS2 CLANG64 after build.sh.
+# Create a redistributable Windows player folder and, unless requested otherwise, its ZIP.
+# Run in MSYS2 CLANG64 after build.sh.
 set -euo pipefail
 cd -- "$(dirname -- "$0")/../.."
 source ./msys2-env.sh
-[[ -f out/ps4rt.exe ]] || { echo 'Build first: bash build.sh' >&2; exit 1; }
-[[ -f out/PS4RT-Launcher.exe ]] || { echo 'Build the Windows launcher first: bash build.sh' >&2; exit 1; }
-[[ -f out/PS4RT-PkgExtractor.exe ]] || { echo 'Build the branded PKG extractor first: bash build.sh' >&2; exit 1; }
+
+folder_only=false
+case "${1:-}" in
+--folder-only) folder_only=true ;;
+"") ;;
+*) echo "Usage: $0 [--folder-only]" >&2; exit 2 ;;
+esac
+[[ -f 'out/Star Ocean 5.exe' ]] || { echo 'Build first: bash build.sh' >&2; exit 1; }
+[[ -f 'out/Star Ocean 5 Launcher.exe' ]] || { echo 'Build the Windows launcher first: bash build.sh' >&2; exit 1; }
+[[ -f out/PkgExtractor.exe ]] || { echo 'Build the branded PKG extractor first: bash build.sh' >&2; exit 1; }
+[[ -f 'out/bootstrap/Star Ocean 5 Launcher.exe' ]] || { echo 'Build the native bootstrap first: bash build.sh' >&2; exit 1; }
+[[ -f out/SO5-Updater.exe ]] || { echo 'Build the native updater first: bash build.sh' >&2; exit 1; }
 
 version=$(tr -d '\r\n' < VERSION)
-stage="out/stage/ps4rt-star-ocean-5-windows-x64-v${version}"
-rm -rf -- out/stage
-mkdir -p "$stage/out" "$stage/gpu/assets" "$stage/docs" "$stage/launcher/assets" "$stage/tools"
-llvm-strip --strip-debug -o "$stage/ps4rt.exe" out/ps4rt.exe
-llvm-strip --strip-debug -o "$stage/PS4RT-Launcher.exe" out/PS4RT-Launcher.exe
-llvm-strip --strip-debug -o "$stage/PS4RT-PkgExtractor.exe" out/PS4RT-PkgExtractor.exe
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid package VERSION.' >&2; exit 1; }
+name="ps4rt-star-ocean-5-windows-x64-v${version}-latest"
+stage="dist/${name}"
+mkdir -p dist
+[[ "$(realpath -m -- "$stage")" == "$PWD/dist/$name" && ! -L dist && ! -L "$stage" ]] || {
+    echo 'Refusing an unexpected or linked package staging directory.' >&2; exit 1;
+}
+if [[ -d "$stage" ]] && find "$stage" -type l -print -quit | grep -q .; then
+    echo 'Refusing to replace a staging directory containing links.' >&2; exit 1;
+fi
+# A previously played player folder must never lose its settings, saves or caches.
+if [[ -d "$stage/out" ]] && find "$stage/out" -type f -print -quit | grep -q .; then
+    echo 'Player data exists in the old output folder. Move that folder before packaging.' >&2; exit 1;
+fi
+rm -rf -- "$stage"
+mkdir -p "$stage/out" "$stage/gpu/assets" "$stage/docs" "$stage/launcher/assets" "$stage/bin"
+llvm-strip --strip-debug -o "$stage/bin/Star Ocean 5.exe" 'out/Star Ocean 5.exe'
+llvm-strip --strip-debug -o "$stage/bin/Star Ocean 5 Launcher.exe" 'out/Star Ocean 5 Launcher.exe'
+llvm-strip --strip-debug -o "$stage/bin/PkgExtractor.exe" out/PkgExtractor.exe
+llvm-strip --strip-debug -o "$stage/bin/SO5-Updater.exe" out/SO5-Updater.exe
+
+llvm-strip --strip-debug -o "$stage/Star Ocean 5 Launcher.exe" 'out/bootstrap/Star Ocean 5 Launcher.exe'
 
 # Copy every non-system DLL resolved from the CLANG64 tree. The packaged executable therefore
 # starts from a normal Windows session without an MSYS2 PATH.
-(ldd "$stage/ps4rt.exe"; ldd "$stage/PS4RT-Launcher.exe"; ldd "$stage/PS4RT-PkgExtractor.exe") |
+(ldd "$stage/bin/Star Ocean 5.exe"; ldd "$stage/bin/Star Ocean 5 Launcher.exe"; ldd "$stage/bin/PkgExtractor.exe") |
 awk '/\/clang64\/bin\// {print $3}' | sort -u |
 while IFS= read -r dll; do
-    [[ -n $dll ]] && cp -u "$dll" "$stage/"
+    [[ -n $dll ]] && cp -u "$dll" "$stage/bin/"
 done
 
 cp -r gpu/assets/. "$stage/gpu/assets/"
 cp -r fsr4_shaders "$stage/"
 cp -r launcher/assets/. "$stage/launcher/assets/"
-cp -r tools/pkg-extractor "$stage/tools/"
-cp LICENSE README.md "$stage/"
+cp LICENSE README.md CHANGELOG.md VERSION "$stage/"
 cp packaging/windows/README-Windows.txt "$stage/"
-cp docs/UPSTREAM_CREDITS.md "$stage/docs/"
+cp docs/UPSTREAM_CREDITS.md docs/MINIZ_LICENSE.txt docs/LIBCXX_LICENSE.txt "$stage/docs/"
+cp docs/LAUNCHER_GUIDE.md docs/IN_GAME_MENU_GUIDE.md "$stage/docs/"
+mkdir -p "$stage/docs/images/readme"
+cp -r docs/images/readme/launcher docs/images/readme/custom_menu "$stage/docs/images/readme/"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$PWD/packaging/windows/copy-notices.ps1")" \
+    -Destination "$(cygpath -w "$PWD/$stage")" -Msys2Root "$(cygpath -w "${MSYS2_ROOT:-/c/msys64}")"
 find "$stage" -name __pycache__ -prune -exec rm -rf {} +
 
-# Game binaries, saves and generated shader caches are private and must never enter a release.
+# Game data, settings, captures and developer tracing tools must never enter a player release.
 forbidden=$(find "$stage" \( -iname eboot.bin -o -iname sce_module -o -iname sce_sys \
     -o -iname savedata -o -iname user -o -iname cache -o -iname '*.log' -o -iname '*.pkg' \
-    -o -iname '*.sprx' -o -iname '*.prx' \) -print)
+    -o -iname '*.sprx' -o -iname '*.prx' -o -iname '*.etl' -o -iname '*.wpaprofile' \
+    -o -iname '*.csv' -o -iname 'performance*.json' -o -iname '*settings*.ini' \
+    -o -iname '*.ps1' -o -iname '*.cmd' -o -iname '*.py' \) -print)
 if [[ -n $forbidden ]]; then
     echo "Package contains private/generated files:" >&2
     echo "$forbidden" >&2
     exit 1
 fi
 
-mkdir -p dist
-archive="dist/ps4rt-star-ocean-5-windows-x64-v${version}.zip"
+if $folder_only; then
+    echo "Created player folder $PWD/$stage"
+    exit 0
+fi
+
+archive="dist/${name}.zip"
 rm -f "$archive"
-(cd out/stage && cmake -E tar cf "../../$archive" --format=zip "ps4rt-star-ocean-5-windows-x64-v${version}")
+(cd dist && cmake -E tar cf "${name}.zip" --format=zip "$name")
 echo "Created $PWD/$archive"

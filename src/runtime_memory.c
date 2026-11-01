@@ -1,7 +1,6 @@
 /* PS4 virtual memory: direct (physical) pool, flexible memory, reservations,
- * protection changes and queries. One sparse memfd backs the whole direct
- * pool, so any mapping of any physical range aliases the same storage.
- * Windows: a pagefile-backed section plays the memfd's part, and the PS4 user range is
+ * protection changes and queries. A sparse pagefile-backed section backs the direct pool;
+ * mappings of the same physical range alias the same storage. The PS4 user range is
  * reserved as one placeholder that views of the section replace (VirtualAlloc2/MapViewOfFile3,
  * as shadPS4 does); see the "host mappings" section below.
  * Guest addresses are placed below 1 TiB (PS4 user range): GPU descriptors
@@ -16,15 +15,9 @@
 #include <pthread.h>
 #include <time.h>
 #include <errno.h>
-#ifdef _WIN32
 #include <windows.h>
-#else
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <unistd.h>
-#endif
 /* sceKernelGetDirectMemorySize on retail PS4: 5056 MiB. PS4RT_DMEM_MB raises it (the resolution
- * patches above 1080p need about 4 GiB more; run.sh sets it). */
+ * larger scene targets may need additional memory; PS4RT_DMEM_MB overrides it). */
 static uint64_t pool_size_bytes(void) {
     static uint64_t size;
     if (!size) {
@@ -61,8 +54,7 @@ _Static_assert(sizeof(BatchEntry)==32,"PS4 batch map entry layout");
 /* Region table lock. Lookups (GPU per-draw queries, VirtualQuery, GPU page
  * protection) share it; map/unmap/protect take it exclusively. Both nest: code
  * under the lock may write guest memory, and a GPU-tracked page then faults into
- * runtime_memory_gpu_protect on the same thread. Readers nest because glibc's
- * default rwlock prefers readers; a thread holding it exclusively skips relocking. */
+ * runtime_memory_gpu_protect on the same thread. Read-only calls may nest; a thread holding the lock exclusively skips relocking. */
 static pthread_rwlock_t lock=PTHREAD_RWLOCK_INITIALIZER;
 static __thread unsigned exclusive_depth;
 /* Odd while a writer holds the lock; readers' region caches are valid for one even value. */
@@ -77,9 +69,6 @@ static void read_lock(void) { if (!exclusive_depth) pthread_rwlock_rdlock(&lock)
 static void read_unlock(void) { if (!exclusive_depth) pthread_rwlock_unlock(&lock); }
 static Block blocks[LIMIT];
 static Vma *vmas; static size_t vma_count, vma_capacity;
-#ifndef _WIN32
-static int pool_fd=-1;
-#endif
 static unsigned char *backing_base; /* second view of the pool: host writes bypass guest/GPU page protection */
 #define FLEX_SPAN (UINT64_C(1024) * 1024 * 1024)
 static uint64_t flex_bitmap[FLEX_SPAN/PAGE/64];
@@ -98,7 +87,6 @@ static int host_prot(int prot) {
     /* GPU read/write bits (0x10/0x20) need host access for the future GPU backend. */
     return ((prot & 0x11) ? PROT_READ : 0) | ((prot & 0x22) ? PROT_WRITE|PROT_READ : 0) | ((prot & 4) ? PROT_EXEC|PROT_READ : 0);
 }
-#ifdef _WIN32
 /* ---- host mappings (Windows) ----
  * [USER_MIN,USER_MAX) is covered by regions, each one placeholder or one view of the
  * section. Mapping a range carves it out as a single placeholder first: views overlapping
@@ -135,12 +123,40 @@ static void region_insert(size_t at, HostRegion r) {
 static void region_erase(size_t at, size_t n) {
     memmove(regions+at,regions+at+n,(region_count-at-n)*sizeof(*regions)); region_count-=n;
 }
-/* The guest range is reserved before anything else can be placed there (runtime_start). */
+/* Reserve every free span in the guest range before Vulkan and the display driver are loaded.
+ * A PE dependency may already occupy a small high-entropy-ASLR span before main(). Treating that
+ * as a fatal error made identical launches succeed or fail depending on random DLL placement.
+ * Keeping the occupied span as a hole preserves Windows ASLR while all remaining guest space is
+ * protected by placeholders. A later guest mapping that actually overlaps a hole is rejected. */
 void runtime_memory_reserve(void) {
     if (region_count) return;
-    if (!VirtualAlloc2(NULL,(void *)USER_MIN,USER_MAX-USER_MIN,MEM_RESERVE|MEM_RESERVE_PLACEHOLDER,PAGE_NOACCESS,NULL,0))
-        win_fail("reserving the PS4 address range (link with --disable-high-entropy-va)",USER_MIN,USER_MAX-USER_MIN);
-    region_insert(0,(HostRegion){USER_MIN,USER_MAX,0,0});
+    uintptr_t at=USER_MIN;
+    uint64_t occupied_bytes=0;
+    size_t occupied_spans=0;
+    while (at<USER_MAX) {
+        MEMORY_BASIC_INFORMATION memory;
+        if (!VirtualQuery((void *)at,&memory,sizeof(memory)))
+            win_fail("querying the PS4 address range",at,USER_MAX-at);
+        uintptr_t start=(uintptr_t)memory.BaseAddress;
+        uintptr_t end=start+memory.RegionSize;
+        if (start<at) start=at;
+        if (end>USER_MAX || end<start) end=USER_MAX;
+        if (memory.State==MEM_FREE) {
+            if (!VirtualAlloc2(NULL,(void *)start,end-start,
+                               MEM_RESERVE|MEM_RESERVE_PLACEHOLDER,PAGE_NOACCESS,NULL,0))
+                win_fail("reserving a free PS4 address span",start,end-start);
+            region_insert(region_count,(HostRegion){start,end,0,0});
+        } else {
+            ++occupied_spans;
+            occupied_bytes+=end-start;
+        }
+        if (end<=at) win_fail("walking the PS4 address range",at,0);
+        at=end;
+    }
+    if (!region_count) win_fail("reserving the PS4 address range",USER_MIN,USER_MAX-USER_MIN);
+    if (occupied_spans)
+        printf("Runtime: preserved %zu preloaded ASLR span(s) inside the PS4 range (%" PRIu64
+               " bytes); guest mappings avoid them\n",occupied_spans,occupied_bytes);
 }
 static void view_map(const HostRegion *r, DWORD protect) {
     DWORD initial=protect==PAGE_NOACCESS ? PAGE_READWRITE : protect, old;
@@ -167,6 +183,13 @@ static size_t carve_host(uintptr_t a, uintptr_t b) {
     if (first==region_count || regions[first].start>a) win_fail("guest range outside the reservation",a,b-a);
     while (last<region_count && regions[last].start<b) ++last;
     if (regions[last-1].end<b) win_fail("guest range outside the reservation",a,b-a);
+    uintptr_t covered=a;
+    for (size_t i=first;i<last && covered<b;++i) {
+        if (regions[i].start>covered)
+            win_fail("guest mapping overlaps a preloaded Windows image",covered,b-covered);
+        if (regions[i].end>covered) covered=regions[i].end;
+    }
+    if (covered<b) win_fail("guest range outside the reservation",covered,b-covered);
     uintptr_t lo=regions[first].start, hi=regions[last-1].end;
     HostRegion left=regions[first], right=regions[last-1];
     int keep_left=left.mapped && lo<a, keep_right=right.mapped && b<hi;
@@ -241,30 +264,6 @@ static int pool(void) {
     backing_base=MapViewOfFile3(section,GetCurrentProcess(),NULL,0,bytes,0,PAGE_READWRITE,NULL,0);
     return backing_base ? 0 : -1;
 }
-#else
-/* Direct memory occupies [0,POOL_SIZE) of the memfd, flexible memory [POOL_SIZE,+FLEX_SPAN). */
-static int pool(void) {
-    if (pool_fd>=0) return 0;
-    pool_fd=memfd_create("ps4rt-guest-memory", MFD_CLOEXEC);
-    if (pool_fd<0 || ftruncate(pool_fd,(off_t)(POOL_SIZE+FLEX_SPAN))) return -1;
-    void *view=mmap(NULL,POOL_SIZE+FLEX_SPAN,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_NORESERVE,pool_fd,0);
-    if (view==MAP_FAILED) return -1;
-    backing_base=view;
-    return 0;
-}
-void runtime_memory_reserve(void) {}
-static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
-    void *mapped = !reserved
-        ? mmap((void *)address,size,prot,MAP_SHARED|MAP_FIXED,pool_fd,(off_t)phys)
-        : mmap((void *)address,size,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE|MAP_FIXED,-1,0);
-    return mapped==MAP_FAILED ? -1 : 0;
-}
-static int host_unmap(uintptr_t address, uint64_t size) { return munmap((void *)address,size); }
-static int host_protect(uintptr_t address, uint64_t size, int prot) { return mprotect((void *)address,size,prot); }
-static void host_discard(uint64_t phys, uint64_t size) {
-    fallocate(pool_fd,FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)phys,(off_t)size);
-}
-#endif
 static void queue_hook(int kind, uintptr_t address, uint64_t size) {
     GpuRange hook = kind==HOOK_MAP ? hook_map : kind==HOOK_UNMAP ? hook_unmap : hook_invalidate;
     if (!hook) return;
@@ -670,7 +669,6 @@ static uintptr_t low_next=LOW_MIN;
 void *runtime_low_map(size_t size, int prot) {
     size=align_up(size,PAGE);
     write_lock();
-#ifdef _WIN32
     void *p=NULL;
     while (!p && low_next+size<=USER_MIN) {
         p=VirtualAlloc((void *)low_next,size,MEM_RESERVE|MEM_COMMIT,win_prot(prot));
@@ -678,16 +676,6 @@ void *runtime_low_map(size_t size, int prot) {
     }
     write_unlock();
     return p;
-#else
-    void *p=MAP_FAILED;
-    while (low_next+size<=USER_MIN) {
-        p=mmap((void *)low_next,size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
-        low_next+=size+PAGE; /* unmapped gap catches overruns */
-        if (p!=MAP_FAILED) break;
-    }
-    write_unlock();
-    return p==MAP_FAILED ? NULL : p;
-#endif
 }
 /* ---- GPU library interface (gpu/shim/ps4rtgpu.cpp) ---- */
 /* Optimizations switched off at run time (diagnostics): the number in the file named by
@@ -720,11 +708,7 @@ static void *toggle_watcher(void *path) {
             printf("Runtime: disabled optimizations mask=%llu\n",value);
             last=value;
         }
-#ifdef _WIN32
         compat_sleep_ns(250000000);
-#else
-        struct timespec t={0,250000000}; nanosleep(&t,NULL);
-#endif
     }
     return NULL;
 }

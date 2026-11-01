@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ps4rt_overlay.h"
+#include "ps4rt_version.h"
 
 #include <algorithm>
 #include <atomic>
@@ -11,15 +12,20 @@
 #include <cstring>
 #include <mutex>
 #include <vector>
+#include <filesystem>
+#include <windows.h>
+#include "../../launcher/localization.h"
 
 #include <SDL3/SDL.h>
 #include "ps4rt_settings.h"
 #include "ps4rt_menu_input.h"
 #include "ps4rt_menu_sounds.h"
 #include "ps4rt_graphics.h"
+#include "ps4rt_scene_preset.h"
+#include "ps4rt_window_cursor.h"
 #include "ps4rt_perf_stats.h"
 
-extern "C" void runtime_restart(void); // src/probe.c: starts run.py again, ends this process
+extern "C" void runtime_restart(void); // src/loader.c: restart the native runtime process
 #include "common/elf_info.h"
 #include "imgui.h"
 #include "imgui_internal.h" // RegisterUserTexture (save pictures)
@@ -29,7 +35,6 @@ extern "C" void runtime_restart(void); // src/probe.c: starts run.py again, ends
 
 
 // DejaVu Sans (Cyrillic), embedded (third_party/fonts, Bitstream Vera license).
-#ifdef _WIN32
 asm(".section .rdata,\"dr\"\n"
     ".balign 16\n"
     ".global ps4rt_font_ttf\n"
@@ -38,18 +43,6 @@ asm(".section .rdata,\"dr\"\n"
     ".global ps4rt_font_ttf_end\n"
     "ps4rt_font_ttf_end:\n"
     ".text\n");
-#else
-asm(".section .rodata\n"
-    ".balign 16\n"
-    ".hidden ps4rt_font_ttf\n"
-    ".global ps4rt_font_ttf\n"
-    "ps4rt_font_ttf:\n"
-    ".incbin \"" PS4RT_FONT_PATH "\"\n"
-    ".hidden ps4rt_font_ttf_end\n"
-    ".global ps4rt_font_ttf_end\n"
-    "ps4rt_font_ttf_end:\n"
-    ".previous\n");
-#endif
 extern "C" const unsigned char ps4rt_font_ttf[];
 extern "C" const unsigned char ps4rt_font_ttf_end[];
 
@@ -73,6 +66,8 @@ Ps4RtMenuInput::Controllers menu_controllers;
 Ps4RtMenuSounds::Player menu_sounds;
 std::unordered_map<SDL_JoystickID, std::array<int, 2>> menu_stick_directions;
 bool cancel_was_editing = false;
+bool cockpit_exit_confirmation = false;
+int pending_scene_preset=-1;
 int requested_tab = -1; // switch on the next frame (L1/R1, Q/E, menu opened)
 // The game's text dialog (SetTextEntry), guarded by imgui_mutex.
 bool text_entry_active = false;
@@ -92,16 +87,24 @@ std::atomic<bool> choice_retiring{false};
 ImTextureData* menu_art_texture = nullptr;
 ImVec2 menu_art_size{};
 float base_scale = 1.0f;
+ImFont* performance_font = nullptr;
 
 // Present rate for the FPS counter.
 std::chrono::steady_clock::time_point last_present{};
 float frame_ms_avg = 0.0f;
 
+void CommitPendingPreset() {
+    auto& s=Ps4RtSettings::Get();
+    const auto output=Ps4RtOutput::Content(s.output_res);
+    pending_scene_preset=Ps4RtScene::ForOutput(pending_scene_preset,output.width,output.height);
+    if(s.native_scene && s.scene_preset!=pending_scene_preset) {s.scene_preset=pending_scene_preset;dirty=true;}
+}
+
 void SetOpen(bool value) {
     if (menu_open.exchange(value) == value) {
         return;
     }
-    ImGui::GetIO().MouseDrawCursor = value;
+    ImGui::GetIO().MouseDrawCursor = false; // Native Windows cursor while the menu is open.
     // Closed-menu releases are not routed to ImGui. Discard held/queued input
     // across transitions so reopening cannot repeat an old direction or confirm.
     ImGui::GetIO().ClearEventsQueue();
@@ -109,10 +112,13 @@ void SetOpen(bool value) {
     ImGui::GetIO().ClearInputMouse();
     ImGui::ClosePopupsOverWindow(nullptr, false);
     if (value) {
+        pending_scene_preset=Ps4RtSettings::Get().scene_preset;
         requested_tab = Ps4RtSettings::Get().menu_tab;
         focus_graphics = true;
         menu_sounds.Play(Ps4RtMenuSounds::Cue::Confirm);
     } else {
+        CommitPendingPreset();
+        cockpit_exit_confirmation=false;
         menu_controllers.Release();
         menu_stick_directions.clear();
     }
@@ -202,7 +208,7 @@ void Choice(const char* label, std::atomic<int>& target, const char* const* labe
     }
 }
 
-// Controller button names in the help text follow PS4RT_GLYPHS (run.py sets xbox or nintendo when
+// Controller button names in the help text follow PS4RT_GLYPHS (the launch preparation path sets xbox or nintendo when
 // the glyph feature is on); unset is PlayStation. Read once: the environment is fixed for a run.
 static const char* PadText(const char* playstation, const char* xbox, const char* nintendo) {
     static const char* style = std::getenv("PS4RT_GLYPHS");
@@ -233,7 +239,7 @@ void Row(const char* label) {
     ImGui::TableNextRow();
     ImGui::TableNextColumn();
     ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(label);
+    ImGui::TextWrapped("%s", label);
     ImGui::TableNextColumn();
     ImGui::SetNextItemWidth(-FLT_MIN);
     ImGui::PushID(label);
@@ -295,6 +301,7 @@ std::string OverlayText() {
     sample.fps = frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f;
     sample.frame_ms = frame_ms_avg;
     sample.upscaler = UpscalerLabel(s.upscaler);
+    sample.version = PS4RT_VERSION_STRING;
     return P::Format(sample, items, s.overlay_layout == 0);
 }
 
@@ -311,15 +318,33 @@ void GameTab() {
 void CompactGraphics() {
     auto& s = Ps4RtSettings::Get();
     if (BeginRows("##scene_image")) {
-        static const char* const outputs[] = {"1920 x 1080", "2560 x 1440", "3840 x 2160 (4K)"};
-        static constexpr int output_values[] = {1, 2, 3};
+        const auto modes=s.display_mode==Ps4RtGraphics::Fullscreen?s.display_fullscreen_modes.load():s.display_window_modes.load();
+        const char* aspects[Ps4RtOutput::AspectCount]{}; int aspect_values[Ps4RtOutput::AspectCount]{},aspect_count=0;
+        for(int aspect=0;aspect<Ps4RtOutput::AspectCount;++aspect) if(Ps4RtOutput::Filter(modes,aspect)) {
+            aspects[aspect_count]=Ps4RtOutput::AspectNames[aspect]; aspect_values[aspect_count++]=aspect;
+        }
+        if(aspect_count) ChoiceRow("Aspect ratio",s.output_aspect,aspects,aspect_values,aspect_count,
+            "Filters output sizes on the current monitor. The scene and HUD retain 16:9 proportions.");
+        if(!Ps4RtOutput::Filter(modes,s.output_aspect)) s.output_aspect=Ps4RtOutput::All;
+        const int selected=Ps4RtOutput::Select(s.output_res,modes,s.output_aspect);
+        if(selected>=0 && selected!=s.output_res) { s.output_res=selected; dirty=true; }
+        const char* outputs[Ps4RtOutput::Count]{};
+        int output_values[Ps4RtOutput::Count]{}, output_count=0;
+        for(int candidate:Ps4RtOutput::Order) {
+            if(!(Ps4RtOutput::Filter(modes,s.output_aspect)&(1ull<<candidate))) continue;
+            outputs[output_count]=Ps4RtOutput::Names[candidate]; output_values[output_count++]=candidate;
+        }
         Row("Output resolution");
         if (focus_graphics) {
             ImGui::SetKeyboardFocusHere();
             focus_graphics = false;
         }
-        Choice("##value",s.output_res,outputs,output_values,3);
-        Help("Fixed 16:9 output fitted to the window. The game still renders internally at 1080p.");
+        if(output_count) Choice("##value",s.output_res,outputs,output_values,output_count);
+        if(!Ps4RtOutput::TemporalAllowed(s.output_res) && s.upscaler!=Ps4RtSettings::UpscalerOff)
+            Ps4RtSettings::SetSceneUpscaler(Ps4RtSettings::UpscalerOff,false);
+        Help(Ps4RtGraphics::StretchWindow(s.display_mode,s.window_stretch)
+                 ? "Output stretched to the window. The game still renders internally at 1080p."
+                 : "Original 16:9 proportions fitted to the window. The game still renders internally at 1080p.");
         ImGui::PopID();
         ChoiceRow("Display mode", s.display_mode, Ps4RtGraphics::DisplayModeNames.data(),
                   nullptr, Ps4RtGraphics::DisplayModeCount,
@@ -330,15 +355,18 @@ void CompactGraphics() {
         // Commit the provider together with its required motion/jitter settings.
         std::atomic<int> provider{s.upscaler.load()};
         ChoiceRow("Upscaling / anti-aliasing", provider, providers, provider_values,
-                  s.fsr4_supported ? 3 : 2,
+                  !Ps4RtOutput::TemporalAllowed(s.output_res) ? 1 : s.fsr4_supported ? 3 : 2,
                   "FSR reconstructs the 1080p scene before the HUD. Off uses the original image with ordinary display scaling.");
         if (provider != s.upscaler)
             Ps4RtSettings::SetSceneUpscaler(provider, false);
         const bool temporal = s.upscaler != Ps4RtSettings::UpscalerOff;
         const int output = s.output_res;
+        const auto content=Ps4RtOutput::Content(output);
+        char preset[80]{};
+        std::snprintf(preset,sizeof(preset),"Custom %.2fx (1080p input)",float(content.width)/1920);
         InfoRow("Quality preset", !temporal || s.temporal_problem ? "Original (1080p input)" :
-            output == 1 ? "Native AA (1080p input)" :
-            output == 3 ? "Performance (1080p input)" : "Custom 1.33x (1080p input)");
+            content.width == 1920 && content.height == 1080 ? "Native AA (1080p input)" :
+            content.width == 3840 && content.height == 2160 ? "Performance (1080p input)" : preset);
         static const char* const anisotropy_labels[] = {"Game default", "2x", "4x", "8x", "16x"};
         ChoiceRow("Anisotropic filtering", s.anisotropy, anisotropy_labels,
                   Ps4RtGraphics::Anisotropies.data(), int(Ps4RtGraphics::Anisotropies.size()),
@@ -458,7 +486,7 @@ void PerformanceTab() {
     }
     ImGui::SeparatorText("Applied on restart");
     if (BeginRows("##restart")) {
-        static const char* const resolution_labels[] = {"Native (1080p)", "480p", "720p", "1440p", "1800p", "4K"};
+        static const char* const resolution_labels[] = {"Native (1080p)", "480p", "720p", "1440p", "4K"};
         ChoiceRow("Render resolution", s.render_resolution, resolution_labels, nullptr, int(G::Resolutions.size()),
                   "The resolution the game draws at. Higher is sharper and slower.");
         static const char* const engine_labels[] = {"60 (original)", "120", "240"};
@@ -484,8 +512,8 @@ void OverlayTab() {
     if (ImGui::BeginTable("##overlay_items", 2, ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableNextColumn();
         static const char* const names[] = {"FPS", "Frametime", "Upscaler", "GPU (name and use)", "CPU (game)",
-                                            "RAM (game / total)", "VRAM (used / available)"};
-        for (unsigned item = 0; item < 7; ++item) {
+                                            "RAM (game / total)", "VRAM (used / available)", "Application version"};
+        for (unsigned item = 0; item < std::size(names); ++item) {
             const unsigned bit = 1u << item;
             bool on = (s.overlay_items & bit) != 0;
             if (ImGui::Checkbox(names[item], &on)) {
@@ -582,7 +610,10 @@ void DrawMenuArtInWindow() {
     draw->PopClipRect();
 }
 
+#include "ps4rt_cockpit.inc"
+
 void Menu() {
+    if(Ps4RtSettings::Get().native_scene) { CockpitMenu(); return; }
     auto& s = Ps4RtSettings::Get();
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
@@ -708,7 +739,7 @@ void Menu() {
         ImGui::SameLine();
         ImGui::BeginDisabled(!std::getenv("PS4RT_RESTART_COMMAND"));
         if (ImGui::Button("Apply and restart")) {
-            // The new launch confirms the options once the game shows; run.py restores the
+            // The new launch confirms the options once the game shows; the launch preparation path restores the
             // previous ones if it never does (restart_unconfirmed).
             s.restart_unconfirmed = true;
             Ps4RtSettings::Save();
@@ -849,7 +880,9 @@ void FpsCounter() {
                      ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                      ImGuiWindowFlags_NoFocusOnAppearing);
     ImGui::SetWindowFontScale(s.overlay_scale / 100.0f);
+    if(performance_font) ImGui::PushFont(performance_font,18.0f);
     ImGui::TextUnformatted(text.c_str());
+    if(performance_font) ImGui::PopFont();
     ImGui::End();
 }
 
@@ -909,20 +942,8 @@ void ShowNotice(const std::string& text, int milliseconds) {
     notice_until.store(NowMs() + milliseconds, std::memory_order_relaxed);
 }
 
-void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) {
-    std::scoped_lock lock{imgui_mutex};
-    if (initialized) {
-        return;
-    }
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO();
-    io.IniFilename = nullptr; // window positions are not kept
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
-    io.ConfigNavCursorVisibleAlways = true;
-    io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
-    io.BackendPlatformName = "ps4rt";
-
+void ConfigureMenuAppearance() {
+    ImGuiIO& io=ImGui::GetIO();
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = 10.0f;
@@ -938,8 +959,8 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     style.ItemSpacing = ImVec2(8.0f, 7.0f);
 
     ImVec4* colors = style.Colors;
-    colors[ImGuiCol_WindowBg] = ImVec4(0.025f, 0.065f, 0.15f, 0.82f);
-    colors[ImGuiCol_ChildBg] = ImVec4(0.020f, 0.05f, 0.12f, 0.38f);
+    colors[ImGuiCol_WindowBg] = ImVec4(0.025f, 0.065f, 0.10f, 1.0f);
+    colors[ImGuiCol_ChildBg] = ImVec4(0.025f, 0.065f, 0.10f, 1.0f);
     colors[ImGuiCol_PopupBg] = ImVec4(0.025f, 0.055f, 0.13f, 0.94f);
     colors[ImGuiCol_Border] = ImVec4(0.32f, 0.72f, 0.95f, 0.70f);
     colors[ImGuiCol_Text] = ImVec4(0.94f, 0.97f, 1.0f, 1.0f);
@@ -964,7 +985,49 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     ImFontConfig font_config;
     font_config.FontDataOwnedByAtlas = false;
     io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(ps4rt_font_ttf),
-                                   int(ps4rt_font_ttf_end - ps4rt_font_ttf), 18.0f, &font_config);
+                                   int(ps4rt_font_ttf_end - ps4rt_font_ttf), 20.0f, &font_config);
+    // Use the player's Windows language fonts for CJK glyphs, without redistributing
+    // Microsoft fonts. ImGui's dynamic atlas loads only the glyphs actually displayed.
+    const auto& language=MenuLanguage();
+    const wchar_t* candidates[4]{};
+    if(language==L"简体中文") {candidates[0]=L"msyh.ttc";candidates[1]=L"simsun.ttc";}
+    else if(language==L"繁體中文") {candidates[0]=L"msjh.ttc";candidates[1]=L"mingliu.ttc";}
+    else if(language==L"한국어") {candidates[0]=L"malgun.ttf";candidates[1]=L"gulim.ttc";}
+    else if(language==L"日本語") {candidates[0]=L"YuGothR.ttc";candidates[1]=L"meiryo.ttc";candidates[2]=L"msgothic.ttc";}
+    if(candidates[0]) {
+        wchar_t windows[MAX_PATH]{};GetWindowsDirectoryW(windows,MAX_PATH);
+        bool merged=false;
+        for(const auto* name:candidates) {
+            if(!name) continue;
+            const auto path=std::filesystem::path(windows)/L"Fonts"/name;
+            if(!std::filesystem::is_regular_file(path)) continue;
+            ImFontConfig fallback;fallback.MergeMode=true;
+            if(io.Fonts->AddFontFromFileTTF(path.string().c_str(),20.0f,&fallback)) {merged=true;break;}
+        }
+        if(!merged) std::fprintf(stderr,"Overlay: Windows CJK font unavailable; install the selected Windows language's supplemental fonts.\n");
+    }
+    ImFontConfig monitoring;
+    monitoring.FontDataOwnedByAtlas=false;
+    performance_font=io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(ps4rt_font_ttf),
+        int(ps4rt_font_ttf_end-ps4rt_font_ttf),18.0f,&monitoring);
+
+}
+
+void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) {
+    std::scoped_lock lock{imgui_mutex};
+    if (initialized) {
+        return;
+    }
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr; // window positions are not kept
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
+    io.ConfigNavCursorVisibleAlways = true;
+    io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+    io.BackendPlatformName = "ps4rt";
+
+    ConfigureMenuAppearance();
 
     const vk::Instance vk_instance = instance.GetInstance();
     ImGui_ImplVulkan_LoadFunctions(
@@ -1014,6 +1077,16 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
             std::fprintf(stderr, "Overlay: menu art unavailable or invalid: %s\n", path);
         }
     }
+    if(const char* path=std::getenv("SO5_MENU_LOGO");path && *path) {
+        Ps4RtPng::Image logo;
+        if(Ps4RtPng::LoadRgba(path,logo) && logo.width>0 && logo.height>0 && logo.width<=4096 && logo.height<=4096) {
+            menu_logo_texture=IM_NEW(ImTextureData)();
+            menu_logo_texture->Create(ImTextureFormat_RGBA32,logo.width,logo.height);
+            std::memcpy(menu_logo_texture->GetPixels(),logo.rgba.data(),logo.rgba.size());
+            ImGui::RegisterUserTexture(menu_logo_texture);
+            menu_logo_size=ImVec2(float(logo.width),float(logo.height));
+        }
+    }
     menu_sounds.Init(); // independent SDL3 stream; failures never prevent opening the menu
     overlay_instance = &instance;
     initialized = true;
@@ -1032,6 +1105,23 @@ void UpdateTextInput(SDL_Window* window) {
         } else {
             SDL_StopTextInput(window);
         }
+    }
+}
+
+void UpdateCursor(SDL_Window* window) {
+    static Ps4RtWindow::MenuCursor cursor;
+    const bool open=menu_open.load();
+    cursor.Update(window,open);
+    if(!open) return;
+    std::scoped_lock lock{imgui_mutex};
+    if(!initialized) return;
+    ImGui::GetIO().MouseDrawCursor=false;
+    const auto properties=SDL_GetWindowProperties(window);
+    HWND hwnd=static_cast<HWND>(SDL_GetPointerProperty(properties,SDL_PROP_WINDOW_WIN32_HWND_POINTER,nullptr));
+    POINT point{};RECT client{};
+    if(hwnd && GetCursorPos(&point) && ScreenToClient(hwnd,&point) && GetClientRect(hwnd,&client) && client.right>0 && client.bottom>0) {
+        const auto size=ImGui::GetIO().DisplaySize;
+        ImGui::GetIO().AddMousePosEvent(point.x*size.x/client.right,point.y*size.y/client.bottom);
     }
 }
 
@@ -1120,7 +1210,7 @@ bool HandleEvent(const SDL_Event& event) {
     case SDL_EVENT_KEY_UP: {
         const bool down = event.type == SDL_EVENT_KEY_DOWN;
         if (is_open && event.key.key == SDLK_ESCAPE &&
-            ImGui::IsPopupOpen("Exit game?")) {
+            (cockpit_exit_confirmation || ImGui::IsPopupOpen("",ImGuiPopupFlags_AnyPopupId))) {
             // Let Escape cancel the exit confirmation instead of closing the whole panel.
             if (down && !event.key.repeat) menu_sounds.Play(Ps4RtMenuSounds::Cue::Cancel);
             io.AddKeyEvent(ImGuiKey_Escape, down);
@@ -1273,7 +1363,7 @@ bool HandleEvent(const SDL_Event& event) {
 }
 
 // After "Apply and restart", the new options are kept once the game has shown about ten
-// seconds of frames after loading (run.py restores the previous ones otherwise).
+// seconds of frames after loading (the launch preparation path restores the previous ones otherwise).
 void ConfirmRestart() {
     static u32 frames = 0;
     auto& s = Ps4RtSettings::Get();
@@ -1330,7 +1420,7 @@ void SetTextEntry(bool active, const std::string& prompt, const std::string& tex
     text_entry_text = text;
 }
 
-void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
+void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent, bool title_screen) {
     // Present interval for the FPS readout (measured also while nothing is drawn).
     const auto now = std::chrono::steady_clock::now();
     const float ms = std::chrono::duration<float, std::milli>(now - last_present).count();
@@ -1339,7 +1429,7 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
         frame_ms_avg = frame_ms_avg == 0.0f ? ms : frame_ms_avg * 0.95f + ms * 0.05f;
     }
     ConfirmRestart();
-    if (!Visible()) {
+    if (!Visible() && !title_screen) {
         return;
     }
     std::scoped_lock lock{imgui_mutex};
@@ -1359,6 +1449,10 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     ImGui_ImplVulkan_NewFrame();
     cancel_was_editing = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) || ImGui::GetActiveID();
     ImGui::NewFrame();
+    if(Ps4RtSettings::Get().scene_preset_failed.exchange(false)) {
+        pending_scene_preset=Ps4RtSettings::Get().scene_preset;
+        ShowNotice(Tr(L"The preset could not be applied. Safe rendering has been restored.",L"Le preset n’a pas pu être appliqué. Un rendu sûr a été rétabli."),6000);
+    }
     if (loading) {
         LoadingScreen();
     }
@@ -1396,6 +1490,15 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (choice_active && !menu_open) {
         ChoiceBox();
+    }
+    if(title_screen && !menu_open && !loading && !choice_active) {
+        const std::string version=std::string("Windows v")+PS4RT_VERSION_STRING;
+        const float font=18.0f*scale,margin=24.0f*scale;
+        const auto size=ImGui::GetFont()->CalcTextSizeA(font,FLT_MAX,0,version.c_str());
+        auto* draw=ImGui::GetForegroundDrawList();
+        const ImVec2 pos(io.DisplaySize.x-size.x-margin,io.DisplaySize.y-size.y-margin);
+        draw->AddText(ImGui::GetFont(),font,ImVec2(pos.x+scale,pos.y+scale),IM_COL32(0,0,0,220),version.c_str());
+        draw->AddText(ImGui::GetFont(),font,pos,IM_COL32(225,240,250,230),version.c_str());
     }
     ImGui::Render();
 

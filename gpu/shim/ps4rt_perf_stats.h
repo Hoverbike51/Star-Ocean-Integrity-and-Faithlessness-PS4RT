@@ -25,15 +25,19 @@ enum Item : unsigned {
     Cpu = 1u << 4,
     Ram = 1u << 5,
     Vram = 1u << 6,
-    AllItems = (1u << 7) - 1,
+    Version = 1u << 7,
+    AllItems = (1u << 8) - 1,
 };
 inline constexpr unsigned DefaultItems = Fps | FrameTime | Upscaler;
 
 struct Sample {
     float fps = 0.0f, frame_ms = 0.0f;
     std::string upscaler;
+    std::string version;
     std::string gpu_name;
-    float gpu_percent = -1.0f, cpu_percent = -1.0f;
+    std::string busiest_thread_name;
+    float gpu_percent = -1.0f, cpu_percent = -1.0f, busiest_thread_percent = -1.0f;
+    unsigned busiest_thread_id = 0, thread_count = 0;
     double ram_used_gb = -1.0, ram_total_gb = -1.0, vram_used_gb = -1.0, vram_total_gb = -1.0;
 };
 
@@ -99,6 +103,10 @@ inline std::string Format(const Sample& s, unsigned mask, bool row) {
     }
     if (mask & Vram) {
         pair(part, sizeof(part), "VRAM", s.vram_used_gb, s.vram_total_gb);
+        add();
+    }
+    if (mask & Version) {
+        std::snprintf(part, sizeof(part), "Windows %s", s.version.c_str());
         add();
     }
     return out;

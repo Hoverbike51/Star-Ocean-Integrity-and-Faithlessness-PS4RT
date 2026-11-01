@@ -342,7 +342,7 @@ void write_content(const fs::path& sfo_path, const fs::path& output) {
 
 } // namespace
 
-std::string title_id_from_sfo(const fs::path& path) {
+std::string string_from_sfo(const fs::path& path, const std::string& field) {
     const Bytes bytes = read_all(path);
     if (bytes.size() < 20 || std::memcmp(bytes.data(), "\0PSF", 4)) throw std::runtime_error("invalid param.sfo");
     const auto keys = get<std::uint32_t>(bytes, 8), values = get<std::uint32_t>(bytes, 12), count = get<std::uint32_t>(bytes, 16);
@@ -351,14 +351,16 @@ std::string title_id_from_sfo(const fs::path& path) {
         const auto key_offset = get<std::uint16_t>(bytes, at);
         const auto size = get<std::uint32_t>(bytes, at + 4);
         const auto value_offset = get<std::uint32_t>(bytes, at + 12);
-        if (read_cstr(bytes, keys + key_offset, bytes.size()) != "TITLE_ID") continue;
+        if (read_cstr(bytes, std::uint64_t(keys) + key_offset, bytes.size()) != field) continue;
         check_span(bytes, values + value_offset, size);
         std::string id(reinterpret_cast<const char*>(bytes.data() + values + value_offset), size);
         if (const auto zero = id.find('\0'); zero != std::string::npos) id.resize(zero);
         return id;
     }
-    throw std::runtime_error("TITLE_ID missing from param.sfo");
+    throw std::runtime_error(field+" missing from param.sfo");
 }
+
+std::string title_id_from_sfo(const fs::path& path) {return string_from_sfo(path,"TITLE_ID");}
 
 void prepare_title(const fs::path& game, const fs::path& output, const PrepareLog& log) {
     if (log) log(L"Native C++ preparer · analyzing eboot.bin");

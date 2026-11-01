@@ -16,5 +16,6 @@ void prepare_title(const std::filesystem::path& game,
                    const PrepareLog& log);
 
 std::string title_id_from_sfo(const std::filesystem::path& param_sfo);
+std::string string_from_sfo(const std::filesystem::path& param_sfo, const std::string& field);
 
 } // namespace ps4rt

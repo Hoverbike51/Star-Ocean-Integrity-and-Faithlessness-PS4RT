@@ -2,17 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 // Include the vulkan platform specific header
-#if defined(ANDROID)
-#define VK_USE_PLATFORM_ANDROID_KHR
-#elif defined(_WIN64)
+
 #ifndef VK_USE_PLATFORM_WIN32_KHR
 #define VK_USE_PLATFORM_WIN32_KHR
-#endif
-#elif defined(__APPLE__)
-#define VK_USE_PLATFORM_METAL_EXT
-#else
-#define VK_USE_PLATFORM_WAYLAND_KHR
-#define VK_USE_PLATFORM_XLIB_KHR
 #endif
 
 #include <vector>
@@ -26,16 +18,11 @@
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
 
-#ifdef _WIN32
 // vk_common.h deliberately uses VK_NO_PROTOTYPES, but Windows builds link the
 // loader import library and use this one entry point to seed vulkan-hpp.
 extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance,
                                                                            const char* name);
-#endif
 
-#ifdef __APPLE__
-#include <mach-o/dyld.h>
-#endif
 
 namespace Vulkan {
 
@@ -73,7 +60,6 @@ vk::SurfaceKHR CreateSurface(vk::Instance instance, const Frontend::WindowSDL& e
     const auto& window_info = emu_window.GetWindowInfo();
     vk::SurfaceKHR surface{};
 
-#if defined(VK_USE_PLATFORM_WIN32_KHR)
     if (window_info.type == Frontend::WindowSystemType::Windows) {
         const vk::Win32SurfaceCreateInfoKHR win32_ci = {
             .hinstance = nullptr,
@@ -85,43 +71,6 @@ vk::SurfaceKHR CreateSurface(vk::Instance instance, const Frontend::WindowSDL& e
             UNREACHABLE();
         }
     }
-#elif defined(VK_USE_PLATFORM_XLIB_KHR) || defined(VK_USE_PLATFORM_WAYLAND_KHR)
-    if (window_info.type == Frontend::WindowSystemType::X11) {
-        const vk::XlibSurfaceCreateInfoKHR xlib_ci = {
-            .dpy = static_cast<Display*>(window_info.display_connection),
-            .window = reinterpret_cast<Window>(window_info.render_surface),
-        };
-
-        if (instance.createXlibSurfaceKHR(&xlib_ci, nullptr, &surface) != vk::Result::eSuccess) {
-            LOG_ERROR(Render_Vulkan, "Failed to initialize Xlib surface");
-            UNREACHABLE();
-        }
-    } else if (window_info.type == Frontend::WindowSystemType::Wayland) {
-        
-
-        const vk::WaylandSurfaceCreateInfoKHR wayland_ci = {
-            .display = static_cast<wl_display*>(window_info.display_connection),
-            .surface = static_cast<wl_surface*>(window_info.render_surface),
-        };
-
-        if (instance.createWaylandSurfaceKHR(&wayland_ci, nullptr, &surface) !=
-            vk::Result::eSuccess) {
-            LOG_ERROR(Render_Vulkan, "Failed to initialize Wayland surface");
-            UNREACHABLE();
-        }
-    }
-#elif defined(VK_USE_PLATFORM_METAL_EXT)
-    if (window_info.type == Frontend::WindowSystemType::Metal) {
-        const vk::MetalSurfaceCreateInfoEXT macos_ci = {
-            .pLayer = static_cast<const CAMetalLayer*>(window_info.render_surface),
-        };
-
-        if (instance.createMetalSurfaceEXT(&macos_ci, nullptr, &surface) != vk::Result::eSuccess) {
-            LOG_CRITICAL(Render_Vulkan, "Failed to initialize MacOS surface");
-            UNREACHABLE();
-        }
-    }
-#endif
 
     if (!surface) {
         LOG_CRITICAL(Render_Vulkan, "Presentation not supported on this platform");
@@ -178,22 +127,9 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
     switch (window_type) {
     case Frontend::WindowSystemType::Headless:
         break;
-#if defined(VK_USE_PLATFORM_WIN32_KHR)
     case Frontend::WindowSystemType::Windows:
         extensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
         break;
-#elif defined(VK_USE_PLATFORM_XLIB_KHR) || defined(VK_USE_PLATFORM_WAYLAND_KHR)
-    case Frontend::WindowSystemType::X11:
-        extensions.push_back(VK_KHR_XLIB_SURFACE_EXTENSION_NAME);
-        break;
-    case Frontend::WindowSystemType::Wayland:
-        extensions.push_back(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME);
-        break;
-#elif defined(VK_USE_PLATFORM_METAL_EXT)
-    case Frontend::WindowSystemType::Metal:
-        extensions.push_back(VK_EXT_METAL_SURFACE_EXTENSION_NAME);
-        break;
-#endif
     default:
         LOG_ERROR(Render_Vulkan, "Presentation not supported on this platform");
         break;
@@ -265,27 +201,10 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
                                   bool enable_crash_diagnostic) {
     LOG_INFO(Render_Vulkan, "Creating vulkan instance");
 
-#if defined(__APPLE__)
-    // Initialize the environment with the path to the included ICD, so that the loader will
-    // find it.
-    static const auto icd_path = [] {
-        char path[PATH_MAX];
-        u32 length = PATH_MAX;
-        _NSGetExecutablePath(path, &length);
-        return std::filesystem::path(path).parent_path();
-    }();
-    setenv("VK_DRIVER_FILES", icd_path.c_str(), true);
-#endif
 
-#ifdef _WIN32
     // Vulkan::Vulkan links the Windows loader explicitly. Using its import avoids a
     // DynamicLoader/LoadLibrary lookup that can return null in MinGW GUI executables.
     VULKAN_HPP_DEFAULT_DISPATCHER.init(vkGetInstanceProcAddr);
-#else
-    static vk::detail::DynamicLoader dl;
-    VULKAN_HPP_DEFAULT_DISPATCHER.init(
-        dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr"));
-#endif
 
     const auto [available_version_result, available_version] =
         VULKAN_HPP_DEFAULT_DISPATCHER.vkEnumerateInstanceVersion
@@ -434,13 +353,9 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
     ASSERT_MSG(instance_result == vk::Result::eSuccess, "Failed to create instance: {}",
                vk::to_string(instance_result));
 
-#ifdef _WIN32
     // Pass the entry point again: some MinGW link combinations do not preserve
     // the member set by the global-only init across createInstanceUnique().
     VULKAN_HPP_DEFAULT_DISPATCHER.init(static_cast<VkInstance>(*instance), vkGetInstanceProcAddr);
-#else
-    VULKAN_HPP_DEFAULT_DISPATCHER.init(*instance);
-#endif
 
     return std::move(instance);
 }

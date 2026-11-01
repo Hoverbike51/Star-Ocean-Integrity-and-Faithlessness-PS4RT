@@ -2,16 +2,12 @@
 #define PS4RT_RUNTIME_H
 #include <stdint.h>
 #include <stddef.h>
-#ifdef _WIN32
 #include "compat_win.h"
 /* No signals on Windows: the exception handler resumes the thread in ps4rt_longjmp
  * (gpu/shim/ps4rt_toggles.h uses the same buffer type). */
 typedef ps4rt_jmp_buf sigjmp_buf;
 #define sigsetjmp(buffer, save) ps4rt_setjmp(buffer)
-#else
-#include <setjmp.h>
-#endif
-/* Recovery point for speculative guest memory reads on this thread (probe.c fault handler). */
+/* Recovery point for speculative guest memory reads on this thread (loader fault handler). */
 extern __thread sigjmp_buf *runtime_fault_recover;
 /* Restarts the game (in-game settings menu, render resolution change). */
 void runtime_restart(void);
@@ -100,6 +96,7 @@ int runtime_pad_describe(void);
 uintptr_t runtime_rtc_resolve(const char *name);
 const char *runtime_file_user_dir(void);
 void runtime_savedata_configure(const char *title);
+int runtime_savedata_backup_at_launch(void);
 uintptr_t runtime_savedata_resolve(const char *name);
 void runtime_savedata_report(void);
 /* OrbisSaveDataParam (1328 bytes) of a save directory of the current title. */

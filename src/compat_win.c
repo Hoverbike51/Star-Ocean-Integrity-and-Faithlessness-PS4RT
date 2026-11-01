@@ -1,5 +1,4 @@
 /* Windows implementations of compat_win.h. */
-#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -195,4 +194,3 @@ int compat_cpu_times(int who, int64_t *user_us, int64_t *kernel_us) {
     *kernel_us = (int64_t)(((uint64_t)kernel.dwHighDateTime << 32 | kernel.dwLowDateTime) / 10);
     return 0;
 }
-#endif

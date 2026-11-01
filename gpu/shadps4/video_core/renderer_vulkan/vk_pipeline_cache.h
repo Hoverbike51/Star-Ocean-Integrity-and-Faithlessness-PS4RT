@@ -132,6 +132,11 @@ public:
     /// Loads the pipelines of earlier sessions. ps4rt: called by the presenter once the window
     /// can show a loading screen; `progress(done, total)` follows the pipelines read.
     void WarmUp(const std::function<void(u32 done, u32 total)>& progress = {});
+    /// True when the local cache contains pipelines that have not been prepared for the current
+    /// runtime, GPU and driver. A completed blocking warm-up records an automatically invalidated
+    /// marker; newly discovered pipelines make the next launch prepare the cache once again.
+    [[nodiscard]] bool NeedsOneTimeWarmUp() const;
+    void MarkOneTimeWarmUpComplete() const;
     /// ps4rt: the same load on low-priority threads while the game runs; the GPU thread takes
     /// the results a few at a time (PumpWarmUp). False when it cannot (zip archive store).
     bool StartBackgroundWarmUp();

@@ -80,7 +80,7 @@ def module(path):
 
 
 def patch_fs_loads(image, ph, base):
-    """Rewrite initial-exec `mov rax, fs:[0]` to GS: glibc owns FS on Linux."""
+    """Rewrite guest initial-exec `mov rax, fs:[0]` to the bridge's GS TLS base."""
     patched = 0
     for p in ph:
         if p['type'] != 1 or not p['flags'] & 1:

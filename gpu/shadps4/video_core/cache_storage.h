@@ -18,6 +18,8 @@ enum class BlobType : u32 {
     ShaderBinary,
     PipelineKey,
     ShaderProfile,
+    /// ps4rt: live GCN + specialization input, retained across binary-cache rebuilds.
+    ShaderCapture,
 };
 
 class DataBase {
@@ -27,6 +29,8 @@ public:
     }
 
     void Open();
+    /// Waits until every shader/pipeline/capture write queued so far is durable.
+    void Flush();
     void Close();
     [[nodiscard]] bool IsOpened() const {
         return opened;

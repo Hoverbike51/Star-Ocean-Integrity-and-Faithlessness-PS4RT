@@ -43,7 +43,29 @@ policy:
 The wrapper also detects and regenerates a stale CMake build cache when a previously compiled
 checkout has been copied or moved.
 
-The Release binary is `out\ps4rt.exe`. To run it with your own extracted game files:
+## Clean player folder
+
+The CMD entry point builds a clean, self-contained player folder by default, without a ZIP:
+
+```powershell
+.\build-windows.cmd
+```
+
+The following explicit form remains supported:
+
+```powershell
+.\build-windows.cmd -PlayerFolder
+```
+
+The result is created under
+`dist\ps4rt-star-ocean-5-windows-x64-v0.4.0-latest\`. It contains only the executables, required DLLs,
+assets, integrated PKG extractor, license, and player documentation. Only a static native
+`Star Ocean 5 Launcher.exe` entry remains at the root; the real launcher, runtime, extractor,
+updater and DLLs are in `bin/`. Assets remain under their existing root subdirectories. Source files, CMake/Ninja
+artifacts, Python scripts, tests, game files, saves, logs, and shader caches are excluded. The
+folder is smoke-tested with a `PATH` that does not contain MSYS2.
+
+The source-build runtime is `out\Star Ocean 5.exe`. To run it directly with your own extracted game files:
 
 ```powershell
 .\run.ps1 -Game "D:\Games\CUSA03219"
@@ -51,27 +73,44 @@ The Release binary is `out\ps4rt.exe`. To run it with your own extracted game fi
 
 The launcher automatically adds `C:\msys64\clang64\bin` (or
 `$env:MSYS2_ROOT\clang64\bin`) to the `PATH` for a source build. A packaged build gives priority
-to the DLLs placed next to `ps4rt.exe`.
+to the DLLs placed next to `Star Ocean 5.exe`.
 
-## Self-contained library package
+## Versioned ZIP
 
-From MSYS2 CLANG64:
+After release approval, run this command from MSYS2 CLANG64:
 
 ```bash
 bash packaging/windows/package.sh
 ```
 
-The versioned ZIP is created under `dist/` (for example,
-`ps4rt-star-ocean-5-windows-x64-v0.3.5.zip`). It contains the runtime, all required CLANG64 DLLs,
-the native C++ preparer, the integrated PKG extractor with its private libraries, the launcher's
-visual resources, and the FSR 4 assets. Players do not need Python, MSYS2, or PowerShell: the
-runtime, launcher, and their libraries are all included in the ZIP.
+The versioned ZIP and its matching unpacked player folder are created under `dist/`. They contain
+the native runtime, all required CLANG64 DLLs, the native C++ preparer, the integrated PKG
+extractor, the launcher's visual resources, and the FSR 4 assets. The extractor is independent
+of shadPS4 and statically linked; see docs/LAUNCHER_GUIDE.md for formats and passcode limits.
+Players do not need Python, MSYS2, or PowerShell.
 
-Test the ZIP from PowerShell with a `PATH` that does not contain MSYS2:
+Test either the player folder or the ZIP from PowerShell with a `PATH` that does not contain MSYS2:
 
 ```powershell
-.\packaging\windows\smoke-test.ps1 .\dist\ps4rt-star-ocean-5-windows-x64-v0.3.5.zip
+.\packaging\windows\smoke-test.ps1 .\dist\ps4rt-star-ocean-5-windows-x64-v0.4.0-latest
+.\packaging\windows\smoke-test.ps1 .\dist\ps4rt-star-ocean-5-windows-x64-v0.4.0-latest.zip
 ```
+
+## Graphics menu
+
+Graphics settings are available while the game is running. Press **Insert**, or hold **L2** and
+click the right stick (**R3**), to open the menu. The Video tab in the launcher can select any
+detected Vulkan 1.3 GPU; **Automatic** remains the recommended setting.
+
+## Performance capture
+
+The launcher can record one gameplay investigation without Windows Performance Recorder. Enable **Performance capture tools** in Advanced, then open
+**Logs & diagnostics** and select **Capture next session**, start the game, and exit through the
+in-game menu. **Open captures** opens the directory containing the English CSV timeline and JSON
+summary. The 0.4.0 report includes frame-time percentiles, CPU/GPU utilization, shader activity,
+draw packets, DrawRec busy time, draw-queue occupancy, drain waits, the highest-cost drain reasons,
+and a recording-phase breakdown. Disable the capture toggle for normal gameplay after collecting
+the report.
 
 ## Platform differences
 
@@ -83,9 +122,16 @@ Test the ZIP from PowerShell with a `PATH` that does not contain MSYS2:
   high-resolution waitable timers.
 - Sockets use WinSock2, random data uses BCrypt, and file operations have Win32/CRT equivalents.
   The manifest enables UTF-8, long paths, and PerMonitorV2 DPI awareness.
-- The watchdog and signal-based dumps remain Linux-only features.
+- The former POSIX watchdog and signal-based dumps are not part of the Windows player build.
 
 This port does not provide game files, firmware, or keys. The GPL-2.0-licensed PKG extractor is
 integrated only for locally importing PS4 packages owned by the user. Startup, Vulkan rendering,
 WASAPI audio, DualSense input, and save data have been validated with CUSA03219; a complete
 playthrough still needs to be validated.
+
+## Illustrated player guides
+
+See the [launcher guide](../../docs/LAUNCHER_GUIDE.md),
+[in-game menu guide](../../docs/IN_GAME_MENU_GUIDE.md) and
+[Windows changelog](../../CHANGELOG.md). These public guides and their referenced screenshots
+are included in the clean player folder. Development-only documents are not required for packaging.

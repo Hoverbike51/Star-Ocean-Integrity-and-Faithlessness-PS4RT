@@ -17,6 +17,8 @@
 #include <vk_mem_alloc.h>
 
 #include "ps4rt_settings.h"
+#include "ps4rt_fsr3_policy.h"
+#include "ps4rt_scene_preset.h"
 #include "ps4rt_toggles.h"
 #include "ffx_vk_portable.h"
 #include "video_core/host_shaders/upscale_merge_comp.h"
@@ -84,6 +86,21 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
     : instance{instance_}, scheduler{scheduler_}, texture_cache{texture_cache_},
       runtime{runtime_}, camera_motion{camera_motion_}, scene_targets{scene_targets_} {
     // Reject unsupported shaders before allocating resources or recording a frame.
+    vk::PhysicalDeviceIDProperties identity{};
+    vk::PhysicalDeviceProperties2 physical{.pNext=&identity};
+    instance.GetPhysicalDevice().getProperties2(&physical);
+    const auto& properties=physical.properties;
+    const auto device_key=Ps4RtUpscaler::Fsr3DeviceKey(properties.vendorID,properties.deviceID,identity.deviceUUID.data());
+    const char* forced=std::getenv("SO5_FSR3_FORCE_GPU");
+    auto& initial_settings=Ps4RtSettings::Get();
+    const bool technical=instance.IsStorageImageWriteWithoutFormatEnabled() && properties.apiVersion>=VK_API_VERSION_1_3 &&
+        properties.deviceType!=vk::PhysicalDeviceType::eCpu && properties.limits.maxComputeWorkGroupInvocations>=256;
+    initial_settings.fsr3_available=Ps4RtUpscaler::Fsr3Allowed(technical,Ps4RtUpscaler::Fsr3Recommended(properties.vendorID,instance.GetModelName()),device_key,forced?forced:"");
+    initial_settings.fsr3_configured=true;
+    if(initial_settings.upscaler==Ps4RtSettings::UpscalerFsr3 && !initial_settings.fsr3_available) {
+        Ps4RtSettings::SetSceneUpscaler(Ps4RtSettings::UpscalerOff,false);
+        std::printf("Upscaler: FSR 3.1 unavailable under this GPU's capability/default/override policy; original rendering active\n");
+    }
     Ps4RtSettings::ConfigureUpscalerSupport(instance.IsFsr4Int8Supported(),
                                          instance.IsFsr411Supported());
     fsr4 = std::make_unique<Fsr4Upscaler>(instance, scheduler);
@@ -184,7 +201,7 @@ bool TemporalUpscaler::ReducedScene(const VideoCore::Image& color) const {
 }
 
 bool TemporalUpscaler::RasterScaling() const {
-    if (Ps4RtSettings::Get().CompactGraphicsMenu()) return false; // Native scene input.
+    if (Ps4RtSettings::Get().native_scene && (Ps4RtSettings::Get().scene_preset<0 || !Active())) return false;
     return !scaled_session && scene_targets.Reduced() && !done_this_frame;
 }
 
@@ -213,7 +230,8 @@ bool TemporalUpscaler::OnFrameStart() {
             const int fields = std::fscanf(f, "%d %d %d", &value, &output, &provider);
             if (fields >= 1 && value >= 0 &&
                 value < Ps4RtSettings::PresetCount) {
-                Ps4RtSettings::Get().preset.store(value);
+                if(Ps4RtSettings::Get().native_scene) Ps4RtSettings::Get().scene_preset=value;
+                else Ps4RtSettings::Get().preset.store(value);
             }
             if (fields >= 2 && output >= 0 && output < Ps4RtSettings::OutputCount) {
                 Ps4RtSettings::Get().output_res.store(output);
@@ -232,25 +250,33 @@ bool TemporalUpscaler::OnFrameStart() {
     // The guest's startup resolution patch remains in effect until restart. Keep the FSR
     // model at the applied preset while the menu saves the requested one for run.sh.
     const int preset = Ps4RtSettings::RenderPreset();
-    if (applied_preset != preset || settings.upscaler == Ps4RtSettings::UpscalerOff) failed = false;
+    if (applied_preset != preset || applied_scene_preset!=settings.scene_preset || applied_upscaler!=settings.upscaler || applied_output!=settings.output_res || settings.upscaler == Ps4RtSettings::UpscalerOff) failed = false;
     const bool active = Active();
     const bool jitter_on = active && settings.jitter && !Ps4RtToggle::Disabled(1u << 25);
     const int upscaler = settings.upscaler.load();
     const int output = settings.output_res.load();
     const bool output_changed = !scaled_session && applied_output != output;
     if (output_changed) {
-        target_width = Ps4RtSettings::OutputWidths[output];
-        target_height = Ps4RtSettings::OutputHeights[output];
-        std::printf("Output resolution: %ux%u (live)\n", target_width, target_height);
+        const auto content=Ps4RtOutput::Content(output);
+        target_width = content.width;
+        target_height = content.height;
+        std::printf("Output resolution: %dx%d (live); 16:9 presentation image: %ux%u\n",
+                    Ps4RtOutput::Widths[output],Ps4RtOutput::Heights[output],target_width,target_height);
         failed = false;
         fsr4_failed = false;
     }
-    const bool changed = output_changed || applied_preset != preset || active != last_active ||
+    if(active && settings.native_scene) {
+        auto& state=Ps4RtSettings::Get();state.scene_preset=Ps4RtScene::ForOutput(state.scene_preset,target_width,target_height);
+    }
+    const int scene_preset=settings.scene_preset;
+    const bool scene_changed=settings.native_scene && scene_preset!=applied_scene_preset;
+    const bool changed = output_changed || scene_changed || applied_preset != preset || active != last_active ||
                          jitter_on != last_jitter || applied_upscaler != upscaler;
-    if (applied_upscaler != upscaler) {
+    if (applied_upscaler != upscaler || (Ps4RtSettings::IsFsr4(upscaler) && (scene_changed || output_changed))) {
         // A failed provider keeps a fatal flag internally; a user retry gets a fresh context.
         scheduler.Finish();
         fsr4 = std::make_unique<Fsr4Upscaler>(instance, scheduler);
+        fsr4_failed=false;
         if (Ps4RtSettings::IsFsr4(upscaler)) Ps4RtSettings::Get().fsr4_problem = nullptr;
     }
     if (applied_upscaler != upscaler) fsr4_failed = false; // retry after a menu change
@@ -258,9 +284,13 @@ bool TemporalUpscaler::OnFrameStart() {
     // On GPUs without D32S8 blit support, UI depth is cleared instead of copied from scene.
     if (!scaled_session) {
         if (settings.CompactGraphicsMenu()) {
-            auto size=camera_motion.RenderSize();
-            if (!size[0] || !size[1]) size={1920,1080};
-            scene_targets.SetSize({size[0],size[1]});
+            const auto wanted=Ps4RtScene::Input(active?scene_preset:-1,target_width,target_height);
+            if(!scene_targets.TrySetSize({wanted.width,wanted.height})) {
+                RejectScenePreset("replacement allocation or dimensions refused");
+                const auto fallback=Ps4RtScene::Input(settings.upscaler==Ps4RtSettings::UpscalerOff?-1:settings.scene_preset.load(),target_width,target_height);
+                scene_targets.TrySetSize({fallback.width,fallback.height});
+            }
+            applied_scene_preset=settings.scene_preset;
         } else {
             scene_targets.SetSize(SceneResolution::ForPreset(active ? preset : 0,
                                                             {target_width,target_height}));
@@ -268,8 +298,12 @@ bool TemporalUpscaler::OnFrameStart() {
         render_width = scene_targets.Size().width;
         render_height = scene_targets.Size().height;
     }
-    Ps4RtSettings::Get().active_render_width = Scaled() ? render_width : scene_targets.Size().width;
-    Ps4RtSettings::Get().active_render_height = Scaled() ? render_height : scene_targets.Size().height;
+    if(!settings.native_scene) {
+        Ps4RtSettings::Get().active_render_width = Scaled() ? render_width : scene_targets.Size().width;
+        Ps4RtSettings::Get().active_render_height = Scaled() ? render_height : scene_targets.Size().height;
+    } else if(!active) {
+        Ps4RtSettings::Get().active_render_width=1920;Ps4RtSettings::Get().active_render_height=1080;
+    }
     if (changed || !dispatched_last_frame) reset = true;
     if (changed) jitter_index = 0;
     applied_preset = preset;
@@ -1210,6 +1244,8 @@ vk::ImageView TemporalUpscaler::CachedView(const VideoCore::Image& image, vk::Fo
 namespace Vulkan {
 
 std::array<u32, 2> TemporalUpscaler::SceneSize(u32 w, u32 h) const {
+    if(Ps4RtSettings::Get().native_scene && Ps4RtSettings::Get().scene_preset>=0 && Active())
+        return {scene_targets.Size().width,scene_targets.Size().height};
     if (!scaled_session && !Ps4RtSettings::Get().CompactGraphicsMenu()) return {render_width, render_height};
     // The game's own render size (scene constants); PS4RT_RENDER_RES until the first camera.
     auto size = camera_motion.RenderSize();
@@ -1221,7 +1257,7 @@ std::array<u32, 2> TemporalUpscaler::SceneSize(u32 w, u32 h) const {
 
 float TemporalUpscaler::SceneMipBias() const {
     if (!Active() || Ps4RtSettings::Get().upscaler == Ps4RtSettings::UpscalerTaa) return 0.0f;
-    const float render = float(Ps4RtSettings::Get().active_render_width.load());
+    const float render = float(Ps4RtSettings::Get().native_scene?scene_targets.Size().width:Ps4RtSettings::Get().active_render_width.load());
     const float output = float(Scaled() ? target_width : 1920u);
     return render > 0.0f && render < output ? std::log2(render / output) : 0.0f;
 }
@@ -1483,15 +1519,35 @@ void TemporalUpscaler::RunUiOnly(VideoCore::ImageId color_id, VideoCore::ImageId
     ui_depth = depth_id;
 }
 
+void TemporalUpscaler::RejectScenePreset(const char* reason) {
+    auto& state=Ps4RtSettings::Get();
+    const int previous=last_good_scene_output==state.output_res && last_good_scene_preset!=state.scene_preset?last_good_scene_preset:-1;
+    state.scene_preset=previous;
+    const auto input=Ps4RtScene::Input(previous,target_width,target_height);
+    if(input.width>target_width || input.height>target_height)
+        Ps4RtSettings::SetSceneUpscaler(Ps4RtSettings::UpscalerOff,false);
+    // Force a fresh frame-boundary application. Never retry a failed selection
+    // every frame, especially when Original cannot be an FSR input below 1080p.
+    applied_scene_preset=-2;state.scene_preset_failed=true;reset=true;
+    Ps4RtSettings::Save();
+    std::printf("Scene preset refused: %s; safe preset %d, provider %s\n",reason,previous,Ps4RtSettings::UpscalerName(state.upscaler));
+}
+
 void TemporalUpscaler::AnnounceSceneDispatch(u32 w, u32 h, u32 ow, u32 oh, int provider) {
     if (!Ps4RtSettings::Get().native_scene) return;
     Ps4RtSettings::Get().temporal_problem = nullptr;
+    auto& settings=Ps4RtSettings::Get();
+    settings.active_render_width=w;settings.active_render_height=h;
+    if(applied_scene_preset==settings.scene_preset) {
+        last_good_scene_preset=applied_scene_preset;last_good_scene_output=settings.output_res;settings.scene_preset_applied=applied_scene_preset;
+    }
     static int reported_provider = -1;
-    static u32 reported_width = 0, reported_height = 0;
-    if (provider != reported_provider || reported_width != ow || reported_height != oh) {
+    static u32 reported_width=0,reported_height=0,reported_input_width=0,reported_input_height=0;
+    if(provider!=reported_provider || reported_width!=ow || reported_height!=oh || reported_input_width!=w || reported_input_height!=h) {
         std::printf("PS4RT: %s dispatched %ux%u -> %ux%u before display/HUD, reversed depth\n",
                     Ps4RtSettings::UpscalerName(provider),w,h,ow,oh);
         reported_provider = provider; reported_width = ow; reported_height = oh;
+        reported_input_width=w;reported_input_height=h;
     }
 }
 
@@ -1503,11 +1559,23 @@ void TemporalUpscaler::RunScaled() {
     const u32 iw = color.info.size.width, ih = color.info.size.height;
     const auto [w, h] = SceneSize(iw, ih);
     const u32 ow = target_width, oh = target_height;
+    const bool custom=Ps4RtSettings::Get().native_scene && Ps4RtSettings::Get().scene_preset>=0 && scene_targets.Reduced();
+    // Never label an upsampled native image as a real higher-resolution preset.
+    // Both final scene color and matching depth must come from current raster proxies.
+    if(custom && (!scene_targets.EligibleScene(color) || !scene_targets.EligibleScene(depth) ||
+                  !scene_targets.RasterCurrent(color) || !scene_targets.RasterCurrent(depth))) {
+        std::printf("Scene preset inputs: requested=%ux%u, output=%ux%u; color=%ux%u eligible=%d current=%d; depth=%ux%u eligible=%d current=%d\n",
+            w,h,ow,oh,color.info.size.width,color.info.size.height,int(scene_targets.EligibleScene(color)),int(scene_targets.RasterCurrent(color)),
+            depth.info.size.width,depth.info.size.height,int(scene_targets.EligibleScene(depth)),int(scene_targets.RasterCurrent(depth)));
+        RejectScenePreset("scene color/depth did not retain current real raster proxies");
+        return;
+    }
     if (depth.info.size.width != iw || depth.info.size.height != ih || w > ow || h > oh) {
         return;
     }
     if (!EnsureResources(w, h, ow, oh, false)) {
-        failed = true;
+        if(custom) RejectScenePreset("upscaler resource preparation failed");
+        else failed=true;
         return;
     }
     EnsureUiResources(ow, oh, color.info.pixel_format, depth.info.pixel_format);
@@ -1517,7 +1585,7 @@ void TemporalUpscaler::RunScaled() {
     vk::Image depth_image = depth.GetImage(), color_image = color.GetImage();
     vk::ImageView depth_view{}, color_view{};
     u32 source_width = iw, source_height = ih;
-    if (!scaled_session && !Ps4RtSettings::Get().CompactGraphicsMenu()) {
+    if (!scaled_session && (!Ps4RtSettings::Get().CompactGraphicsMenu() || custom)) {
         VideoCore::ImageViewInfo ci, di;
         ci.format = color.info.pixel_format;
         di.format = depth_format;
@@ -1642,6 +1710,7 @@ void TemporalUpscaler::RunScaled() {
 
     const auto& settings = Ps4RtSettings::Get();
     FfxVkPortableUpscaleDispatchInfo info{};
+    if(!settings.fsr3_available) {failed=true;std::printf("Upscaler: FSR 3.1 fallback refused by the GPU policy\n");return;}
     info.structSize = sizeof(info);
     info.commandBuffer = cmdbuf;
     info.color = Describe(color_image, color.info.pixel_format, source_width, source_height,

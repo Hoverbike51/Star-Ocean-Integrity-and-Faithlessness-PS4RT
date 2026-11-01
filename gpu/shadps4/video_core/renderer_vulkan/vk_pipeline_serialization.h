@@ -45,5 +45,9 @@ void RegisterShaderMeta(const Shader::Info& info,
                         const std::optional<Shader::Gcn::FetchShaderData>& fetch_shader_data,
                         const Shader::StageSpecialization& spec, size_t perm_hash, size_t perm_idx);
 void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx);
+void RegisterShaderCapture(const Shader::Info& info, const Shader::StageSpecialization& spec,
+                           std::span<const u32> gcn_code, std::span<const u32> user_data,
+                           std::span<const u32> geometry_copy_code, size_t perm_hash,
+                           size_t perm_idx);
 
 } // namespace Vulkan

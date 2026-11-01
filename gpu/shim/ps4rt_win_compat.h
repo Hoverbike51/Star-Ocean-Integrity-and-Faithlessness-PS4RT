@@ -3,7 +3,6 @@
 // identity. Force-included into the GPU library on Windows only (CMakeLists.txt); kept free
 // of <windows.h> so its macros do not reach every translation unit.
 #pragma once
-#ifdef _WIN32
 #include <stddef.h>
 #include <wchar.h>
 #ifdef __cplusplus
@@ -47,4 +46,3 @@ static inline int ps4rt_unsetenv(const char* name) {
 #define unsetenv ps4rt_unsetenv
 #endif
 static inline int gettid(void) { return (int)GetCurrentThreadId(); }
-#endif

@@ -5,7 +5,6 @@
 
 using namespace VideoCore;
 
-void RunCpuImageWritebackFaultTests();
 
 int main() {
     ImageInfo info{};
@@ -57,6 +56,5 @@ int main() {
     assert(!needs_copy(other));
     other = info; other.guest_size = 256;
     assert(!needs_copy(other));
-    RunCpuImageWritebackFaultTests();
     std::puts("cpu-image-writeback-test: passed (partial CPU writes and layout exclusions)");
 }

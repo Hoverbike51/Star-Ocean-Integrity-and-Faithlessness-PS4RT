@@ -38,6 +38,7 @@ struct Frame {
     vk::Semaphore ready_semaphore;
     u64 ready_tick;
     bool is_hdr{false};
+    bool title_screen{false};
     u8 id{};
     vk::Format format{}; ///< ps4rt: of `image` (screenshots)
 };

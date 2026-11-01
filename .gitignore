@@ -4,12 +4,12 @@
 !/.gitattributes
 !/LICENSE
 !/README.md
+!/CHANGELOG.md
 !/VERSION
 !/build.sh
-!/build-windows.cmd
 !/build-windows.ps1
+!/build-windows.cmd
 !/msys2-env.sh
-!/run.sh
 !/run.ps1
 !/src/
 !/gpu/
@@ -336,16 +336,11 @@ secrets*
 !/gpu/assets/sounds/confirm.wav
 !/gpu/assets/sounds/cancel.wav
 
-# Release README gameplay screenshot (not a generated cache).
+# Owner-supplied public README and guide screenshots; generated captures remain ignored.
 !/docs/images/
 !/docs/images/readme/
-!/docs/images/readme/sample.png
+!/docs/images/readme/**
 
 # Native Windows launcher artwork supplied for this project.
 !/launcher/assets/
 !/launcher/assets/**
-
-# Exact, licensed ShadPS4Plus extractor payload used by the native launcher.
-# Hashes and upstream licensing information are documented beside the files.
-!/tools/pkg-extractor/
-!/tools/pkg-extractor/**

@@ -3,11 +3,9 @@
 #include "ps4rt_overlay.h"
 #include "ps4rt_png.h"
 #include "ps4rt_settings.h"
+#include "ps4rt_performance_probe.h"
 #include "ps4rt_gpu_workarounds.h"
 #include "ps4rt_copy.h"
-#ifndef _WIN32
-#include <sys/resource.h>
-#endif
 #include "ps4rt_toggles.h"
 #include <algorithm>
 #include <atomic>
@@ -30,6 +28,7 @@
 #include "core/memory.h"
 #include "core/signals.h"
 #include "sdl_window.h"
+#include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 extern "C" {
@@ -238,11 +237,7 @@ extern "C" int ps4rtgpu_init(const Ps4RtGpuConfig* config) {
     StartProfileWriter();
 #endif
     g_sdk_version = config->sdk_version;
-#ifdef _WIN32
     if (config->user_dir && !std::getenv("PS4RT_GPU_USER_DIR")) _putenv_s("PS4RT_GPU_USER_DIR", config->user_dir);
-#else
-    if (config->user_dir) setenv("PS4RT_GPU_USER_DIR", config->user_dir, 0);
-#endif
     Core::Emulator::FillElfInfo(*config);
     const std::string title = config->title ? config->title : "PS4RT";
     const s32 width = config->width, height = config->height;
@@ -273,6 +268,13 @@ extern "C" int ps4rtgpu_init(const Ps4RtGpuConfig* config) {
     Libraries::GnmDriver::RegisterLib(&resolver);
     Libraries::VideoOut::RegisterLib(&resolver);
     return 0;
+}
+
+extern "C" void ps4rtgpu_performance_finish(void) {
+    Ps4RtPerformanceProbe::Finish();
+    // The custom Exit Game action ends the process after this report. Make every cache and live
+    // shader-context write already queued at that point durable before the process exits.
+    Storage::DataBase::Instance().Flush();
 }
 
 namespace Libraries::Kernel { void StartKernelService(); }

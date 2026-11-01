@@ -4,7 +4,7 @@ param(
     [string]$Game,
     [ValidateSet('off', 'fsr3', 'fsr4')]
     [string]$Upscaler,
-    [ValidateSet('1080', '1440', '4k')]
+    [ValidateSet('480', '720', '1080', '1440', '4k')]
     [string]$OutputResolution,
     [switch]$PrepareOnly
 )

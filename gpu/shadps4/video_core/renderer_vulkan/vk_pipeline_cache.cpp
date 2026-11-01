@@ -587,6 +587,8 @@ void PipelineCache::PublishShaders(bool wait) {
             build->spec.info = &program->info;
             RegisterShaderMeta(program->info, build->spec.fetch_shader_data, build->spec,
                                perm_hash, build->permutation);
+            RegisterShaderCapture(program->info, build->spec, build->code, build->user_data,
+                                  build->geometry_code, perm_hash, build->permutation);
             program->AddPermut(build->module, std::move(build->spec));
             build->module = nullptr;
             program->pending.reset();
@@ -1254,6 +1256,11 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         const auto perm_hash = HashCombine(params.hash, 0);
 
         RegisterShaderMeta(new_program->info, spec.fetch_shader_data, spec, perm_hash, 0);
+        RegisterShaderCapture(new_program->info, spec, params.code, params.user_data,
+                              runtime_info.hw_stage == HwStage::Geometry
+                                  ? runtime_info.hw.gs.vs_copy
+                                  : std::span<const u32>{},
+                              perm_hash, 0);
         new_program->AddPermut(module, std::move(spec));
         new_program->info_template = std::make_unique<Shader::Info>(new_program->info);
         Program* program = new_program.get();
@@ -1311,6 +1318,11 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
 
         RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
+        RegisterShaderCapture(info, spec, params.code, params.user_data,
+                              runtime_info.hw_stage == HwStage::Geometry
+                                  ? runtime_info.hw.gs.vs_copy
+                                  : std::span<const u32>{},
+                              perm_hash, perm_idx);
         std::unique_lock lk{programs_mutex};
         program->AddPermut(module, std::move(spec));
     } else {

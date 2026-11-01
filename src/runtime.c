@@ -67,21 +67,14 @@ static ABI void *guest_tls_get_addr(const uint64_t *index) {
 void runtime_start(uint64_t flags) {
     capabilities = flags;
     if (!(flags & 1)) return;
-#ifdef _WIN32
     unsigned int halves[2];
     if (rand_s(&halves[0]) || rand_s(&halves[1])) { fputs("Cannot initialize stack canary\n", stderr); exit(1); }
     memcpy(&stack_canary, halves, sizeof(stack_canary));
-#else
-    FILE *random = fopen("/dev/urandom", "rb");
-    if (!random || fread(&stack_canary, sizeof(stack_canary), 1, random) != 1) {
-        fputs("Cannot initialize stack canary\n", stderr); exit(1);
-    }
-    fclose(random);
-#endif
     stack_canary &= ~UINT64_C(255);
 }
 static void (*report_hook)(void); /* loader extras (ISA site counts) */
 void runtime_report(void) {
+    ps4rtgpu_performance_finish();
     printf("Runtime: _init_env=%zu, atexit=%zu, __cxa_atexit=%zu, registered handlers=%zu\n",
            calls_init, calls_atexit, calls_cxa, handler_count);
     printf("Runtime: static guards acquired=%zu, released=%zu\n", (size_t)guards_acquired, (size_t)guards_released);

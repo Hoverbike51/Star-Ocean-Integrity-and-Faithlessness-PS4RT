@@ -2,7 +2,6 @@
  * runtime uses. Paths are UTF-8: the executable manifest selects the UTF-8 code page. */
 #ifndef PS4RT_COMPAT_WIN_H
 #define PS4RT_COMPAT_WIN_H
-#ifdef _WIN32
 #include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -69,5 +68,4 @@ int compat_cpu_times(int who, int64_t *user_us, int64_t *kernel_us);
 typedef unsigned long long ps4rt_jmp_buf[32];
 __attribute__((returns_twice)) int ps4rt_setjmp(ps4rt_jmp_buf buffer);
 __attribute__((noreturn)) void ps4rt_longjmp(ps4rt_jmp_buf buffer, int value);
-#endif
 #endif

@@ -144,6 +144,7 @@ private:
 
     void Run();
     void RunScaled();
+    void RejectScenePreset(const char* reason);
     void AnnounceSceneDispatch(u32 w, u32 h, u32 ow, u32 oh, int provider);
     void RunUiOnly(VideoCore::ImageId color, VideoCore::ImageId depth);
     void EnsureUiResources(u32 width, u32 height, vk::Format color, vk::Format depth);
@@ -193,6 +194,7 @@ private:
     CameraMotion& camera_motion;
     SceneTargets& scene_targets;
     int applied_preset = -1;
+    int applied_scene_preset=-2,last_good_scene_preset=-1,last_good_scene_output=-1;
     int applied_upscaler = -1;
     bool dispatched_last_frame = false;
     bool last_active = false, last_jitter = false;

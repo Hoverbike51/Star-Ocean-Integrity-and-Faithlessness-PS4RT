@@ -12,11 +12,7 @@
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
 
-#ifdef __unix__
-#include "common/adaptive_mutex.h"
-#else
 #include "common/spin_lock.h"
-#endif
 #include "common/debug.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/region_definitions.h"
@@ -24,11 +20,7 @@
 
 namespace VideoCore {
 
-#ifdef PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP
-using LockType = Common::AdaptiveMutex;
-#else
 using LockType = Common::SpinLock;
-#endif
 
 /**
  * Allows tracking CPU and GPU modification of pages in a contigious 16MB virtual address region.

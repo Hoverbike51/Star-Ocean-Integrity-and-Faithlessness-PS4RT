@@ -117,6 +117,13 @@ public:
     [[nodiscard]] bool DrawPipeIdle() const {
         return !draw_pipe || draw_pipe->Idle();
     }
+    /// Lock-free snapshot consumed by the optional gameplay performance capture.
+    [[nodiscard]] DrawPipe::Telemetry DrawPipelineTelemetry(bool detailed = false) const noexcept {
+        return draw_pipe ? draw_pipe->ReadTelemetry(detailed) : DrawPipe::Telemetry{};
+    }
+    [[nodiscard]] bool TextureBindHelperEnabled() const noexcept {
+        return bind_helper.Available();
+    }
     /// Stage A, end of a submission: its prepared draws stay alive until the recording thread
     /// has recorded them (instead of a drain).
     void RetireSubmission();
@@ -161,9 +168,7 @@ public:
     }
 
     std::thread::id GetGpuCommandProcessorThread();
-#if defined(__linux__) || defined(_WIN32)
     u32 GetGpuCommandProcessorThreadId();
-#endif
 
 private:
     void PrepareRenderState(const GraphicsPipeline* pipeline);
@@ -183,6 +188,7 @@ private:
         bool scene_started = false;
         bool raster_scaling = false;
         u64 upscaler_state = 0;
+        u64 scene_generation=0;
         u64 generation = 0;
         u32 depth_control = 0;
         bool depth_valid = false;

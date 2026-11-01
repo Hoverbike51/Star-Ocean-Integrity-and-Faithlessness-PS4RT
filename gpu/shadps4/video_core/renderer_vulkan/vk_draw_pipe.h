@@ -34,6 +34,8 @@ public:
     using Handler = void (*)(void* context, const u8* packet, u32 size);
 
     DrawPipe(Handler handler_, void* context_) : handler{handler_}, context{context_} {
+        const char* capture = std::getenv("PS4RT_PERF_CAPTURE_DIR");
+        telemetry_enabled = capture && capture[0];
         ring = std::make_unique<u8[]>(Capacity);
         thread = std::jthread([this](std::stop_token stop) { Run(stop); });
     }
@@ -82,6 +84,15 @@ public:
         head += pending_size;
         published.store(head, std::memory_order_seq_cst);
         ++packets;
+        if (telemetry_enabled) {
+            telemetry_packets.store(packets, std::memory_order_relaxed);
+            const u64 queued = head - consumed.load(std::memory_order_acquire);
+            telemetry_queue_bytes.store(queued, std::memory_order_relaxed);
+            if (queued > queue_high_water) {
+                queue_high_water = queued;
+                telemetry_queue_high_water.store(queued, std::memory_order_relaxed);
+            }
+        }
         if (sleeping.load(std::memory_order_seq_cst)) {
             wake.fetch_add(1, std::memory_order_seq_cst);
             wake.notify_one();
@@ -98,28 +109,138 @@ public:
         ReasonRasterizer,
         NumReasons,
     };
+    /// Stage-B work categories sampled only by an explicit performance capture. Some entries
+    /// are nested (for example DirectDraw contains RenderState through DrawEmit).
+    enum Phase : u32 {
+        PhasePacketDecode,
+        PhaseOrderedTask,
+        PhaseDirectDraw,
+        PhaseIndirectDraw,
+        PhaseDispatch,
+        PhaseSpecialDraw,
+        PhaseRenderState,
+        PhaseBindResources,
+        PhaseRenderSetup,
+        PhaseDrawEmit,
+        PhaseBindBuffers,
+        PhaseBindTextures,
+        NumPhases,
+    };
+    struct Telemetry {
+        bool enabled{};
+        u64 packets{};
+        u64 drain_requests{};
+        u64 drain_waits{};
+        u64 drain_cycles{};
+        u64 busy_cycles{};
+        u64 pm4_waits{};
+        u64 queue_bytes{};
+        u64 queue_high_water_bytes{};
+        std::array<u64, NumReasons> requests_by_reason{};
+        std::array<u64, NumReasons> waits_by_reason{};
+        std::array<u64, NumReasons> cycles_by_reason{};
+        std::array<u64, NumPhases> phase_calls{};
+        std::array<u64, NumPhases> phase_cycles{};
+    };
     std::array<u64, NumReasons> drains_by_reason{};
     std::array<u64, NumReasons> cycles_by_reason{};
 
+    [[nodiscard]] Telemetry ReadTelemetry(bool detailed = false) const noexcept {
+        Telemetry result{};
+        result.enabled = telemetry_enabled;
+        if (!telemetry_enabled) {
+            return result;
+        }
+        result.packets = telemetry_packets.load(std::memory_order_relaxed);
+        result.drain_requests = telemetry_drain_requests.load(std::memory_order_relaxed);
+        result.drain_waits = telemetry_drain_waits.load(std::memory_order_relaxed);
+        result.drain_cycles = telemetry_drain_cycles.load(std::memory_order_relaxed);
+        result.busy_cycles = busy_cycles.load(std::memory_order_relaxed);
+        result.pm4_waits = telemetry_pm4_waits.load(std::memory_order_relaxed);
+        result.queue_bytes = telemetry_queue_bytes.load(std::memory_order_relaxed);
+        result.queue_high_water_bytes =
+            telemetry_queue_high_water.load(std::memory_order_relaxed);
+        const u32 first = detailed ? 0 : ReasonConstRam;
+        for (u32 i = first; i < NumReasons; ++i) {
+            result.requests_by_reason[i] =
+                telemetry_requests_by_reason[i].load(std::memory_order_relaxed);
+            result.waits_by_reason[i] =
+                telemetry_waits_by_reason[i].load(std::memory_order_relaxed);
+            result.cycles_by_reason[i] =
+                telemetry_cycles_by_reason[i].load(std::memory_order_relaxed);
+        }
+        if (detailed) {
+            for (u32 i = 0; i < NumPhases; ++i) {
+                result.phase_calls[i] = telemetry_phase_calls[i].load(std::memory_order_relaxed);
+                result.phase_cycles[i] = telemetry_phase_cycles[i].load(std::memory_order_relaxed);
+            }
+        }
+        return result;
+    }
+
+    [[nodiscard]] bool TelemetryEnabled() const noexcept {
+        return telemetry_enabled;
+    }
+
+    void RecordPhase(Phase phase, u64 cycles) noexcept {
+        if (!telemetry_enabled) {
+            return;
+        }
+        telemetry_phase_calls[phase].fetch_add(1, std::memory_order_relaxed);
+        telemetry_phase_cycles[phase].fetch_add(cycles, std::memory_order_relaxed);
+    }
+
     /// Stage A: waits until stage B has run every committed packet.
     void Drain(u32 reason = ReasonRasterizer) {
-        if (consumed.load(std::memory_order_acquire) == head) {
+        const u32 slot = reason < NumReasons ? reason : ReasonRasterizer;
+        if (telemetry_enabled) {
+            ++drain_requests;
+            telemetry_drain_requests.store(drain_requests, std::memory_order_relaxed);
+            telemetry_requests_by_reason[slot].store(++requests_by_reason[slot],
+                                                     std::memory_order_relaxed);
+        }
+        const u64 target = head;
+        if (consumed.load(std::memory_order_acquire) == target) {
             return;
         }
         ++drains;
-        const u32 slot = reason < NumReasons ? reason : ReasonRasterizer;
         ++drains_by_reason[slot];
         const u64 start = __rdtsc();
-        for (u32 spins = 0; consumed.load(std::memory_order_acquire) != head; ++spins) {
-            if (spins < 4096) {
-                __builtin_ia32_pause();
-            } else {
-                std::this_thread::yield();
+        u64 seen = consumed.load(std::memory_order_acquire);
+        u32 spins = 0;
+        while (seen != target && spins < 4096) {
+            __builtin_ia32_pause();
+            ++spins;
+            seen = consumed.load(std::memory_order_acquire);
+        }
+        if (seen != target) {
+            // A repeated SwitchToThread loop consumed most of the GPU command thread in the
+            // Windows CPU trace. Publish the exact position we need and let atomic::wait park
+            // the producer until stage B reaches it. The recheck makes a completion racing
+            // with this store safe without waking on every recorded draw.
+            drain_target.store(target, std::memory_order_release);
+            seen = consumed.load(std::memory_order_acquire);
+            while (seen != target) {
+                consumed.wait(seen, std::memory_order_acquire);
+                seen = consumed.load(std::memory_order_acquire);
             }
+            drain_target.store(0, std::memory_order_release);
         }
         const u64 waited = __rdtsc() - start;
         drain_cycles += waited;
         cycles_by_reason[slot] += waited;
+        if (telemetry_enabled) {
+            telemetry_drain_waits.store(drains, std::memory_order_relaxed);
+            telemetry_drain_cycles.store(drain_cycles, std::memory_order_relaxed);
+            telemetry_waits_by_reason[slot].store(drains_by_reason[slot],
+                                                  std::memory_order_relaxed);
+            telemetry_cycles_by_reason[slot].store(cycles_by_reason[slot],
+                                                   std::memory_order_relaxed);
+            if (slot < ReasonConstRam) {
+                telemetry_pm4_waits.fetch_add(1, std::memory_order_relaxed);
+            }
+            telemetry_queue_bytes.store(0, std::memory_order_relaxed);
+        }
     }
 
     /// Stage A: position after the last committed packet; Reached(position) once B ran it.
@@ -196,6 +317,7 @@ private:
             if (header->size == 0) {
                 at += Capacity - at % Capacity;
                 consumed.store(at, std::memory_order_release);
+                NotifyDrained(at);
                 continue;
             }
             const u64 start = __rdtsc();
@@ -203,6 +325,19 @@ private:
             busy_cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
             at += header->size;
             consumed.store(at, std::memory_order_release);
+            if (telemetry_enabled) {
+                const u64 available_now = published.load(std::memory_order_acquire);
+                telemetry_queue_bytes.store(available_now >= at ? available_now - at : 0,
+                                            std::memory_order_relaxed);
+            }
+            NotifyDrained(at);
+        }
+    }
+
+    void NotifyDrained(u64 at) {
+        const u64 target = drain_target.load(std::memory_order_acquire);
+        if (target != 0 && at >= target) {
+            consumed.notify_one();
         }
     }
 
@@ -214,6 +349,23 @@ private:
     u32 pending_size = 0;
     alignas(64) std::atomic<u64> published{0};
     alignas(64) std::atomic<u64> consumed{0};
+    std::atomic<u64> drain_target{0};
+    bool telemetry_enabled = false;
+    u64 drain_requests = 0;
+    u64 queue_high_water = 0;
+    std::array<u64, NumReasons> requests_by_reason{};
+    std::atomic<u64> telemetry_packets{0};
+    std::atomic<u64> telemetry_drain_requests{0};
+    std::atomic<u64> telemetry_drain_waits{0};
+    std::atomic<u64> telemetry_drain_cycles{0};
+    std::atomic<u64> telemetry_pm4_waits{0};
+    std::atomic<u64> telemetry_queue_bytes{0};
+    std::atomic<u64> telemetry_queue_high_water{0};
+    std::array<std::atomic<u64>, NumReasons> telemetry_requests_by_reason{};
+    std::array<std::atomic<u64>, NumReasons> telemetry_waits_by_reason{};
+    std::array<std::atomic<u64>, NumReasons> telemetry_cycles_by_reason{};
+    std::array<std::atomic<u64>, NumPhases> telemetry_phase_calls{};
+    std::array<std::atomic<u64>, NumPhases> telemetry_phase_cycles{};
     alignas(64) std::atomic<u32> wake{0};
     std::atomic<bool> sleeping{false};
     std::atomic<u32> stage_b_tid{0};

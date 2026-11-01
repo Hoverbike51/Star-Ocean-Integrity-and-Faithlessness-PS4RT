@@ -1,9 +1,7 @@
-/* Guest threads on host pthreads. Each guest thread owns a FreeBSD-style TCB
- * (variant II: static TLS below the TCB). The loader rewrites the eboot's
- * `mov rax, fs:[0]` into `mov rax, gs:[0]`, so GS base = guest TCB while glibc
- * keeps FS. Priorities/affinity are recorded, not enforced by a PS4 scheduler.
- * Windows: GS is the TEB and cannot be moved. The guest TCB lives in a TLS slot of the TEB
- * instead, and the loader rewrites the load to `mov rax, gs:[0x1480+8*slot]` (TlsSlots),
+/* Guest threads on Windows winpthreads. Each guest thread owns a FreeBSD-style TCB
+ * (variant II: static TLS below the TCB). Guest priorities and seven-core affinity
+ * masks map onto native host threads. GS is the Windows TEB and cannot be moved.
+ * The guest TCB lives in a TEB TLS slot instead, and the loader rewrites the load to `mov rax, gs:[0x1480+8*slot]` (TlsSlots),
  * the same 9-byte instruction with another displacement. */
 #define _GNU_SOURCE
 #include "runtime.h"
@@ -15,13 +13,7 @@
 #include <setjmp.h>
 #include <errno.h>
 #include <unistd.h>
-#ifdef _WIN32
 #include <windows.h>
-#else
-#include <sys/syscall.h>
-#include <sys/mman.h>
-#include <asm/prctl.h>
-#endif
 #define ERR(n) ((int32_t)(UINT32_C(0x80020000)|(n)))
 #define ATTR_MAGIC UINT32_C(0x41545452)
 #define STACK_MARGIN (256*1024)
@@ -46,11 +38,7 @@ typedef struct GuestThread {
     ThreadAttr attr;
     char name[32];
     int detached, finished, joined, host_owned;
-#ifdef _WIN32
     ps4rt_jmp_buf exit_jump; /* no SEH unwinding through guest frames */
-#else
-    jmp_buf exit_jump;
-#endif
     struct GuestThread *next;
 } GuestThread;
 
@@ -63,11 +51,84 @@ static const unsigned char *tls_template;
 static uint64_t tls_filesz, tls_memsz, tls_align=16;
 static size_t created, joined_count, exited;
 
+/* One logical processor from each physical core. Keeping sibling SMT processors out of this map
+ * prevents two guest CPU bits from competing for the same physical core. PS4 exposes seven game
+ * cores, so the ordinary 0x7f mask naturally selects at most seven physical host cores. */
+static INIT_ONCE host_core_once=INIT_ONCE_STATIC_INIT;
+static DWORD_PTR host_core_bits[64];
+static unsigned host_core_count;
+
+static BOOL CALLBACK initialize_host_cores(PINIT_ONCE once,PVOID parameter,PVOID *context) {
+    (void)once; (void)parameter; (void)context;
+    DWORD bytes=0;
+    GetLogicalProcessorInformationEx(RelationProcessorCore,NULL,&bytes);
+    SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *entries=bytes ? malloc(bytes) : NULL;
+    DWORD_PTR process_mask=0,system_mask=0;
+    GetProcessAffinityMask(GetCurrentProcess(),&process_mask,&system_mask);
+    if (entries && GetLogicalProcessorInformationEx(RelationProcessorCore,entries,&bytes)) {
+        unsigned char *cursor=(unsigned char *)entries,*end=cursor+bytes;
+        while (cursor<end && host_core_count<64) {
+            SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *entry=(void *)cursor;
+            if (entry->Relationship==RelationProcessorCore) {
+                PROCESSOR_RELATIONSHIP *core=&entry->Processor;
+                for (WORD group=0;group<core->GroupCount && host_core_count<64;++group) {
+                    if (core->GroupMask[group].Group!=0) continue;
+                    DWORD_PTR available=(DWORD_PTR)core->GroupMask[group].Mask & process_mask;
+                    if (!available) continue;
+                    DWORD_PTR first=available & (~available+(DWORD_PTR)1);
+                    host_core_bits[host_core_count++]=first;
+                    break;
+                }
+            }
+            if (!entry->Size) break;
+            cursor+=entry->Size;
+        }
+    }
+    free(entries);
+    if (!host_core_count) {
+        for (unsigned bit=0;bit<sizeof(DWORD_PTR)*8 && host_core_count<64;++bit) {
+            DWORD_PTR value=(DWORD_PTR)1<<bit;
+            if (process_mask & value) host_core_bits[host_core_count++]=value;
+        }
+    }
+    return TRUE;
+}
+
+static DWORD_PTR native_affinity(uint64_t guest_mask) {
+    InitOnceExecuteOnce(&host_core_once,initialize_host_cores,NULL,NULL);
+    if (!guest_mask || !host_core_count) return 0;
+    DWORD_PTR result=0;
+    for (unsigned bit=0;bit<64;++bit)
+        if (guest_mask & (UINT64_C(1)<<bit)) result|=host_core_bits[bit%host_core_count];
+    return result;
+}
+
+/* Orbis priorities are inverse (smaller is more important) and normally occupy 256..767.
+ * Preserve useful ordering without using Windows' TIME_CRITICAL level. */
+static int native_priority(int guest_priority) {
+    if (guest_priority<=478) return THREAD_PRIORITY_HIGHEST;
+    if (guest_priority<=599) return THREAD_PRIORITY_ABOVE_NORMAL;
+    if (guest_priority<=721) return THREAD_PRIORITY_NORMAL;
+    return THREAD_PRIORITY_BELOW_NORMAL;
+}
+
+static HANDLE native_thread_handle(GuestThread *t) {
+    if (t==current) return GetCurrentThread();
+    return t && t->host ? (HANDLE)pthread_gethandle(t->host) : NULL;
+}
+
+static void apply_native_scheduling(GuestThread *t) {
+    HANDLE thread=native_thread_handle(t);
+    if (!thread) return;
+    SetThreadPriority(thread,native_priority(t->attr.prio));
+    DWORD_PTR mask=native_affinity(t->attr.affinity);
+    if (mask) SetThreadAffinityMask(thread,mask);
+}
+
 void runtime_set_main_tls(const void *data,uint64_t filesz,uint64_t memsz,uint64_t align) {
     tls_template=data; tls_filesz=filesz; tls_memsz=memsz; tls_align=align ? align : 16;
 }
 static uint64_t tls_offset(void) { return (tls_memsz+tls_align-1)&~(tls_align-1); }
-#ifdef _WIN32
 /* TEB TlsSlots[64] start at gs:0x1480; slots 64+ live elsewhere and cannot be used. */
 static DWORD tls_slot=TLS_OUT_OF_INDEXES;
 uint32_t runtime_thread_tcb_offset(void) {
@@ -82,12 +143,6 @@ static void set_gs(void *base) {
     if (!TlsSetValue(tls_slot,base)) { fprintf(stderr,"STOP: TlsSetValue failed (%lu)\n",GetLastError()); exit(21); }
 }
 #define tls_block_alloc(size) _aligned_malloc(size,64)
-#else
-static void set_gs(void *base) {
-    if (syscall(SYS_arch_prctl,ARCH_SET_GS,(unsigned long)base)) { perror("STOP: arch_prctl(ARCH_SET_GS)"); exit(21); }
-}
-#define tls_block_alloc(size) aligned_alloc(64,size)
-#endif
 /* Build TCB/static TLS for the calling host thread and point GS at it. */
 static void attach(GuestThread *t) {
     uint64_t offset=tls_offset();
@@ -134,6 +189,7 @@ void runtime_thread_attach_host(const char *name) {
 void runtime_thread_attach_main(void) {
     GuestThread *t=runtime_thread_current();
     snprintf(t->name,sizeof(t->name),"main");
+    apply_native_scheduling(t);
 }
 int32_t runtime_thread_current_priority(void) { return runtime_thread_current()->attr.prio; }
 static GuestThread *find_thread(void *handle) {
@@ -240,23 +296,19 @@ static ABI int32_t attr_set_guard(ThreadAttr **slot,uint64_t size) {
     a->guard=size; return 0;
 }
 
-/* Linux thread names hold 15 characters; longer ones would be rejected. */
+/* Publish the guest thread name through the Unicode Windows thread-description API. */
 static void set_host_name(const char *name) {
-    char host[16]={0};
-    memcpy(host,name,strnlen(name,sizeof(host)-1));
-    pthread_setname_np(pthread_self(),host);
+    wchar_t host[32]={0};
+    MultiByteToWideChar(CP_UTF8,0,name,-1,host,(int)(sizeof(host)/sizeof(*host)));
+    SetThreadDescription(GetCurrentThread(),host);
 }
-#ifdef _WIN32
 #define exit_setjmp(t) ps4rt_setjmp((t)->exit_jump)
 #define exit_longjmp(t) ps4rt_longjmp((t)->exit_jump,1)
-#else
-#define exit_setjmp(t) setjmp((t)->exit_jump)
-#define exit_longjmp(t) longjmp((t)->exit_jump,1)
-#endif
 static void *host_start(void *p) {
     GuestThread *t=p;
     attach(t);
     set_host_name(t->name);
+    apply_native_scheduling(t);
     if (!exit_setjmp(t)) t->result=t->entry(t->argument);
     runtime_thread_keys_cleanup();
     pthread_mutex_lock(&lock); t->finished=1; ++exited; pthread_mutex_unlock(&lock);
@@ -276,15 +328,9 @@ static int32_t create(GuestThread **out,ThreadAttr **attr_slot,GuestEntry entry,
     uint64_t stack=t->attr.stack<MIN_STACK ? MIN_STACK : t->attr.stack;
     /* Stacks below 1 TiB as on PS4; guest code may pack stack addresses. */
     size_t stack_bytes=(size_t)stack+STACK_MARGIN;
-#ifdef _WIN32
     /* Windows places the stack itself (low: no high-entropy ASLR) and commits all of it:
      * guest code has no stack probes and would step over the guard page. */
     pthread_attr_setstacksize(&host,stack_bytes);
-#else
-    void *stack_memory=runtime_low_map(stack_bytes,PROT_READ|PROT_WRITE);
-    if (stack_memory) pthread_attr_setstack(&host,stack_memory,stack_bytes);
-    else pthread_attr_setstacksize(&host,stack_bytes);
-#endif
     publish(t);
     /* Publish the handle before the thread can run and inspect itself. */
     *out=t;
@@ -341,11 +387,15 @@ static ABI int32_t thread_get_sched(GuestThread *t,int *policy,int *param) {
 }
 static ABI int32_t thread_set_prio(GuestThread *t,int prio) {
     if (!find_thread(t)) return ERR(3);
-    t->attr.prio=prio; return 0;
+    t->attr.prio=prio;
+    apply_native_scheduling(t);
+    return 0;
 }
 static ABI int32_t thread_set_affinity(GuestThread *t,uint64_t mask) {
     if (!find_thread(t)) return ERR(3);
-    t->attr.affinity=mask; return 0;
+    t->attr.affinity=mask;
+    apply_native_scheduling(t);
+    return 0;
 }
 static ABI int32_t thread_get_affinity(GuestThread *t,uint64_t *mask) {
     if (!find_thread(t)) return ERR(3);

@@ -10,15 +10,11 @@
 #include "common/logging/log.h"
 #include "common/path_util.h"
 
-#ifdef _WIN32
 #include "common/ntapi.h"
 
 #include <io.h>
 #include <share.h>
 #include <windows.h>
-#else
-#include <unistd.h>
-#endif
 
 #ifdef _MSC_VER
 #define fileno _fileno
@@ -32,7 +28,6 @@ namespace fs = std::filesystem;
 
 namespace {
 
-#ifdef _WIN32
 
 [[nodiscard]] constexpr const wchar_t* AccessModeToWStr(FileAccessMode mode, FileType type) {
     switch (type) {
@@ -85,46 +80,6 @@ namespace {
     }
 }
 
-#else
-
-[[nodiscard]] constexpr const char* AccessModeToStr(FileAccessMode mode, FileType type) {
-    switch (type) {
-    case FileType::BinaryFile:
-        switch (mode) {
-        case FileAccessMode::Read:
-            return "rb";
-        case FileAccessMode::Append:
-            return "ab";
-        case FileAccessMode::Write:
-        case FileAccessMode::ReadWrite:
-            return "r+b";
-        case FileAccessMode::ReadAppend:
-            return "a+b";
-        case FileAccessMode::Create:
-            return "wb";
-        }
-        break;
-    case FileType::TextFile:
-        switch (mode) {
-        case FileAccessMode::Read:
-            return "r";
-        case FileAccessMode::Append:
-            return "a";
-        case FileAccessMode::Write:
-        case FileAccessMode::ReadWrite:
-            return "r+";
-        case FileAccessMode::ReadAppend:
-            return "a+";
-        case FileAccessMode::Create:
-            return "w";
-        }
-        break;
-    }
-
-    return "";
-}
-
-#endif
 
 [[nodiscard]] constexpr int ToSeekOrigin(SeekOrigin origin) {
     switch (origin) {
@@ -184,17 +139,12 @@ int IOFile::Open(const fs::path& path, FileAccessMode mode, FileType type, FileS
     errno = 0;
     int result = 0;
 
-#ifdef _WIN32
     if (flag != FileShareFlag::ShareNone) {
         file = _wfsopen(path.c_str(), AccessModeToWStr(mode, type), ToWindowsFileShareFlag(flag));
         result = errno;
     } else {
         result = _wfopen_s(&file, path.c_str(), AccessModeToWStr(mode, type));
     }
-#else
-    file = std::fopen(path.c_str(), AccessModeToStr(mode, type));
-    result = errno;
-#endif
 
     if (!IsOpen()) {
         const auto ec = std::error_code{result, std::generic_category()};
@@ -222,11 +172,9 @@ void IOFile::Close() {
 
     file = nullptr;
 
-#ifdef _WIN64
     if (file_mapping && file_access_mode == FileAccessMode::ReadWrite) {
         CloseHandle(std::bit_cast<HANDLE>(file_mapping));
     }
-#endif
 }
 
 void IOFile::Unlink() {
@@ -236,7 +184,6 @@ void IOFile::Unlink() {
 
     // Mark the file for deletion
     // TODO: Also remove the file path?
-#ifdef _WIN64
     FILE_DISPOSITION_INFORMATION disposition;
     IO_STATUS_BLOCK iosb;
 
@@ -246,20 +193,12 @@ void IOFile::Unlink() {
     disposition.DeleteFile = TRUE;
     NtSetInformationFile(hfile, &iosb, &disposition, sizeof(disposition),
                          FileDispositionInformation);
-#else
-    if (unlink(file_path.c_str()) != 0) {
-        const auto ec = std::error_code{errno, std::generic_category()};
-        LOG_ERROR(Common_Filesystem, "Failed to unlink the file at path={}, ec_message={}",
-                  PathToUTF8String(file_path), ec.message());
-    }
-#endif
 }
 
 uintptr_t IOFile::GetFileMapping() {
     if (file_mapping) {
         return file_mapping;
     }
-#ifdef _WIN64
     const int fd = fileno(file);
 
     HANDLE hfile = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
@@ -275,10 +214,6 @@ uintptr_t IOFile::GetFileMapping() {
     file_mapping = std::bit_cast<uintptr_t>(mapping);
     ASSERT_MSG(file_mapping, "{}", Common::GetLastErrorMsg());
     return file_mapping;
-#else
-    file_mapping = fileno(file);
-    return file_mapping;
-#endif
 }
 
 std::string IOFile::ReadString(size_t length) const {
@@ -297,11 +232,7 @@ bool IOFile::Flush() const {
 
     errno = 0;
 
-#ifdef _WIN32
     const auto flush_result = std::fflush(file) == 0;
-#else
-    const auto flush_result = std::fflush(file) == 0;
-#endif
 
     if (!flush_result) {
         const auto ec = std::error_code{errno, std::generic_category()};
@@ -319,11 +250,7 @@ bool IOFile::Commit() const {
 
     errno = 0;
 
-#ifdef _WIN32
     const auto commit_result = std::fflush(file) == 0 && _commit(fileno(file)) == 0;
-#else
-    const auto commit_result = std::fflush(file) == 0 && fsync(fileno(file)) == 0;
-#endif
 
     if (!commit_result) {
         const auto ec = std::error_code{errno, std::generic_category()};
@@ -341,11 +268,7 @@ bool IOFile::SetSize(u64 size) const {
 
     errno = 0;
 
-#ifdef _WIN32
     const auto set_size_result = _chsize_s(fileno(file), static_cast<s64>(size)) == 0;
-#else
-    const auto set_size_result = ftruncate(fileno(file), static_cast<s64>(size)) == 0;
-#endif
 
     if (!set_size_result) {
         const auto ec = std::error_code{errno, std::generic_category()};

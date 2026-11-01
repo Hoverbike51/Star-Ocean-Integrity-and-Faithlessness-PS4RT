@@ -5,12 +5,13 @@
 #include <mutex>
 #include <string>
 #include "common/types.h"
+#include "ps4rt_window_size.h"
 
 struct SDL_Window;
 
 namespace Frontend {
 
-enum class WindowSystemType : u8 { Headless, Windows, X11, Wayland, Metal };
+enum class WindowSystemType : u8 { Headless, Windows };
 
 struct WindowSystemInfo {
     void* display_connection = nullptr;
@@ -41,7 +42,10 @@ private:
     std::mutex text_mutex;
     bool text_requested{}, text_active{};
     int display_mode = -1; ///< applied Ps4RtSettings display mode (window thread)
+    int fullscreen_output = -1;
     void ApplyDisplayMode(int mode);
+    void ApplyWindowSize();
+    Ps4RtWindow::SizeSelection size_selection;
     int text_state{};
     std::string text, text_prompt, base_title;
     void UpdateTextTitle();

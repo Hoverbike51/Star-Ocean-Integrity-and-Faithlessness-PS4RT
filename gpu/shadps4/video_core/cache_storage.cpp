@@ -18,12 +18,16 @@
 #include <future>
 #include <mutex>
 #include <queue>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace {
 
 std::mutex submit_mutex{};
 u32 num_requests{};
 std::condition_variable_any request_cv{};
+std::condition_variable idle_cv{};
 std::queue<std::packaged_task<void()>> req_queue{};
 std::mutex m_request{};
 
@@ -38,6 +42,7 @@ void ProcessIO(const std::stop_token& stoken) {
     Common::SetCurrentThreadName("shadPS4:PipelineCacheIO");
 
     while (!stoken.stop_requested()) {
+        std::packaged_task<void()> request{};
         {
             std::unique_lock lk{submit_mutex};
             Common::CondvarWait(request_cv, lk, stoken, [&] { return num_requests; });
@@ -46,24 +51,20 @@ void ProcessIO(const std::stop_token& stoken) {
         if (stoken.stop_requested()) {
             break;
         }
-
-        while (num_requests) {
-            std::packaged_task<void()> request{};
-            {
-                std::scoped_lock lock{m_request};
-                if (req_queue.empty()) {
-                    continue;
-                }
-                request = std::move(req_queue.front());
-                req_queue.pop();
-            }
-
-            if (request.valid()) {
-                request();
-                request.get_future().wait();
-            }
-
+        {
+            std::scoped_lock lock{m_request};
+            ASSERT(!req_queue.empty());
+            request = std::move(req_queue.front());
+            req_queue.pop();
+        }
+        if (request.valid()) {
+            request();
+            request.get_future().wait();
+        }
+        {
+            std::scoped_lock lk{submit_mutex};
             --num_requests;
+            if (!num_requests) idle_cv.notify_all();
         }
     }
 }
@@ -81,6 +82,9 @@ constexpr std::string GetBlobFileExtension(BlobType type) {
     }
     case BlobType::ShaderProfile: {
         return "bin";
+    }
+    case BlobType::ShaderCapture: {
+        return "capture";
     }
     default:
         UNREACHABLE();
@@ -125,6 +129,7 @@ void DataBase::Close() {
         return;
     }
 
+    Flush();
     io_worker.request_stop();
     io_worker.join();
 
@@ -135,6 +140,14 @@ void DataBase::Close() {
 
     opened = false;
     LOG_INFO(Render, "Cache dumped");
+}
+
+void DataBase::Flush() {
+    if (!IsOpened()) {
+        return;
+    }
+    std::unique_lock lk{submit_mutex};
+    idle_cv.wait(lk, [] { return num_requests == 0; });
 }
 
 template <typename T>
@@ -152,7 +165,7 @@ bool WriteVector(const BlobType type, std::filesystem::path&& path_, std::vector
                 }
             } else {
                 // ps4rt: write beside and rename into place, so a game that ends during the
-                // write (the queue is not drained at exit) never leaves a truncated blob that
+                // write never leaves a truncated blob that
                 // the next start would load.
                 using namespace Common::FS;
                 auto temp{path};
@@ -164,7 +177,19 @@ bool WriteVector(const BlobType type, std::filesystem::path&& path_, std::vector
                     }
                 }
                 std::error_code error;
+#ifdef _WIN32
+                if (!MoveFileExW(temp.c_str(), path.c_str(),
+                                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                    error = std::error_code(GetLastError(), std::system_category());
+                    std::filesystem::remove(temp);
+                }
+#else
                 std::filesystem::rename(temp, path, error);
+#endif
+                if (error) {
+                    LOG_ERROR(Render, "Failed to publish cache file {}: {}", path.string(),
+                              error.message());
+                }
             }
         }};
         std::scoped_lock lock{m_request};
@@ -304,6 +329,11 @@ void DataBase::Clear() {
     std::error_code ec;
     u64 removed = 0;
     for (const auto& entry : std::filesystem::directory_iterator(cache_path, ec)) {
+        // Captures are source material for rebuilding a newer shader cache. Unlike SPIR-V,
+        // metadata and pipeline binaries, they intentionally survive a profile/version change.
+        if (entry.path().extension() == ".capture") {
+            continue;
+        }
         if (entry.is_regular_file(ec) && std::filesystem::remove(entry.path(), ec)) {
             ++removed;
         }

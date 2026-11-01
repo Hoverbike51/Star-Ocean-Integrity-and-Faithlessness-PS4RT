@@ -12,74 +12,34 @@
 #include "common/logging/log.h"
 #include "common/thread.h"
 #include "ntapi.h"
-#ifdef __APPLE__
-#include <mach/mach.h>
-#include <mach/mach_time.h>
-#include <pthread.h>
-#elif defined(_WIN32)
 #include <windows.h>
 #include "common/string_util.h"
-#else
-#if defined(__Bitrig__) || defined(__DragonFly__) || defined(__FreeBSD__) || defined(__OpenBSD__)
-#include <pthread_np.h>
-#else
-#include <pthread.h>
-#endif
-#include <sched.h>
-#endif
-#ifndef _WIN32
-#include <unistd.h>
-#endif
 
-#ifdef __FreeBSD__
-#define cpu_set_t cpuset_t
-#endif
 
 namespace Common {
 
-#ifdef __APPLE__
 
 void SetCurrentThreadRealtime(const std::chrono::nanoseconds period_ns) {
-    // CPU time to grant.
-    const std::chrono::nanoseconds computation_ns = period_ns / 2;
+    // The presentation thread drives the guest vblank clock. Leaving it at normal priority on
+    // Windows lets ordinary worker threads delay several 16.7 ms slots at once, which appears as
+    // severe frame-time spikes even while the GPU is mostly idle. HIGHEST is deliberately used
+    // instead of TIME_CRITICAL so audio, input and the desktop cannot be starved.
+    (void)period_ns;
+    const HANDLE thread = GetCurrentThread();
+    SetThreadPriority(thread, THREAD_PRIORITY_HIGHEST);
 
-    // Determine the timebase for converting time to ticks.
-    struct mach_timebase_info timebase{};
-    mach_timebase_info(&timebase);
-    const auto ticks_per_ns =
-        static_cast<double>(timebase.denom) / static_cast<double>(timebase.numer);
-
-    const auto period_ticks =
-        static_cast<u32>(static_cast<double>(period_ns.count()) * ticks_per_ns);
-    const auto computation_ticks =
-        static_cast<u32>(static_cast<double>(computation_ns.count()) * ticks_per_ns);
-
-    thread_time_constraint_policy policy = {
-        .period = period_ticks,
-        .computation = computation_ticks,
-        // Should not matter since preemptible is false, but needs to be >= computation regardless.
-        .constraint = computation_ticks,
-        .preemptible = false,
+    // Do not let Windows apply EcoQoS/power throttling to the timing thread. This is especially
+    // important on heterogeneous and multi-CCD processors where a background classification can
+    // otherwise move the vblank clock onto an unsuitable logical processor.
+    THREAD_POWER_THROTTLING_STATE power{
+        .Version = THREAD_POWER_THROTTLING_CURRENT_VERSION,
+        .ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+        .StateMask = 0,
     };
-
-    int ret = thread_policy_set(
-        pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY,
-        reinterpret_cast<thread_policy_t>(&policy), THREAD_TIME_CONSTRAINT_POLICY_COUNT);
-    if (ret != KERN_SUCCESS) {
-        LOG_ERROR(Common, "Could not set thread to real-time with period {} ns: {}",
-                  period_ns.count(), ret);
-    }
+    SetThreadInformation(thread, ThreadPowerThrottling, &power, sizeof(power));
 }
 
-#else
 
-void SetCurrentThreadRealtime(const std::chrono::nanoseconds period_ns) {
-    // Not implemented
-}
-
-#endif
-
-#ifdef _WIN32
 
 void SetCurrentThreadPriority(ThreadPriority new_priority) {
     auto handle = GetCurrentThread();
@@ -111,13 +71,36 @@ bool AccurateSleep(const std::chrono::nanoseconds duration, std::chrono::nanosec
                    const bool interruptible) {
     const auto begin_sleep = std::chrono::high_resolution_clock::now();
 
+    if (duration.count() <= 0) {
+        SwitchToThread();
+        if (remaining) {
+            *remaining = std::chrono::nanoseconds(0);
+        }
+        return true;
+    }
+
     LARGE_INTEGER interval{
-        .QuadPart = -1 * (duration.count() / 100u),
+        .QuadPart = -std::max<LONGLONG>(1, (duration.count() + 99) / 100),
     };
-    HANDLE timer = ::CreateWaitableTimer(NULL, TRUE, NULL);
-    SetWaitableTimer(timer, &interval, 0, NULL, NULL, 0);
+    // Reuse one timer per thread. Creating and destroying a kernel object every vblank caused
+    // avoidable scheduler traffic, and the legacy timer did not request Windows' high-resolution
+    // wait path.
+    thread_local HANDLE timer = [] {
+        HANDLE value = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                               TIMER_ALL_ACCESS);
+        if (!value) {
+            value = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+        }
+        return value;
+    }();
+    if (!timer || !SetWaitableTimer(timer, &interval, 0, nullptr, nullptr, FALSE)) {
+        Sleep(static_cast<DWORD>((duration.count() + 999'999) / 1'000'000));
+        if (remaining) {
+            *remaining = std::chrono::nanoseconds(0);
+        }
+        return true;
+    }
     const auto ret = WaitForSingleObjectEx(timer, INFINITE, interruptible);
-    ::CloseHandle(timer);
 
     if (remaining) {
         const auto end_sleep = std::chrono::high_resolution_clock::now();
@@ -127,49 +110,7 @@ bool AccurateSleep(const std::chrono::nanoseconds duration, std::chrono::nanosec
     return ret == WAIT_OBJECT_0;
 }
 
-#else
 
-void SetCurrentThreadPriority(ThreadPriority new_priority) {
-    pthread_t this_thread = pthread_self();
-
-    const auto scheduling_type = SCHED_OTHER;
-    s32 max_prio = sched_get_priority_max(scheduling_type);
-    s32 min_prio = sched_get_priority_min(scheduling_type);
-    u32 level = std::max(static_cast<u32>(new_priority) + 1, 4U);
-
-    struct sched_param params;
-    if (max_prio > min_prio) {
-        params.sched_priority = min_prio + ((max_prio - min_prio) * level) / 4;
-    } else {
-        params.sched_priority = min_prio - ((min_prio - max_prio) * level) / 4;
-    }
-
-    pthread_setschedparam(this_thread, scheduling_type, &params);
-}
-
-bool AccurateSleep(const std::chrono::nanoseconds duration, std::chrono::nanoseconds* remaining,
-                   const bool interruptible) {
-    timespec request = {
-        .tv_sec = duration.count() / 1'000'000'000,
-        .tv_nsec = duration.count() % 1'000'000'000,
-    };
-    timespec remain;
-    int ret;
-    while ((ret = nanosleep(&request, &remain)) < 0 && errno == EINTR) {
-        if (interruptible) {
-            break;
-        }
-        request = remain;
-    }
-    if (remaining) {
-        *remaining = std::chrono::nanoseconds(remain.tv_sec * 1'000'000'000 + remain.tv_nsec);
-    }
-    return ret == 0 || errno != EINTR;
-}
-
-#endif
-
-#ifdef _WIN32
 
 // Sets the debugger-visible name of the current thread.
 void SetCurrentThreadName(const char* name) {
@@ -181,48 +122,6 @@ void SetThreadName(void* thread, const char* name) {
     SetThreadDescription(thread, UTF8ToUTF16W(name).data());
 }
 
-#else // !_WIN32, so must be POSIX threads
-
-// MinGW with the POSIX threading model does not support pthread_setname_np
-#if !defined(_WIN32) || defined(_MSC_VER)
-void SetCurrentThreadName(const char* name) {
-    // ps4rt: guest thread names are kept by the C runtime.
-#ifdef __APPLE__
-    pthread_setname_np(name);
-#elif defined(__Bitrig__) || defined(__DragonFly__) || defined(__FreeBSD__) || defined(__OpenBSD__)
-    pthread_set_name_np(pthread_self(), name);
-#elif defined(__NetBSD__)
-    pthread_setname_np(pthread_self(), "%s", (void*)name);
-#elif defined(__linux__)
-    // Linux limits thread names to 15 characters and will outright reject any
-    // attempt to set a longer name with ERANGE.
-    std::string truncated(name, std::min(strlen(name), static_cast<std::size_t>(15)));
-    if (int e = pthread_setname_np(pthread_self(), truncated.c_str())) {
-        errno = e;
-        LOG_ERROR(Common, "Failed to set thread name to '{}': {}", truncated, GetLastErrorMsg());
-    }
-#else
-    pthread_setname_np(pthread_self(), name);
-#endif
-}
-
-void SetThreadName(void* thread, const char* name) {
-    // TODO
-}
-#endif
-
-#if defined(_WIN32)
-void SetCurrentThreadName(const char* name) {
-    // ps4rt: guest thread names are kept by the C runtime.
-    // Do Nothing on MinGW
-}
-
-void SetThreadName(void* thread, const char* name) {
-    // Do Nothing on MinGW
-}
-#endif
-
-#endif
 
 AccurateTimer::AccurateTimer(std::chrono::nanoseconds target_interval)
     : target_interval(target_interval) {}
@@ -243,7 +142,6 @@ void AccurateTimer::End() {
 }
 
 std::string GetCurrentThreadName() {
-#ifdef _WIN32
     PWSTR name{};
     if (FAILED(GetThreadDescription(GetCurrentThread(), &name)) || name == nullptr) {
         return "<unknown name>";
@@ -251,13 +149,6 @@ std::string GetCurrentThreadName() {
     const auto result = Common::UTF16ToUTF8(name);
     LocalFree(name);
     return result;
-#else
-    char name[256];
-    if (pthread_getname_np(pthread_self(), name, sizeof(name)) != 0) {
-        return "<unknown name>";
-    }
-    return std::string{name};
-#endif
 }
 
 } // namespace Common

@@ -8,10 +8,13 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <mutex>
+#include "ps4rt_scene_preset.h"
 
 namespace Ps4RtSettings {
 
 namespace {
+std::mutex settings_file_mutex;
 
 const char* Path() {
     const char* env = std::getenv("PS4RT_CONFIG");
@@ -26,8 +29,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     const float f = float(std::atof(value.c_str()));
     const int i = std::atoi(value.c_str());
     static const char* const overlay_keys[] = {"overlay_fps", "overlay_frametime", "overlay_upscaler",
-                                               "overlay_gpu", "overlay_cpu", "overlay_ram", "overlay_vram"};
-    for (unsigned item = 0; item < 7; ++item) {
+                                               "overlay_gpu", "overlay_cpu", "overlay_ram", "overlay_vram", "overlay_version"};
+    for (unsigned item = 0; item < std::size(overlay_keys); ++item) {
         if (key == overlay_keys[item]) {
             const unsigned bit = 1u << item;
             v.overlay_items = i ? (v.overlay_items | bit) : (v.overlay_items & ~bit);
@@ -51,7 +54,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         return;
     }
     if (key == "menu_tab") {
-        v.menu_tab = i >= 0 && i <= 3 ? i : 0;
+        v.menu_tab = i >= 0 && i <= 4 ? i : 0;
         return;
     }
     if (key == "upscaler") {
@@ -60,6 +63,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
                 v.upscaler = u;
             }
         }
+    } else if(key=="scene_preset") {
+        v.scene_preset=std::clamp(i,-1,PresetCount-1);
     } else if (key == "preset") {
         v.preset = std::clamp(i, 0, PresetCount - 1);
     } else if (key == "sharpen") {
@@ -84,6 +89,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.show_fps = i != 0;
     } else if (key == "display_mode") {
         v.display_mode = Ps4RtGraphics::ParseDisplayMode(value);
+    } else if (key == "window_stretch") {
+        v.window_stretch = i != 0;
     } else if (key == "vsync") {
         v.vsync = i != 0;
     } else if (key == "fps_limit") {
@@ -120,6 +127,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.fsr4_invert_jitter = i != 0;
     } else if (key == "live_resolution") {
         v.live_resolution = value == "auto" ? -1 : std::clamp(i, 0, 1);
+    } else if (key == "output_aspect") {
+        v.output_aspect=std::clamp(i,0,int(Ps4RtOutput::AspectCount)-1);
     } else if (key == "output_res") {
         for (int r = 0; r < OutputCount; ++r) {
             if (value == std::to_string(OutputWidths[r]) + "x" + std::to_string(OutputHeights[r])) {
@@ -137,9 +146,11 @@ Values& Get() {
 }
 
 void Load() {
+    std::scoped_lock file_lock(settings_file_mutex);
     auto& v = Get();
     v.native_scene = true;
     v.temporal_problem = nullptr;
+    v.scene_preset = -1;
     if (v.native_scene) {
         v.upscaler = UpscalerOff;
         v.output_res = OutputDefault;
@@ -189,7 +200,11 @@ void Load() {
         // This title keeps native guest targets. Never import another game's
         // resolution, camera layout, object-motion signatures or jitter policy.
         if (const char* output = std::getenv("PS4RT_OUTPUT_RES")) Set(v, "output_res", output);
-        v.output_res = std::clamp(v.output_res.load(), 1, OutputCount - 1);
+        if (const char* aspect = std::getenv("PS4RT_OUTPUT_ASPECT")) Set(v, "output_aspect", aspect);
+        v.output_res = std::clamp(v.output_res.load(), 0, OutputCount - 1);
+        // The native launcher does not install an engine-rate patch. Never advertise a higher
+        // applied rate merely because an old configuration file requested one.
+        v.engine_fps = 60;
         v.preset = NativeAA;
         SetSceneUpscaler(v.upscaler, false);
         v.temporal_problem = "FSR is waiting for a 3D scene; original rendering is active.";
@@ -203,7 +218,7 @@ void Load() {
     v.startup_engine_fps = v.engine_fps;
     const char* applied = std::getenv("PS4RT_ENGINE_FPS");
     v.applied_engine_fps = applied && applied[0] ? Ps4RtGraphics::ParseEngineFps(std::atoi(applied))
-                                                 : v.engine_fps.load();
+                                                 : (v.native_scene ? 60 : v.engine_fps.load());
     v.startup_deferred_readback = v.deferred_readback;
     v.startup_stale_readback = v.stale_readback;
     v.startup_anisotropy = v.anisotropy;
@@ -220,9 +235,16 @@ bool GraphicsNeedRestart() {
 
 void SetSceneUpscaler(int selected, bool object_motion) {
     auto& v = Get();
+    // Scaled presets provide a real input no larger than the selected output.
+    if (v.native_scene && !Ps4RtOutput::TemporalAllowed(v.output_res)) selected = UpscalerOff;
     if (selected != UpscalerOff && selected != UpscalerFsr3 &&
         selected != UpscalerFsr4 && selected != UpscalerFsr411) selected = UpscalerOff;
+    if(selected==UpscalerFsr3 && v.fsr3_configured && !v.fsr3_available) selected=UpscalerOff;
     const bool temporal = selected != UpscalerOff;
+    if(temporal && v.native_scene) {
+        const auto output=Ps4RtOutput::Content(v.output_res);
+        v.scene_preset=Ps4RtScene::ForOutput(v.scene_preset,output.width,output.height);
+    }
     v.jitter = temporal;
     v.object_motion = temporal && object_motion;
     v.reactive = false;
@@ -246,10 +268,10 @@ void ConfigureUpscalerSupport(bool fsr4, bool fsr411) {
     const int requested = v.upscaler;
     if ((requested == UpscalerFsr4 && !v.fsr4_supported) ||
         (requested == UpscalerFsr411 && !v.fsr411_supported)) {
-        v.fsr4_problem = "GPU does not support the selected FSR 4 shaders; using FSR 3.1";
-        std::printf("Upscaler: %s unsupported on this GPU; falling back to FSR 3.1 before the first frame\n",
-                    UpscalerName(requested));
-        v.upscaler = UpscalerFsr3;
+        SetSceneUpscaler(UpscalerFsr3,false);
+        v.fsr4_problem = "GPU does not support the selected FSR 4 shaders";
+        std::printf("Upscaler: %s unsupported on this GPU; selected %s before the first frame\n",
+                    UpscalerName(requested), UpscalerName(v.upscaler));
     }
 }
 
@@ -260,9 +282,9 @@ void ConfigureDlssSupport(bool available, const char* problem) {
     kept = problem ? problem : "";
     v.dlss_problem = available || kept.empty() ? nullptr : kept.c_str();
     if (v.upscaler == UpscalerDlss && !available) {
-        std::printf("Upscaler: DLSS unavailable (%s); falling back to FSR 3.1\n",
-                    kept.empty() ? "ps4rt_dlss.dll or nvngx_dlss.dll missing" : kept.c_str());
-        v.upscaler = UpscalerFsr3;
+        SetSceneUpscaler(UpscalerFsr3,false);
+        std::printf("Upscaler: DLSS unavailable (%s); selected %s\n",
+                    kept.empty() ? "ps4rt_dlss.dll or nvngx_dlss.dll missing" : kept.c_str(),UpscalerName(v.upscaler));
     }
 }
 
@@ -279,7 +301,7 @@ int RenderPreset() {
 
 bool ResolutionNeedsRestart() {
     const auto& v = Get();
-    // TAA needs the live path (native guest targets): run.sh selects it on restart.
+    // TAA needs the live path (native guest targets): the launch preparation path selects it on restart.
     return FixedRenderSession() &&
         (v.preset != v.startup_preset || v.output_res != v.startup_output_res ||
          (v.upscaler == UpscalerOff) != (v.startup_upscaler == UpscalerOff) ||
@@ -287,12 +309,14 @@ bool ResolutionNeedsRestart() {
 }
 
 void Save() {
+    std::scoped_lock file_lock(settings_file_mutex);
     const auto& v = Get();
     FILE* file = std::fopen(Path(), "w");
     if (!file) {
         std::printf("Settings: cannot write %s\n", Path());
         return;
     }
+    std::fprintf(file,"scene_preset=%d\n",v.scene_preset.load());
     std::fprintf(file,
                  "# ps4rt settings (in-game menu: Insert / R3+L2)\n"
                  "upscaler=%s\npreset=%d\nsharpen=%d\nsharpness=%.2f\njitter=%d\n"
@@ -305,14 +329,15 @@ void Save() {
                  v.debug_view.load(), int(v.show_fps.load()),
                  int(v.fsr4_auto_exposure.load()), int(v.fsr4_invert_jitter.load()));
     std::fprintf(file, "output_res=%dx%d\n", OutputWidths[v.output_res], OutputHeights[v.output_res]);
+    std::fprintf(file, "output_aspect=%d\n", v.output_aspect.load());
     std::fprintf(file,
                  "overlay_fps=%d\noverlay_frametime=%d\noverlay_upscaler=%d\noverlay_gpu=%d\n"
                  "overlay_cpu=%d\noverlay_ram=%d\noverlay_vram=%d\noverlay_scale=%d\noverlay_corner=%d\n"
-                 "overlay_opacity=%d\noverlay_layout=%d\nmenu_tab=%d\n",
+                 "overlay_opacity=%d\noverlay_layout=%d\nmenu_tab=%d\noverlay_version=%d\n",
                  int(v.overlay_items >> 0 & 1), int(v.overlay_items >> 1 & 1), int(v.overlay_items >> 2 & 1),
                  int(v.overlay_items >> 3 & 1), int(v.overlay_items >> 4 & 1), int(v.overlay_items >> 5 & 1),
                  int(v.overlay_items >> 6 & 1), v.overlay_scale.load(), v.overlay_corner.load(),
-                 v.overlay_opacity.load(), v.overlay_layout.load(), v.menu_tab.load());
+                 v.overlay_opacity.load(), v.overlay_layout.load(), v.menu_tab.load(), int(v.overlay_items >> 7 & 1));
     std::fprintf(file,
                  "display_mode=%s\nvsync=%d\nfps_limit=%d\nasync_shaders=%d\n"
                  "fsr1=%d\nrcas=%d\nrcas_strength=%d\nframes_queued=%d\n"
@@ -321,12 +346,14 @@ void Save() {
                  Ps4RtGraphics::DisplayModeKeys[std::clamp(v.display_mode.load(), 0, 2)].data(),
                  int(v.vsync.load()), v.fps_limit.load(), int(v.async_shaders.load()),
                  int(v.fsr1.load()), int(v.rcas.load()), v.rcas_strength.load(), v.frames_queued.load(),
-                 Ps4RtGraphics::Resolutions[std::clamp(v.render_resolution.load(), 0, 5)].data(),
+                 Ps4RtGraphics::Resolutions[std::clamp(v.render_resolution.load(), 0,
+                     int(Ps4RtGraphics::Resolutions.size()) - 1)].data(),
                  v.engine_fps.load(), int(v.deferred_readback.load()), int(v.stale_readback.load()),
                  int(v.restart_unconfirmed.load()));
-    std::fprintf(file, "anisotropy=%d\nvibration=%d\n", v.anisotropy.load(), v.vibration.load());
+    std::fprintf(file, "anisotropy=%d\nvibration=%d\nwindow_stretch=%d\n",
+                 v.anisotropy.load(), v.vibration.load(), int(v.window_stretch.load()));
     std::fprintf(file, "spatial_aa=%d\n", int(v.spatial_aa.load()));
-    // Read by run.sh at start.
+    // Retained for developer startup preparation.
     std::fprintf(file, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"
                                                   : v.live_resolution ? "1" : "0");
     std::fclose(file);

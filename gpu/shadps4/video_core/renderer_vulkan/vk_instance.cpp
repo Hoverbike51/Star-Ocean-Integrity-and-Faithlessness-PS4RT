@@ -766,19 +766,9 @@ bool Instance::CreateDevice() {
         const auto [time_domains_result, time_domains] =
             physical_device.getCalibrateableTimeDomainsEXT();
         if (time_domains_result == vk::Result::eSuccess) {
-#if _WIN64
             const bool has_host_time_domain =
                 std::find(time_domains.cbegin(), time_domains.cend(),
                           vk::TimeDomainEXT::eQueryPerformanceCounter) != time_domains.cend();
-#elif __linux__
-            const bool has_host_time_domain =
-                std::find(time_domains.cbegin(), time_domains.cend(),
-                          vk::TimeDomainEXT::eClockMonotonicRaw) != time_domains.cend();
-#else
-            // Tracy limitation means only Windows and Linux can use host time domain.
-            // https://github.com/shadps4-emu/tracy/blob/c6d779d78508514102fbe1b8eb28bda10d95bb2a/public/tracy/TracyVulkan.hpp#L384-L389
-            const bool has_host_time_domain = false;
-#endif
             if (has_host_time_domain) {
                 static constexpr std::string_view context_name{"vk_rasterizer"};
                 profiler_context = TracyVkContextHostCalibrated(

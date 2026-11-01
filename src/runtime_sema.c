@@ -36,11 +36,7 @@ static void host_check(int e) {
 }
 /* Waits use this clock for their deadlines. winpthreads condition variables accept only
  * CLOCK_REALTIME (pthread_condattr_setclock(CLOCK_MONOTONIC) fails with EINVAL). */
-#ifdef _WIN32
 #define WAIT_CLOCK CLOCK_REALTIME
-#else
-#define WAIT_CLOCK CLOCK_MONOTONIC
-#endif
 static uint64_t now_ns(void) {
     struct timespec t;
     if (clock_gettime(WAIT_CLOCK,&t)) { perror("clock_gettime"); exit(1); }

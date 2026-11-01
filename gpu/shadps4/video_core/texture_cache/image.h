@@ -63,6 +63,8 @@ struct UniqueImage {
     }
 
     void Create(const vk::ImageCreateInfo& image_ci);
+    /// Nonfatal allocation for transactional render-preset preparation.
+    vk::Result TryCreate(const vk::ImageCreateInfo& image_ci);
 
     void Destroy();
 
@@ -193,6 +195,7 @@ public:
     boost::container::static_vector<u64, 16> mip_hashes{};
     u64 lru_id{};
     u64 hash{};
+    bool title_screen_atlas = false;
 
 private:
     static Common::IncrementalIdProvider<u64> global_image_uid;

@@ -11,6 +11,7 @@
 
 #include <array>
 #include <memory>
+#include "ps4rt_scene_preset.h"
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
@@ -22,10 +23,9 @@ class Scheduler;
 class Fsr4Upscaler {
 public:
     static constexpr int DynamicPreset = 5;
-    /// Native input is fixed; 1440p's 4:3 ratio needs the variable-ratio model.
-    static constexpr int NativeInputPreset(u32 w, u32 h, u32 ow, u32 oh) {
-        return w == ow && h == oh ? 0 :
-               w * 2 == ow && h * 2 == oh ? 3 : DynamicPreset;
+    /// Select the model from actual input dimensions, including all live presets.
+    static int NativeInputPreset(u32 w, u32 h, u32 ow, u32 oh) {
+        return Ps4RtScene::ModelForInput(w,h,ow,oh);
     }
     Fsr4Upscaler(const Instance& instance, Scheduler& scheduler);
     ~Fsr4Upscaler();

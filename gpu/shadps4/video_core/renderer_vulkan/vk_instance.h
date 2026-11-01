@@ -7,6 +7,7 @@
 #include <unordered_map>
 
 #include "video_core/renderer_vulkan/vk_platform.h"
+#include "ps4rt_upscaler_support.h"
 
 #define TRACY_VK_USE_SYMBOL_TABLE
 #include <tracy/TracyVulkan.hpp>
@@ -302,10 +303,15 @@ public:
     /// ps4rt: the FSR 4 v07 INT8/DOT4 shaders can run (Float16, Int8, Int16, packed int8 dot
     /// products, linear compute derivatives, extended storage image formats).
     bool IsFsr4Int8Supported() const {
-        return vk12_features.shaderFloat16 && vk12_features.shaderInt8 && features.shaderInt16 &&
-               vk13_features.shaderIntegerDotProduct && compute_shader_derivatives &&
-               compute_shader_derivatives_features.computeDerivativeGroupLinear &&
-               features.shaderStorageImageExtendedFormats;
+        return Ps4RtUpscaler::Fsr4Requirements{
+            bool(vk12_features.shaderFloat16),bool(vk12_features.shaderInt8),bool(features.shaderInt16),
+            bool(vk13_features.shaderIntegerDotProduct),bool(features.shaderStorageImageExtendedFormats),
+            compute_shader_derivatives && bool(compute_shader_derivatives_features.computeDerivativeGroupLinear),
+            bool(vk11_props.subgroupSupportedStages&vk::ShaderStageFlagBits::eCompute) &&
+                bool(vk11_props.subgroupSupportedOperations&vk::SubgroupFeatureFlagBits::eQuad),
+            properties.limits.maxComputeWorkGroupInvocations>=256 &&
+                properties.limits.maxComputeWorkGroupSize[0]>=256 &&
+                properties.limits.maxComputeWorkGroupSize[1]>=8}.Supported();
     }
 
     /// ps4rt: FSR 4.1.1 (INT8 model passes and VK_VALVE_shader_mixed_float_dot_product).

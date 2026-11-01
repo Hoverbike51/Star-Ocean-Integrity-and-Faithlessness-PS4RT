@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // ps4rt: graphics options of the in-game menu (Insert / R3+L2), kept in ps4rt.ini. The live ones
-// apply on the next frame; the startup ones (patches, GPU readback modes) are read by run.py and
-// apply through "Apply and restart". The launcher reads and writes the same keys.
+// apply on the next frame. Startup-only settings are read during preparation or runtime
+// initialization. The launcher reads and writes the same keys.
 #pragma once
 
 #include <array>
@@ -19,8 +19,8 @@ inline constexpr std::array<const char*, DisplayModeCount> DisplayModeNames = {
 inline constexpr std::array<int, 5> FpsLimits = {30, 60, 120, 240, 0};
 
 /// Game patch suffixes ("Resolution Patch - <name>"); "native" is no resolution patch.
-inline constexpr std::array<std::string_view, 6> Resolutions = {"native", "480p", "720p",
-                                                                "1440p", "1800p", "4K"};
+inline constexpr std::array<std::string_view, 5> Resolutions = {"native", "480p", "720p",
+                                                                "1440p", "4K"};
 /// Engine frame rate ceilings: 60 is the game's own, 120 and 240 are frame rate patches.
 inline constexpr std::array<int, 3> EngineFps = {60, 120, 240};
 
@@ -34,6 +34,9 @@ constexpr int IndexOf(const std::array<T, N>& values, const T& value, int fallba
 
 inline int ParseDisplayMode(std::string_view text) {
     return IndexOf(DisplayModeKeys, text, Windowed);
+}
+inline bool StretchWindow(int mode, bool requested) {
+    return mode == Windowed && requested;
 }
 /// A listed limit, else unlimited.
 inline int ParseFpsLimit(int value) {

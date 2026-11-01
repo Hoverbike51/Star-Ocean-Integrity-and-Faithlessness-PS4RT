@@ -3,9 +3,6 @@
 
 #include <chrono>
 #include <pthread.h>
-#ifndef _WIN32
-#include <sys/resource.h>
-#endif
 #include <time.h>
 #include "ps4rt_copy.h"
 #include "ps4rt_toggles.h"
@@ -105,17 +102,9 @@ void Liverpool::ProcessCommands() {
 
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
-#ifndef _WIN32
-    if (clockid_t clock; pthread_getcpuclockid(pthread_self(), &clock) == 0) {
-        ;
-    }
-#else
     ;
-#endif
     gpu_id = std::this_thread::get_id();
-#if defined(__linux__) || defined(_WIN32)
     gpu_tid = gettid();
-#endif
 
     while (!stoken.stop_requested()) {
         {

@@ -18,9 +18,10 @@ contributors remain credited here even where their game-specific features were r
 - [cuesta4 / shadPS4](https://github.com/cuesta4/shadPS4/tree/eltutz):
   related renderer and compatibility contributions.
 - [AzaharPlus / shadPS4Plus PKG Extractor](https://github.com/AzaharPlus/shadPS4Plus):
-  bundled GPL-2.0 PKG extraction utility used by the Windows launcher. The upstream
-  executable remains isolated under `tools/pkg-extractor`; its libc++ and zlib notices
-  are distributed alongside it.
+  historical PKG helper used by earlier Windows builds. It has been replaced by the
+  independent HoverMods Vault implementation and is no longer included in the player package.
+- [HekamiAeon / SO5-PS4RT](https://github.com/HekamiAeon/Star-Ocean-Integrity-and-Faithlessness-PS4RT):
+  Main Linux build version. The Windows build was forked from this Linux version.
 
 ## Research and reverse-engineering tools
 
@@ -36,11 +37,26 @@ contributors remain credited here even where their game-specific features were r
 This project retains source-level copyright, SPDX and license notices.
 The project license is [GPL-2.0-or-later](../LICENSE). Adapted files and vendored
 dependencies keep their original license notices under their respective source
-directories. Source builds may link local system dependencies. The Linux v1.1 binary archive bundles audited FFmpeg and other application libraries with independent redistribution terms.
+directories. Source builds may link local system dependencies; the Windows package includes
+their declared terms and installed notices in its own dependency inventory.
 
 FSR-Vulkan/AMD FidelityFX, ImGui, LibAtrac9, Sirit, half, xbyak, miniz, magic_enum,
 DejaVu fonts, and additional vendored libraries retain their own authors and licenses.
 Refer to the included third-party source and license files for the applicable terms.
+Windows player packages additionally collect the exact bundled DLL package versions,
+declared licenses, upstream URLs and installed notices under docs/third-party/. GNU
+license texts for these dependencies and notices from linked source dependencies are retained.
+
+The native Windows updater uses the existing Boost headers (Boost Software License 1.0),
+miniz (MIT), and the Windows WinHTTP, CNG and version-resource APIs. Its standalone installer
+links the CLANG64 libc++ runtime statically; the libc++ notice is retained under
+`docs/LIBCXX_LICENSE.txt`. It does not use a Python, PowerShell,
+or .NET update engine.
+
+HoverMods Vault's native PKG Extractor uses original C++ source, Windows CNG and miniz.
+Format research references and supported-package limits are listed in NATIVE_PKG.md.
+The miniz notice is distributed in docs/MINIZ_LICENSE.txt. The independent extractor's
+publisher metadata does not change any upstream runtime or third-party attribution.
 
 A distinct PS4RT project name does not change the copyright or origin of
 code incorporated from upstream projects.

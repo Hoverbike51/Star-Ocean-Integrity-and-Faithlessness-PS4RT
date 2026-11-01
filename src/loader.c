@@ -12,20 +12,7 @@
 #if !defined(__x86_64__) || !defined(__GNUC__)
 #error This prototype requires x86-64 GCC or Clang (including MinGW).
 #endif
-#ifdef _WIN32
 #include <windows.h>
-#else
-#include <sys/mman.h>
-#include <malloc.h>
-#include <unistd.h>
-#include <signal.h>
-#include <ucontext.h>
-#include <fcntl.h>
-#include <dlfcn.h>
-#include <execinfo.h>
-#include <sys/syscall.h>
-#include <sys/uio.h>
-#endif
 
 typedef struct { uint64_t address, size, flags; } Segment;
 typedef struct { uint64_t target, kind, value, addend; } Reloc;
@@ -55,27 +42,17 @@ static size_t round_page(size_t size) { return (size + page_size - 1) & ~(page_s
 static void *allocate(size_t size) {
     void *low=runtime_low_map(size,PROT_READ|PROT_WRITE);
     if (low) return low;
-#ifdef _WIN32
     void *p = VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (!p) fail("VirtualAlloc failed");
-#else
-    void *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p == MAP_FAILED) fail("mmap failed");
-#endif
     return p;
 }
 static void protect(void *p, size_t size, unsigned flags) {
-#ifdef _WIN32
     DWORD old, mode = PAGE_NOACCESS;
     if (flags & 1) mode = (flags & 2) ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ;
     else if (flags & 2) mode = PAGE_READWRITE;
     else if (flags & 4) mode = PAGE_READONLY;
     if (!VirtualProtect(p, size, mode, &old)) fail("VirtualProtect failed");
     FlushInstructionCache(GetCurrentProcess(), p, size);
-#else
-    int mode = ((flags & 4) ? PROT_READ : 0) | ((flags & 2) ? PROT_WRITE : 0) | ((flags & 1) ? PROT_EXEC : 0);
-    if (mprotect(p, size, mode)) fail("mprotect failed");
-#endif
 }
 static ABI __attribute__((noreturn)) void unresolved(uint32_t id, uintptr_t argument) {
     if (id >= import_count) fail("bad import trap index");
@@ -93,16 +70,7 @@ static ABI __attribute__((noreturn)) void unresolved(uint32_t id, uintptr_t argu
     fflush(NULL);
     _exit(20); /* no destructors: GPU, audio and guest threads are still running */
 }
-#ifndef _WIN32
-/* enter_on_stack(entry, arg0, arg1, stack_top): call entry(arg0,arg1) on a new stack. */
-void enter_on_stack(void *entry, void *arg0, void *arg1, void *top);
-__asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
-        " push %rbp\n mov %rsp,%rbp\n and $-16,%rcx\n mov %rcx,%rsp\n"
-        " mov %rdi,%rax\n mov %rsi,%rdi\n mov %rdx,%rsi\n call *%rax\n"
-        " mov %rbp,%rsp\n pop %rbp\n ret\n");
-#endif
 static ABI void guest_exit(void) { puts("Runtime: process finalizer callback reached"); }
-#ifdef _WIN32
 static void describe_address(char *out, size_t size, uintptr_t address) {
     HMODULE module=NULL;
     char name[MAX_PATH]="?";
@@ -220,111 +188,6 @@ static uint64_t patch_tcb_loads(const Segment *segments, uint64_t count) {
     }
     return patched;
 }
-#endif
-#ifndef _WIN32
-/* ucontext gregs of IsaRegs.gpr (x86 numbering). */
-static const int isa_gregs[16]={REG_RAX,REG_RCX,REG_RDX,REG_RBX,REG_RSP,REG_RBP,REG_RSI,REG_RDI,
-                                REG_R8,REG_R9,REG_R10,REG_R11,REG_R12,REG_R13,REG_R14,REG_R15};
-/* Fatal-only, bounded CPU context. Read stack words through the kernel: a bad
- * guest pointer must not fault again while reporting the original failure.
- * Raw words are clues to a bad indirect call/return, not an unwound call chain. */
-
-static void fault(int sig, siginfo_t *info, void *context) {
-    if (sig == SIGTRAP && isa_table) {
-        /* An int3 ISA site (RIP is past the CC byte); any other trap ends in the report below. */
-        greg_t *g = ((ucontext_t *)context)->uc_mcontext.gregs;
-        IsaRegs regs;
-        uintptr_t rip;
-        for (int i = 0; i < 16; ++i) regs.gpr[i] = (uint64_t)g[isa_gregs[i]];
-        regs.rflags = (uint64_t)g[REG_EFL];
-        if (isa_rewrite_trap(isa_table, (uintptr_t)g[REG_RIP] - 1, &regs, &rip)) {
-            for (int i = 0; i < 16; ++i) g[isa_gregs[i]] = (greg_t)regs.gpr[i];
-            g[REG_EFL] = (greg_t)regs.rflags;
-            g[REG_RIP] = (greg_t)rip;
-            return;
-        }
-    }
-    /* GPU page tracking (write-protected guest pages) is resolved first. */
-    if (gpu_enabled && sig == SIGSEGV && ps4rtgpu_handle_fault(context, info->si_addr)) return;
-    /* A speculative guest memory read (runtime_memory.c) failed: resume its recovery point. */
-    if ((sig == SIGSEGV || sig == SIGBUS) && runtime_fault_recover) {
-        sigjmp_buf *recover = runtime_fault_recover;
-        runtime_fault_recover = NULL;
-        sigset_t unblock;
-        sigemptyset(&unblock);
-        sigaddset(&unblock, sig);
-        pthread_sigmask(SIG_UNBLOCK, &unblock, NULL);
-        siglongjmp(*recover, 1);
-    }
-    /* The process is terminating: dladdr/snprintf are acceptable here. */
-    ucontext_t *uc = context;
-    uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
-    char line[512];
-    Dl_info where;
-    int site = isa_table ? isa_rewrite_site_of_stub(isa_table, rip) : -1;
-    int can_unwind = 1;
-    char emulating[64] = "";
-    if (site >= 0)
-        snprintf(emulating, sizeof(emulating), " While emulating site 0x%" PRIx64 " (%s)",
-                 isa_table->sites[site].offset, isa_kind_name(isa_table->sites[site].kind));
-    if (site >= 0 || rip - (uintptr_t)image < 0x10000000)
-        snprintf(line, sizeof(line), "Guest fault (signal %d) at guest offset 0x%lx, address %p%s\n",
-                 sig, (unsigned long)(rip - (uintptr_t)image), info->si_addr, emulating);
-    else if (dladdr((void *)rip, &where) && where.dli_fname)
-        snprintf(line, sizeof(line), "Host fault (signal %d) in %s+0x%lx (%s), address %p\n", sig, where.dli_fname,
-                 (unsigned long)(rip - (uintptr_t)where.dli_fbase), where.dli_sname ? where.dli_sname : "?", info->si_addr);
-    else {
-        snprintf(line, sizeof(line), "Fault (signal %d) at RIP %p, address %p\n", sig, (void *)rip, info->si_addr);
-        /* libc's unwinder may dereference an unmapped instruction address and
-         * fault again. The bounded kernel-read stack report remains available. */
-        can_unwind = 0;
-    }
-    { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
-
-
-    /* Host call chain (frames with unwind info; guest frames end it). */
-    void *frames[32];
-    int depth = can_unwind ? backtrace(frames, 32) : 0;
-    for (int i = 2; i < depth; ++i) {
-        if (dladdr(frames[i], &where) && where.dli_fname)
-            snprintf(line, sizeof(line), "  #%d %s+0x%lx (%s)\n", i, where.dli_fname,
-                     (unsigned long)((uintptr_t)frames[i] - (uintptr_t)where.dli_fbase), where.dli_sname ? where.dli_sname : "?");
-        else
-            snprintf(line, sizeof(line), "  #%d %p\n", i, frames[i]);
-        ssize_t written_=write(2, line, strlen(line)); (void)written_;
-    }
-    if (isa_table) { isa_rewrite_report(isa_table, stderr); fflush(stderr); }
-    _exit(128 + sig);
-}
-#endif
-#ifndef _WIN32
-/* Watchdog: dump RIP and the rbp frame chain of every thread (guest offsets
- * when inside the image). Reads use process_vm_readv so bad frames cannot fault. */
-static uintptr_t exe_base;
-
-
-
-static void watchdog(int sig, siginfo_t *info, void *context) {
-    (void)context;
-    (void)info;
-    const char head[]="STOP: watchdog timeout; thread stacks:\n";
-    { ssize_t written_=write(2,head,sizeof(head)-1); (void)written_; }
-
-    int dir=open("/proc/self/task",O_RDONLY|O_DIRECTORY);
-    char buffer[4096];
-    long n;
-    pid_t self=gettid();
-    while (dir>=0 && (n=syscall(SYS_getdents64,dir,buffer,sizeof(buffer)))>0)
-        for (long at=0; at<n;) {
-            struct { uint64_t ino; int64_t off; unsigned short reclen; unsigned char type; char name[]; } *d=(void *)(buffer+at);
-            pid_t tid=(pid_t)strtol(d->name,NULL,10);
-            if (tid>0 && tid!=self) { syscall(SYS_tgkill,getpid(),tid,SIGUSR2); usleep(20000); }
-            at+=d->reclen;
-        }
-    usleep(100000);
-    _exit(128 + sig);
-}
-#endif
 /* param.sfo lookup: string or integer value of key, 0 when absent. */
 static int sfo_value(const char *path, const char *key, char *text, size_t text_size, uint32_t *number) {
     FILE *f=fopen(path,"rb");
@@ -390,15 +253,13 @@ static void apply_patches(const char *path, Segment *segments, uint64_t ns, cons
     fclose(f);
     printf("Patches: %" PRIu64 " writes, %" PRIu64 " bytes applied, %" PRIu64 " pointers rebased\n",count,bytes,rebased);
 }
-/* Restarts the game through run.sh (the settings menu: a new render resolution is a patch
- * applied at start). Descriptors are closed first so the old GPU device and its memory are
- * released before the new process opens its own. */
+/* Restart through an explicitly supplied Windows command. Startup-patched settings
+ * require a new process; the caller controls preparation and GPU shutdown ordering. */
 void runtime_restart(void) {
     fflush(NULL);
-#ifdef _WIN32
-    /* run.py sets PS4RT_RESTART_COMMAND: the launch command line, started again (new patches). */
+    /* The developer launch helper may supply PS4RT_RESTART_COMMAND for a prepared relaunch. */
     const char *command=getenv("PS4RT_RESTART_COMMAND");
-    puts("Runtime: restarting through run.py");
+    puts("Runtime: restarting through PS4RT_RESTART_COMMAND");
     if (!command || !*command) { fputs("runtime_restart: PS4RT_RESTART_COMMAND is not set\n",stderr); _exit(1); }
     char *line=_strdup(command);
     /* Same output handles: a launcher reading the game's log keeps reading the new launch. */
@@ -410,21 +271,8 @@ void runtime_restart(void) {
         fprintf(stderr,"runtime_restart: CreateProcess failed (%lu)\n",GetLastError()); _exit(1);
     }
     CloseHandle(process.hThread); CloseHandle(process.hProcess);
-    /* The new launch waits for this process's GPU device to go away (run.py --after). */
+    /* Release this process and its GPU resources after handing off the restart command. */
     TerminateProcess(GetCurrentProcess(),0);
-#else
-    const char *command = getenv("PS4RT_RESTART_COMMAND");
-    syscall(SYS_close_range, 3u, ~0u, 0u);
-    if (command && *command) {
-        puts("Runtime: restarting through PS4RT_RESTART_COMMAND");
-        execl("/bin/sh", "sh", "-c", command, (char *)NULL);
-    } else {
-        puts("Runtime: restarting through run.sh");
-        execlp("bash", "bash", "run.sh", (char *)NULL);
-    }
-    perror("runtime_restart: exec");
-    _exit(1);
-#endif
 }
 
 /* The guest code needs the PS4's instruction sets (#33, #66); PS4RT_CPU_CHECK=0 skips this. A
@@ -446,12 +294,6 @@ static int cpu_supported(char *missing, size_t size) {
 
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
-#ifndef _WIN32
-    /* Keep host heap objects handed to the guest (thread handles, TLS) in the
-       non-PIE brk heap, i.e. below 1 TiB: the guest packs pointers into 40 bits. */
-    mallopt(M_ARENA_MAX,1);
-    mallopt(M_MMAP_THRESHOLD,32*1024*1024);
-#endif
 
     char missing[128];
     if (argc == 2 && !strcmp(argv[1], "--cpu-features")) {
@@ -465,12 +307,10 @@ int main(int argc, char **argv) {
         runtime_pad_describe();
         return 0;
     }
-#ifdef _WIN32
     /* The PS4 user range must stay free of host allocations (GPU driver, heaps), and the guest
      * TCB needs one of the 64 TEB TLS slots before DLLs (Vulkan drivers) take them. */
     runtime_memory_reserve();
     runtime_thread_tcb_offset();
-#endif
     int cpu_only = 0, strict_imports = 0, check_imports = 0;
     unsigned timeout_seconds = 10;
     const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL, *isa_file=NULL;
@@ -538,9 +378,13 @@ int main(int argc, char **argv) {
         snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0);
         if (sfo_value(sfo,"INSTALL_DIR_SAVEDATA",id,sizeof(id),NULL) || sfo_value(sfo,"TITLE_ID",id,sizeof(id),NULL))
             runtime_savedata_configure(id);
+        const char* backup_launch=getenv("SO5_BACKUP_AT_LAUNCH");
+        if(backup_launch && !strcmp(backup_launch,"1") && runtime_savedata_backup_at_launch()) {
+            fprintf(stderr,"Runtime: could not complete the pre-launch save backup. Original saves are unchanged; launch cancelled.\n");
+            return 1;
+        }
     }
     ps4rtgpu_register_kernel();
-#ifdef _WIN32
     SYSTEM_INFO system_info; GetSystemInfo(&system_info); page_size = system_info.dwPageSize;
     AddVectoredExceptionHandler(1, vectored_fault);
     SetUnhandledExceptionFilter(unhandled_fault);
@@ -552,19 +396,6 @@ int main(int argc, char **argv) {
             fprintf(stderr,"PS4RT_STRICT_HANDLES: policy not set (%lu)\n",GetLastError());
     }
     (void)timeout_seconds; /* no watchdog on Windows */
-#else
-    page_size = (size_t)sysconf(_SC_PAGESIZE);
-    struct sigaction sa = {0}; sa.sa_sigaction = fault; sa.sa_flags = SA_SIGINFO;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGSEGV, &sa, NULL); sigaction(SIGILL, &sa, NULL); sigaction(SIGBUS, &sa, NULL);
-    sigaction(SIGTRAP, &sa, NULL); /* int3 ISA sites */
-    Dl_info self_info;
-    if (dladdr((void *)main,&self_info)) exe_base=(uintptr_t)self_info.dli_fbase;
-
-    struct sigaction alarm_action = {0}; alarm_action.sa_sigaction = watchdog; alarm_action.sa_flags = SA_SIGINFO;
-    sigemptyset(&alarm_action.sa_mask); sigaction(SIGALRM, &alarm_action, NULL);
-    alarm(timeout_seconds); /* 0 disables the watchdog */
-#endif
     FILE *f = fopen(argv[1], "rb");
     if (!f) fail("cannot open boot file; run prepare.py first");
     char magic[8];
@@ -736,9 +567,7 @@ int main(int argc, char **argv) {
         _exit(missing ? 1 : 0); /* no destructors: GPU threads are running */
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
-#ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
-#endif
     if (isa_table) {
         IsaReport r = isa_rewrite_apply(isa_table, image, stubs, isa_sets);
         if (r.unsupported_needed) {
@@ -786,15 +615,7 @@ int main(int argc, char **argv) {
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
     entered_game=1;
     struct { uint64_t argc; const char *argv[2]; } params = {1, {"/app0/eboot.bin", NULL}};
-#ifdef _WIN32
     typedef void (ABI *Entry)(void *, void (ABI *)(void));
     ((Entry)(image + entry))(&params, guest_exit);
-#else
-    /* The guest main thread runs on a stack below 1 TiB like PS4 stacks. */
-    enum { MAIN_STACK=8*1024*1024 };
-    unsigned char *stack=runtime_low_map(MAIN_STACK,PROT_READ|PROT_WRITE);
-    if (!stack) fail("cannot allocate guest main stack");
-    enter_on_stack(image+entry,&params,(void *)guest_exit,stack+MAIN_STACK-64);
-#endif
     fail("entry unexpectedly returned");
 }

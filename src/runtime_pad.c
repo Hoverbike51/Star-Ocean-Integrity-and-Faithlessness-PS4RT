@@ -3,7 +3,7 @@
  *
  * Default keyboard layout (PS4RT_KEY_MAP changes the buttons, see apply_button_map):
  *   WASD left stick, arrow keys right stick, Space Cross, LShift Circle,
- *   E Square, Q Triangle, 1 L1, 3 R1, R L2, F R2, Z L3, C R3,
+ *   E Square, Q Triangle, 1 L1, 3 R1, R L2, F R2, X L3, C R3,
  *   Enter Options, Tab left touchpad (photo mode), Backspace right touchpad (pause menu),
  *   IJKL d-pad (I up, K down, J left, L right). */
 #define _GNU_SOURCE
@@ -62,11 +62,22 @@ static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static int initialized, opened, sdl_ready;
 static SDL_Gamepad *gamepad;
 static size_t reads;
+static size_t vibration_requests, vibration_sent, vibration_failed, vibration_without_pad;
 static uint8_t connected_count;
 static uint64_t next_gamepad_scan;
+static bool keyboard_only;
 
 static uint64_t now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000u+(uint64_t)t.tv_nsec/1000u; }
-static uint8_t axis(int16_t v) { int x=(v+32768)>>8; return (uint8_t)(x<0 ? 0 : x>255 ? 255 : x); }
+/* Center small resting-stick noise, then rescale the remaining travel continuously. The
+ * endpoints remain 0/255 and exact neutral is 128, including for slightly negative samples. */
+static uint8_t axis(int16_t v) {
+    const int deadzone=2621; /* 8% of SDL's signed stick range */
+    const int value=v, magnitude=value<0 ? -value : value;
+    if (magnitude<=deadzone) return 128;
+    const int extent=value<0 ? 32768 : 32767;
+    const int travel=(magnitude-deadzone)*(value<0 ? 128 : 127)/(extent-deadzone);
+    return (uint8_t)(value<0 ? 128-travel : 128+travel);
+}
 static uint8_t trigger(int16_t v) { int x=v>>7; return (uint8_t)(x<0 ? 0 : x>255 ? 255 : x); }
 static uint16_t touch_axis(float v, int max) {
     return (uint16_t)(v<=0.0f ? 0 : v>=1.0f ? max : (int)(v*max+0.5f));
@@ -118,6 +129,7 @@ static bool gamepad_active(SDL_Gamepad *pad) {
 /* Keep the current pad while in use, but don't let an idle virtual controller hide a
  * physical pad connected later. Other devices are checked only five times per second. */
 static SDL_Gamepad *current_gamepad(void) {
+    if (keyboard_only) return NULL;
     if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
     if (sdl_ready<0) return NULL;
     if (gamepad && !SDL_GamepadConnected(gamepad)) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
@@ -183,13 +195,14 @@ static ButtonMap pad_map={{
     {SDL_GAMEPAD_BUTTON_DPAD_UP,BTN_UP}, {SDL_GAMEPAD_BUTTON_DPAD_DOWN,BTN_DOWN},
     {SDL_GAMEPAD_BUTTON_DPAD_LEFT,BTN_LEFT}, {SDL_GAMEPAD_BUTTON_DPAD_RIGHT,BTN_RIGHT},
 },15};
-static ButtonMap key_map={{
+static const ButtonMap default_key_map={{
     {SDL_SCANCODE_SPACE,BTN_CROSS}, {SDL_SCANCODE_LSHIFT,BTN_CIRCLE}, {SDL_SCANCODE_E,BTN_SQUARE},
     {SDL_SCANCODE_Q,BTN_TRIANGLE}, {SDL_SCANCODE_1,BTN_L1}, {SDL_SCANCODE_3,BTN_R1},
-    {SDL_SCANCODE_R,BTN_L2}, {SDL_SCANCODE_F,BTN_R2}, {SDL_SCANCODE_Z,BTN_L3}, {SDL_SCANCODE_C,BTN_R3},
+    {SDL_SCANCODE_R,BTN_L2}, {SDL_SCANCODE_F,BTN_R2}, {SDL_SCANCODE_X,BTN_L3}, {SDL_SCANCODE_C,BTN_R3},
     {SDL_SCANCODE_RETURN,BTN_OPTIONS}, {SDL_SCANCODE_TAB,CLICK_LEFT}, {SDL_SCANCODE_BACKSPACE,CLICK_RIGHT},
     {SDL_SCANCODE_I,BTN_UP}, {SDL_SCANCODE_K,BTN_DOWN}, {SDL_SCANCODE_J,BTN_LEFT}, {SDL_SCANCODE_L,BTN_RIGHT},
 },17};
+static ButtonMap key_map;
 static SDL_Scancode key_axes[8]={
     SDL_SCANCODE_A,SDL_SCANCODE_D,SDL_SCANCODE_W,SDL_SCANCODE_S,
     SDL_SCANCODE_LEFT,SDL_SCANCODE_RIGHT,SDL_SCANCODE_UP,SDL_SCANCODE_DOWN
@@ -200,6 +213,28 @@ static char *trim(char *text) {
     char *end=text+strlen(text);
     while (end>text && (end[-1]==' ' || end[-1]=='\t' || end[-1]=='\r' || end[-1]=='\n')) *--end=0;
     return text;
+}
+
+/* Launcher letters are labels in the active OS layout, not USB/QWERTY positions.
+ * Called only by the window thread while refreshing the maps, never while sampling. */
+static SDL_Scancode binding_scancode(const char *name) {
+    if (name && name[0] && !name[1] &&
+        ((name[0]>='A' && name[0]<='Z') || (name[0]>='a' && name[0]<='z'))) {
+        return SDL_GetScancodeFromKey(SDL_GetKeyFromName(name),NULL);
+    }
+    static const struct { const char *name; SDL_Scancode code; } aliases[]={
+        {"Minus",SDL_SCANCODE_MINUS}, {"Equals",SDL_SCANCODE_EQUALS},
+        {"Left Bracket",SDL_SCANCODE_LEFTBRACKET}, {"Right Bracket",SDL_SCANCODE_RIGHTBRACKET},
+        {"Backslash",SDL_SCANCODE_BACKSLASH}, {"Semicolon",SDL_SCANCODE_SEMICOLON},
+        {"Apostrophe",SDL_SCANCODE_APOSTROPHE}, {"Grave",SDL_SCANCODE_GRAVE},
+        {"Comma",SDL_SCANCODE_COMMA}, {"Period",SDL_SCANCODE_PERIOD}, {"Slash",SDL_SCANCODE_SLASH},
+        {"Keypad Multiply",SDL_SCANCODE_KP_MULTIPLY}, {"Keypad Plus",SDL_SCANCODE_KP_PLUS},
+        {"Keypad Minus",SDL_SCANCODE_KP_MINUS}, {"Keypad Period",SDL_SCANCODE_KP_PERIOD},
+        {"Keypad Divide",SDL_SCANCODE_KP_DIVIDE}
+    };
+    for (size_t i=0;i<sizeof(aliases)/sizeof(*aliases);++i)
+        if (!SDL_strcasecmp(name,aliases[i].name)) return aliases[i].code;
+    return SDL_GetScancodeFromName(name);
 }
 
 /* Applies a PS4RT_PAD_MAP/PS4RT_KEY_MAP value; returns how many entries were used. Bad entries are
@@ -224,7 +259,7 @@ static int apply_button_map(ButtonMap *map, const char *spec, bool keyboard) {
         entry=next;
         uint32_t ps=0;
         for (size_t i=0;i<sizeof(ps_names)/sizeof(*ps_names);++i) if (!SDL_strcasecmp(button,ps_names[i].name)) ps=ps_names[i].ps;
-        const int source=!*name ? -1 : keyboard ? (int)SDL_GetScancodeFromName(name) : (int)SDL_GetGamepadButtonFromString(name);
+        const int source=!*name ? -1 : keyboard ? (int)binding_scancode(name) : (int)SDL_GetGamepadButtonFromString(name);
         if (!ps || source<=(keyboard ? (int)SDL_SCANCODE_UNKNOWN : (int)SDL_GAMEPAD_BUTTON_INVALID)) {
             printf("Runtime: pad map: ignored '%s=%s'\n",button,name);
             continue;
@@ -239,9 +274,19 @@ static int apply_button_map(ButtonMap *map, const char *spec, bool keyboard) {
 }
 
 static void load_button_maps(void) {
-    static bool loaded;
-    if (loaded) return;
-    loaded=true;
+    const char *profile=getenv("PS4RT_KEY_PROFILE");
+    const char *input_mode=getenv("PS4RT_INPUT_MODE");
+    keyboard_only=input_mode && !SDL_strcasecmp(input_mode,"keyboard");
+    const bool azerty=profile && !SDL_strcasecmp(profile,"azerty");
+    key_map=default_key_map;
+    for (size_t i=0;i<key_map.count;++i) {
+        const char *name=SDL_GetScancodeName((SDL_Scancode)key_map.entries[i].source);
+        if (azerty && key_map.entries[i].ps==BTN_TRIANGLE) name="A";
+        key_map.entries[i].source=binding_scancode(name);
+    }
+    const char *defaults[]={azerty ? "Q" : "A","D",azerty ? "Z" : "W","S",
+                            "Left","Right","Up","Down"};
+    for (size_t i=0;i<8;++i) key_axes[i]=binding_scancode(defaults[i]);
     const int pad=apply_button_map(&pad_map,getenv("PS4RT_PAD_MAP"),false);
     const int keys=apply_button_map(&key_map,getenv("PS4RT_KEY_MAP"),true);
     const char *axes=getenv("PS4RT_KEY_AXES");
@@ -259,7 +304,7 @@ static void load_button_maps(void) {
             if (eq) {
                 *eq=0;
                 const char *axis_name=trim(entry), *key_name=trim(eq+1);
-                const SDL_Scancode key=SDL_GetScancodeFromName(key_name);
+                const SDL_Scancode key=binding_scancode(key_name);
                 for (size_t i=0;i<sizeof(axis_names)/sizeof(*axis_names);++i) {
                     if (!SDL_strcasecmp(axis_name,axis_names[i]) && key!=SDL_SCANCODE_UNKNOWN) {
                         key_axes[i]=key; ++axis_count; break;
@@ -268,17 +313,31 @@ static void load_button_maps(void) {
             }
             entry=next;
         }
-    } else {
-        const char *profile=getenv("PS4RT_KEY_PROFILE");
-        if (profile && !SDL_strcasecmp(profile,"azerty")) {
-            key_axes[0]=SDL_SCANCODE_Q; key_axes[2]=SDL_SCANCODE_Z;
-        }
     }
-    if (pad || keys || axis_count) printf("Runtime: pad map: %d gamepad buttons, %d keyboard buttons and %d keyboard axes remapped\n",pad,keys,axis_count);
+    printf("Runtime: input profile %s, %d gamepad buttons, %d keyboard buttons and %d keyboard axes remapped; stick dead zone 8%%\n",
+           profile ? profile : "qwerty",pad,keys,axis_count);
+}
+
+/* SDL key-name/layout queries are not thread safe. Refresh on the window/event thread,
+ * publishing the complete mapping under the same mutex used by scePadReadState. */
+void runtime_pad_refresh_keyboard(void) {
+    pthread_mutex_lock(&lock);
+    load_button_maps();
+    pthread_mutex_unlock(&lock);
 }
 
 static void key_axis(uint8_t *axis, bool negative, bool positive) {
-    if (negative || positive) *axis=(uint8_t)(128-(negative ? 128 : 0)+(positive ? 127 : 0));
+    if (negative || positive) *axis=negative==positive ? 128 : negative ? 0 : 255;
+}
+static void sample_keyboard(PadData *d, const bool *k) {
+    if (!k) return;
+    for (size_t i=0;i<key_map.count;++i) if (k[key_map.entries[i].source]) d->buttons|=key_map.entries[i].ps;
+    if (d->buttons & BTN_L2) d->l2=255;
+    if (d->buttons & BTN_R2) d->r2=255;
+    key_axis(&d->left_x,k[key_axes[0]],k[key_axes[1]]);
+    key_axis(&d->left_y,k[key_axes[2]],k[key_axes[3]]);
+    key_axis(&d->right_x,k[key_axes[4]],k[key_axes[5]]);
+    key_axis(&d->right_y,k[key_axes[6]],k[key_axes[7]]);
 }
 static void sample_host(PadData *d) {
     memset(d,0,sizeof(*d));
@@ -289,7 +348,6 @@ static void sample_host(PadData *d) {
     SDL_Gamepad *g=current_gamepad();
     if (ps4rtgpu_overlay_captures_input()) return; /* settings menu open: neutral input */
     const bool *k=SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
-    load_button_maps();
     if (g) {
         for (size_t i=0;i<pad_map.count;++i)
             if (SDL_GetGamepadButton(g,(SDL_GamepadButton)pad_map.entries[i].source)) d->buttons|=pad_map.entries[i].ps;
@@ -315,14 +373,7 @@ static void sample_host(PadData *d) {
     }
     /* The keyboard works with or without a gamepad: its buttons add to the pad's, and a stick
      * follows the keys only while one of them is held. */
-    if (!k) return;
-    for (size_t i=0;i<key_map.count;++i) if (k[key_map.entries[i].source]) d->buttons|=key_map.entries[i].ps;
-    if (d->buttons & BTN_L2) d->l2=255;
-    if (d->buttons & BTN_R2) d->r2=255;
-    key_axis(&d->left_x,k[key_axes[0]],k[key_axes[1]]);
-    key_axis(&d->left_y,k[key_axes[2]],k[key_axes[3]]);
-    key_axis(&d->right_x,k[key_axes[4]],k[key_axes[5]]);
-    key_axis(&d->right_y,k[key_axes[6]],k[key_axes[7]]);
+    sample_keyboard(d,k);
 }
 
 /* PS4RT_PAD_FILE=<file>: scripted input for automated runs. The file holds whitespace-separated
@@ -342,14 +393,9 @@ static void read_inject(void) {
     last_check=now;
     struct stat st;
     if (stat(path,&st)!=0) return;
-#ifdef _WIN32
     /* Whole-second mtimes: the size tells two edits within a second apart. */
     if (st.st_mtime==mtime.tv_sec && st.st_size==mtime.tv_nsec) return;
     mtime=(struct timespec){st.st_mtime,(long)st.st_size};
-#else
-    if (st.st_mtim.tv_sec==mtime.tv_sec && st.st_mtim.tv_nsec==mtime.tv_nsec) return;
-    mtime=st.st_mtim;
-#endif
     FILE *f=fopen(path,"r");
     if (!f) return;
     static const char *sticks[]={"lx=","ly=","rx=","ry="};
@@ -506,8 +552,15 @@ static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
     pthread_mutex_lock(&lock);
     SDL_Gamepad *g=current_gamepad();
     /* The menu's vibration strength scales the game's motors (0: off). */
-    const unsigned percent=(unsigned)ps4rtgpu_vibration_percent();
-    if (g) SDL_RumbleGamepad(g,(uint16_t)(param[0]*257u*percent/100u),(uint16_t)(param[1]*257u*percent/100u),1000);
+    const int configured=ps4rtgpu_vibration_percent();
+    const unsigned percent=(unsigned)(configured<0 ? 0 : configured>100 ? 100 : configured);
+    ++vibration_requests;
+    if (g) {
+        if (SDL_RumbleGamepad(g,(uint16_t)(param[0]*257u*percent/100u),
+                              (uint16_t)(param[1]*257u*percent/100u),1000)) ++vibration_sent;
+        else if (++vibration_failed==1)
+            printf("Runtime: controller vibration failed: %s\n",SDL_GetError());
+    } else ++vibration_without_pad;
     pthread_mutex_unlock(&lock);
     return 0;
 }
@@ -528,10 +581,14 @@ static const RuntimeExport exports[]={
     {"scePadSetMotionSensorState",pad_ok_handle_flag},
 };
 uintptr_t runtime_pad_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
-void runtime_pad_report(void) { printf("Runtime: pad reads=%zu, gamepad=%s\n",reads,gamepad ? SDL_GetGamepadName(gamepad) : "none"); }
+void runtime_pad_report(void) {
+    printf("Runtime: pad reads=%zu, gamepad=%s\n",reads,gamepad ? SDL_GetGamepadName(gamepad) : "none");
+    printf("Runtime: controller vibration requests=%zu, sent=%zu, failed=%zu, no controller=%zu, strength=%d%%\n",
+           vibration_requests,vibration_sent,vibration_failed,vibration_without_pad,ps4rtgpu_vibration_percent());
+}
 
 /* probe --gamepad: runs before any game state exists, so it uses its own SDL gamepad and leaves
- * the lock and statics above alone. run.py parses this line; keep the format. */
+ * the lock and statics above alone. Developer probes parse this line; keep the format. */
 static const char *label_name(SDL_GamepadButtonLabel label) {
     switch (label) {
     case SDL_GAMEPAD_BUTTON_LABEL_A: return "a";

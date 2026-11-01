@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <deque>
 #include <mutex>
@@ -12,16 +13,21 @@
 #include <thread>
 #include <unordered_map>
 #include <fstream>
+#include <iomanip>
+#include <iterator>
 #include <map>
+#include <sstream>
 #ifdef _WIN32
 #include <windows.h>
 #endif
 #include "common/serdes.h"
 #include "common/scope_exit.h"
+#include "common/elf_info.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "common/thread.h"
 #include "ps4rt_overlay.h"
 #include "ps4rt_gpu_workarounds.h"
+#include "ps4rt_shader_capture.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
@@ -52,6 +58,39 @@ u32 CurrentShaderBinaryVersion() {
                                        AmdPathsOff::Current().shaderext) |
             (Ps4RtGpuWorkarounds::Current().preserve_wqm_helpers ? 4u : 0u) |
             (Ps4RtGpuWorkarounds::Current().fixed_grass_view_lighting ? 8u : 0u));
+}
+
+std::filesystem::path OneTimeWarmUpMarkerPath() {
+    return Common::FS::GetUserPath(Common::FS::PathType::CacheDir) /
+           Common::ElfInfo::Instance().GameSerial() / "ps4rt-warmup.state";
+}
+
+std::size_t PipelineKeyFileCount() {
+    const auto directory = OneTimeWarmUpMarkerPath().parent_path();
+    std::error_code error;
+    std::size_t count = 0;
+    for (std::filesystem::directory_iterator it{directory, error}, end; !error && it != end;
+         it.increment(error)) {
+        if (it->is_regular_file(error) && it->path().extension() == ".key") ++count;
+    }
+    return count;
+}
+
+std::string OneTimeWarmUpSignature(const Instance& instance) {
+    std::ostringstream out;
+    out << "PS4RT one-time pipeline warm-up 1\n"
+        << "pipeline_key_version=" << Serialization::PipelineKeyVersion << '\n'
+        << "shader_meta_version=" << Serialization::ShaderMetaVersion << '\n'
+        << "shader_binary_version=" << CurrentShaderBinaryVersion() << '\n'
+        << "vendor_id=" << instance.GetVendorID() << '\n'
+        << "device_id=" << instance.GetDeviceID() << '\n'
+        << "driver_id=" << static_cast<u32>(instance.GetDriverID()) << '\n'
+        << "driver_version=" << instance.GetDriverVersion() << '\n'
+        << "pipeline_cache_uuid=";
+    out << std::hex << std::setfill('0');
+    for (const u8 byte : instance.GetPipelineCacheUUID()) out << std::setw(2) << unsigned(byte);
+    out << std::dec << "\npipeline_keys=" << PipelineKeyFileCount() << '\n';
+    return out.str();
 }
 } // namespace
 
@@ -624,6 +663,54 @@ void RegisterShaderMeta(const Shader::Info& info,
                                        fmt::format("{:#018x}", perm_hash), ar.TakeOff());
 }
 
+void RegisterShaderCapture(const Shader::Info& info, const Shader::StageSpecialization& spec,
+                           std::span<const u32> gcn_code, std::span<const u32> user_data,
+                           std::span<const u32> geometry_copy_code, size_t perm_hash,
+                           size_t perm_idx) {
+    if (!Storage::DataBase::Instance().IsOpened()) {
+        return;
+    }
+
+    // Keep the proven shadPS4 metadata layout inside a checksummed, independently versioned
+    // envelope. The raw GCN and user registers are the pieces the ordinary SPIR-V cache lacks.
+    Serialization::Archive metadata_archive;
+    Serialization::Writer metadata{metadata_archive};
+    metadata.Write(Serialization::ShaderMetaVersion);
+    metadata.Write(CurrentShaderBinaryVersion());
+    metadata.Write(perm_hash);
+    metadata.Write(perm_idx);
+    spec.Serialize(metadata_archive);
+    info.Serialize(metadata_archive);
+
+    Ps4RtShaderCapture::Record record;
+    record.program_hash = info.pgm_hash;
+    record.permutation_hash = perm_hash;
+    record.permutation = u32(perm_idx);
+    record.hardware_stage = u8(info.hw_stage);
+    record.software_stage = u8(info.sw_stage);
+    if (spec.fetch_shader_data) record.flags |= Ps4RtShaderCapture::HasFetchShader;
+    if (!geometry_copy_code.empty()) record.flags |= Ps4RtShaderCapture::HasGeometryCopyShader;
+    record.gcn_code.assign(gcn_code.begin(), gcn_code.end());
+    record.user_data.assign(user_data.begin(), user_data.end());
+    record.geometry_copy_code.assign(geometry_copy_code.begin(), geometry_copy_code.end());
+    record.metadata = metadata_archive.TakeOff();
+
+    auto encoded = Ps4RtShaderCapture::Encode(record);
+    if (encoded.empty()) {
+        Ps4RtShaderCapture::NoteFailure();
+        LOG_WARNING(Render_Vulkan, "Unable to capture shader {:#x}/{}", info.pgm_hash, perm_idx);
+        return;
+    }
+    const auto bytes = encoded.size();
+    if (Storage::DataBase::Instance().Save(Storage::BlobType::ShaderCapture,
+                                           fmt::format("{:#018x}", perm_hash),
+                                           std::move(encoded))) {
+        Ps4RtShaderCapture::NoteQueued(bytes, record.flags);
+    } else {
+        Ps4RtShaderCapture::NoteFailure();
+    }
+}
+
 void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx) {
     if (!Storage::DataBase::Instance().IsOpened()) {
         return;
@@ -1005,6 +1092,40 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
     }
 
     Storage::DataBase::Instance().FinishPreload();
+}
+
+bool PipelineCache::NeedsOneTimeWarmUp() const {
+    if (!EmulatorSettings.IsPipelineCacheEnabled() || PipelineKeyFileCount() == 0) return false;
+    const auto marker = OneTimeWarmUpMarkerPath();
+    std::ifstream input(marker, std::ios::binary);
+    if (!input) return true;
+    const std::string saved{std::istreambuf_iterator<char>{input},
+                            std::istreambuf_iterator<char>{}};
+    return saved != OneTimeWarmUpSignature(instance);
+}
+
+void PipelineCache::MarkOneTimeWarmUpComplete() const {
+    const auto marker = OneTimeWarmUpMarkerPath();
+    std::error_code error;
+    std::filesystem::create_directories(marker.parent_path(), error);
+    if (error) {
+        std::fprintf(stderr, "Pipeline warm-up: could not create marker directory\n");
+        return;
+    }
+    auto temporary = marker;
+    temporary += ".tmp";
+    {
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        output << OneTimeWarmUpSignature(instance);
+        if (!output) {
+            std::fprintf(stderr, "Pipeline warm-up: could not write completion marker\n");
+            return;
+        }
+    }
+    std::filesystem::remove(marker, error);
+    error.clear();
+    std::filesystem::rename(temporary, marker, error);
+    if (error) std::fprintf(stderr, "Pipeline warm-up: could not publish completion marker\n");
 }
 
 void PipelineCache::StartOnDemand() {

@@ -6,9 +6,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
-#ifndef _WIN32
-#include <dlfcn.h>
-#endif
 #include <functional>
 
 #include "ps4rt_copy.h"
@@ -21,6 +18,7 @@
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "ps4rt_performance_probe.h"
 #include "ps4rt_threads.h"
 
 namespace Vulkan {
@@ -216,6 +214,9 @@ void Scheduler::WaitDeferredSignals() {
 }
 
 void Scheduler::WaitHostCopies() {
+    const bool capture_performance = Ps4RtPerformanceProbe::Active();
+    const auto started = capture_performance ? std::chrono::steady_clock::now()
+                                             : std::chrono::steady_clock::time_point{};
     if (host_copies_done.load(std::memory_order_acquire) < host_copies_issued) {
 
         ;
@@ -226,6 +227,11 @@ void Scheduler::WaitHostCopies() {
     }
 
     Ps4RtCopy::WaitAsync();
+    if (capture_performance) {
+        const auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        Ps4RtPerformanceProbe::AddHostWait(static_cast<std::uint64_t>(nanoseconds));
+    }
 }
 
 void Scheduler::KickRecording(bool force) {
@@ -342,11 +348,19 @@ void Scheduler::WaitSubmitted(std::source_location caller) {
 }
 
 void Scheduler::Wait(u64 tick, std::source_location, u64) {
+    const bool capture_performance = Ps4RtPerformanceProbe::Active();
+    const auto started = capture_performance ? std::chrono::steady_clock::now()
+                                             : std::chrono::steady_clock::time_point{};
     if (tick >= work_semaphore.CurrentTick()) {
         SubmitInfo info{};
         Flush(info);
     }
     work_semaphore.Wait(tick);
+    if (capture_performance) {
+        const auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        Ps4RtPerformanceProbe::AddGpuWait(static_cast<std::uint64_t>(nanoseconds));
+    }
 }
 
 void Scheduler::PopPendingOperations() {
