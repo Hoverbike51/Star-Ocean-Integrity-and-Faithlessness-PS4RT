@@ -5,6 +5,10 @@ compatibility runtime is **adapted open-source software**, not a clean-room impl
 The current source tree incorporates earlier runtime and renderer work. The original
 contributors remain credited here even where their game-specific features were removed.
 
+The Windows port was developed with assistance from OpenAI Codex to speed up developmentand 
+help with implementation and debugging. This is my first project of this kind. I’m learning
+as I go and will continue improving the Windows version, focusing on stability, performance, and useful features.
+
 ## Runtime lineage
 
 - [Felipe Prado / gow3_pc](https://github.com/FelipePrado0/gow3_pc): original

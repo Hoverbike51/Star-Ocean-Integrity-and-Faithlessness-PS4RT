@@ -1,8 +1,8 @@
 > [!IMPORTANT]
 > The Windows version is experimental and still requires extensive testing, particularly by playing through the entire game and verifying its compatibility with a wider range of drivers and hardware. <br>
-> Tested with a `Ryzen 9 9950X3D2` CPU and a `Radeon RX 9070 XT` GPU running Windows 11 x64
+> Tested with a `Ryzen 9 9950X3D2` CPU with `Radeon RX 9070 XT` GPU running Windows 11 x64 and `Intel i5 7th Gen` CPU with `Nvidia GTX 1050` GPU running Windows 10 x64 (laptop)
 
-# Star Ocean 5 — experimental native Windows port
+# Star Ocean 5 — experimental Windows port
 
 ![logo_cover](docs/images/readme/cover_logo_windows.png)
 <p align="center">
@@ -27,7 +27,7 @@ but marked as untested; unrelated titles and PS3 editions are rejected.
 
 ## Playing
 
-![Sample04](docs/images/readme/sample/sample04.png)
+![Sample04](docs/images/readme/sample/sample_04.png)
 
 For a player package, extract the entire folder and double-click **Star Ocean 5 Launcher.exe**.
 The root executable starts the real launcher in `bin/`. Keep the complete folder together;
