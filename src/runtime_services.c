@@ -475,7 +475,7 @@ static ABI int32_t ime_result(uint32_t *result) {
 }
 static ABI int32_t ime_term(void) { memset(&ime,0,sizeof(ime)); return 0; }
 
-/* ---- Trophies: accepted locally, recorded in the log ---- */
+/* ---- Trophies: accepted locally, recorded in the log (and in PS4RT_TROPHY_FILE if set) ---- */
 static ABI int32_t trophy_context(int32_t *ctx,int32_t user,uint32_t label,uint64_t options) {
     (void)user; (void)label; (void)options;
     if (!ctx) return TROPHY_INVALID;
@@ -483,9 +483,59 @@ static ABI int32_t trophy_context(int32_t *ctx,int32_t user,uint32_t label,uint6
 }
 static ABI int32_t trophy_handle(int32_t *handle) { if (!handle) return TROPHY_INVALID; *handle=new_id(); return 0; }
 static ABI int32_t trophy_register(int32_t ctx,int32_t handle,uint64_t options) { (void)ctx; (void)handle; (void)options; return 0; }
+/* Unlocks are also written to PS4RT_TROPHY_FILE when a launcher sets it, as
+   {"unlocked":{"001":"2026-11-05T20:00:00Z",...}}, the same file the Sakura Wars and
+   Valkyria Revolution runtimes write. Without the variable nothing changes. */
+static void trophy_note(int32_t id) {
+    const char *path=getenv("PS4RT_TROPHY_FILE");
+    if (!path || !path[0] || id<0 || id>127) return;
+    char body[8192];
+    size_t n=0;
+    FILE *in=fopen(path,"rb");
+    if (in) { n=fread(body,1,sizeof(body)-1,in); fclose(in); }
+    body[n]=0;
+    int seen[128]={0};
+    char saved[128][32];
+    memset(saved,0,sizeof(saved));
+    for (char *cursor=body; (cursor=strchr(cursor,'"')); ) {
+        if (cursor[1]>='0' && cursor[1]<='9' && cursor[2]>='0' && cursor[2]<='9' && cursor[3]>='0' && cursor[3]<='9' && cursor[4]=='"' && cursor[5]==':' && cursor[6]=='"') {
+            int number=(cursor[1]-'0')*100+(cursor[2]-'0')*10+(cursor[3]-'0');
+            if (number>=0 && number<128) {
+                seen[number]=1;
+                size_t len=strcspn(cursor+7,"\"");
+                if (len>31) len=31;
+                memcpy(saved[number],cursor+7,len);
+                saved[number][len]=0;
+            }
+            cursor+=7;
+        } else cursor++;
+    }
+    if (seen[id]) return;
+    seen[id]=1;
+    char when[32];
+    time_t now=time(NULL);
+    struct tm parts;
+#ifdef _WIN32
+    gmtime_s(&parts,&now);
+#else
+    gmtime_r(&now,&parts);
+#endif
+    strftime(when,sizeof(when),"%Y-%m-%dT%H:%M:%SZ",&parts);
+    FILE *out=fopen(path,"wb");
+    if (!out) return;
+    fputs("{\"unlocked\":{",out);
+    int first=1;
+    for (int number=0; number<128; number++) if (seen[number]) {
+        fprintf(out,"%s\"%03d\":\"%s\"",first?"":",",number,number==id?when:saved[number]);
+        first=0;
+    }
+    fputs("}}\n",out);
+    fclose(out);
+}
 static ABI int32_t trophy_unlock(int32_t ctx,int32_t handle,int32_t id,int32_t *platinum) {
     (void)ctx; (void)handle;
     printf("Runtime: trophy %d unlocked\n",id);
+    trophy_note(id); /* recorded aside; the answer below stays the one the game already gets */
     if (platinum) *platinum=-1;
     return 0;
 }
