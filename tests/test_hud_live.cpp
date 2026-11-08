@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "hud_live.h"
-#include "hud_atlas.h"
 #include "hud_preset_library.h"
 #include <cassert>
 #include <fstream>
@@ -42,13 +41,13 @@ int main() {
         assert(state.Boundary()&&state.Current()->layout==changed);
         auto temporary=changed;temporary.groups[0].x=96;
         assert(Exchange(dir,{hello.session,first_owner,"preview",Serialize(temporary),1u<<0},nullptr).accepted);assert(state.Boundary()&&state.Current()->layout==temporary&&state.Current()->force_groups);
-        // No heartbeat: a crashed/closed preview client must revert its unsaved preview.
+        // No heartbeat: a crashed/closed Studio must revert its unsaved preview.
         const auto deadline=GetTickCount64()+3500;
         while(GetTickCount64()<deadline&&state.Current()->layout!=changed){Sleep(25);state.Boundary();}
         assert(state.Current()->layout==changed&&!state.Current()->force_groups);
         auto heartbeat=send("heartbeat");assert(heartbeat.accepted&&heartbeat.applied==state.Applied());
         assert(!send("execute","").accepted);
-        // Another preview client can connect after lease expiry, while stale sessions
+        // Another Studio can connect after lease expiry, while stale sessions
         // and incompatible aspect changes remain refused.
         assert(send("preview",Serialize(temporary),second_owner).accepted);state.Boundary();
         assert(send("cancel","",second_owner).accepted);state.Boundary();
@@ -75,7 +74,7 @@ int main() {
             assert(backups==1);
         }
         // The in-game library uses the actual current-user pipe and the same
-        // atomic publication as the preview client. It never edits its source JSONs.
+        // atomic publication as the Studio. It never edits its source JSONs.
         {
             const auto folder=dir/"hud-presets";assert(std::filesystem::create_directory(folder));
             Save(folder/"a-valid.json",changed);Save(folder/"b-wrong-aspect.json",Base(Aspect::Standard));
@@ -115,7 +114,7 @@ int main() {
         assert(early.Connected()&&!state.Boundary()&&state.Current()->layout==baseline);
     }
     // Real 16:9 library -> IPC -> frame-boundary publication, followed by a
-    // preview client preview and restoration. Source presets never change.
+    // Studio preview and restoration. Source presets never change.
     {
         const auto standard=Base(Aspect::Standard);LiveState standard_state;standard_state.Reset(standard);
         auto edited=standard;edited.name="Custom 16:9";edited.reference_width=1920;edited.reference_height=1080;

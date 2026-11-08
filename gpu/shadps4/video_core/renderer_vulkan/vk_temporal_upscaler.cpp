@@ -386,6 +386,7 @@ bool TemporalUpscaler::OnFrameStart() {
     const bool scene_changed=settings.native_scene && scene_preset!=applied_scene_preset;
     const bool changed = output_changed || scene_changed || manual_changed || applied_preset != preset || active != last_active ||
                          jitter_on != last_jitter || applied_upscaler != upscaler;
+    if (changed) scene_input_readiness.Reset();
     if (applied_upscaler != upscaler || (Ps4RtSettings::IsFsr4(upscaler) && (scene_changed || output_changed))) {
         // A failed provider keeps a fatal flag internally; a user retry gets a fresh context.
         scheduler.Finish();
@@ -1746,7 +1747,9 @@ void TemporalUpscaler::RunUiOnly(VideoCore::ImageId color_id, VideoCore::ImageId
 
 void TemporalUpscaler::RejectScenePreset(const char* reason) {
     auto& state=Ps4RtSettings::Get();
-    const int previous=last_good_scene_output==state.output_res && last_good_scene_preset!=state.scene_preset?last_good_scene_preset:-1;
+    const int previous=Ps4RtScene::ForOutput(
+        last_good_scene_output==state.output_res && last_good_scene_preset!=state.scene_preset?last_good_scene_preset:-1,
+        target_width,target_height);
     state.scene_preset=previous;
     const auto input=Ps4RtScene::Input(previous,target_width,target_height,Ps4RtUltrawide::Enabled());
     if(input.width>target_width || input.height>target_height)
@@ -1792,14 +1795,21 @@ void TemporalUpscaler::RunScaled() {
         (Ps4RtSettings::Get().scene_preset>=0 || Ps4RtUltrawide::Enabled()) && scene_targets.Reduced();
     // Never label an upsampled native image as a real higher-resolution preset.
     // Both final scene color and matching depth must come from current raster proxies.
-    if(custom && (!scene_targets.EligibleScene(color) || !scene_targets.EligibleScene(depth) ||
-                  !scene_targets.RasterCurrent(color) || !scene_targets.RasterCurrent(depth))) {
-        std::printf("Scene preset inputs: requested=%ux%u, output=%ux%u; color=%ux%u eligible=%d current=%d; depth=%ux%u eligible=%d current=%d\n",
+    const bool inputs_ready=!custom || (scene_targets.EligibleScene(color) && scene_targets.EligibleScene(depth) &&
+                  scene_targets.RasterCurrent(color) && scene_targets.RasterCurrent(depth));
+    const auto previous_misses=scene_input_readiness.misses;
+    if(!scene_input_readiness.Observe(inputs_ready)) {
+        if(scene_input_readiness.misses==1 || scene_input_readiness.Exhausted())
+            std::printf("Scene preset inputs: pending %u/%u, requested=%ux%u, output=%ux%u; color=%ux%u eligible=%d current=%d; depth=%ux%u eligible=%d current=%d\n",
+            scene_input_readiness.misses,SceneResolution::InputReadiness::Limit,
             w,h,ow,oh,color.info.size.width,color.info.size.height,int(scene_targets.EligibleScene(color)),int(scene_targets.RasterCurrent(color)),
             depth.info.size.width,depth.info.size.height,int(scene_targets.EligibleScene(depth)),int(scene_targets.RasterCurrent(depth)));
-        RejectScenePreset("scene color/depth did not retain current real raster proxies");
+        reset=true;
+        if(scene_input_readiness.Exhausted())
+            RejectScenePreset("scene color/depth did not retain current real raster proxies for 120 consecutive reconstruction attempts");
         return;
     }
+    if(previous_misses) std::printf("Scene preset inputs: recovered after %u pending frames; preset %d retained\n",previous_misses,Ps4RtSettings::Get().scene_preset.load());
     if (depth.info.size.width != iw || depth.info.size.height != ih || w > ow || h > oh) {
         return;
     }

@@ -25,7 +25,7 @@ extern const std::array<ResourceBinding,4> ProceduralResources;
 bool RuntimeSupported(size_t group);
 Rect GroupBounds(const ResourceBinding&);
 const ResourceBinding* IdentifyResource(std::span<const unsigned char>);
-struct NativeObject {std::string name,parent,type;Rect bounds;std::uint32_t key=0;size_t parent_index=size_t(-1);};
+struct NativeObject {std::string name,parent,type;Rect bounds;std::uint32_t key=0;size_t parent_index=size_t(-1);std::uint64_t name_hash=0;};
 struct NativeResource {
     std::string name;ResourceBinding binding;
     std::vector<NativeObject> objects;
@@ -37,6 +37,8 @@ class NativeCatalog {
 public:
     std::vector<std::unique_ptr<NativeResource>> resources;
     static std::shared_ptr<const NativeCatalog> Parse(std::string_view);
+    static std::shared_ptr<const NativeCatalog> Builtin();
+    void Index();
     const NativeResource* Find(std::string_view) const;
     const NativeResource* Identify(std::span<const unsigned char>) const;
     // Cached-layout clones have a new handle without a new XML load. Resolve

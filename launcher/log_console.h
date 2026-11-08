@@ -6,7 +6,41 @@
 #include <uxtheme.h>
 #include <algorithm>
 #include <string>
+#include <cwchar>
+#include <string_view>
 #include <vector>
+
+namespace So5Log {
+// Retain only evicted renderer diagnostics. Repetitive guest-service output must
+// not erase the first refusal before the user can export it. No per-line disk IO.
+struct RetainedDiagnostics {
+    static constexpr size_t Capacity=256, Initial=64;
+    std::vector<std::wstring> lines;
+    void Keep(const std::wstring& line) {
+        constexpr std::wstring_view markers[]={L"Upscaler:",L"Scene preset",L"Scene resolution:",
+            L"Output resolution:",L"PS4RT: FSR",L"PS4RT: DLSS",L"PS4RT: scene camera",L"Camera motion:",L"Ultrawide:",L"GPU: using"};
+        if(std::none_of(std::begin(markers),std::end(markers),[&](auto marker){return line.find(marker)!=std::wstring::npos;})) return;
+        if(lines.size()==Capacity) lines.erase(lines.begin()+Initial);
+        lines.push_back(line);
+    }
+    void Clear() { lines.clear(); }
+};
+// Stamp completed records once at ingestion. Display, selection and export reuse
+// the stored record, so repainting or receiving another pipe chunk never changes its time.
+inline std::wstring Stamp(std::wstring_view line, const SYSTEMTIME& time) {
+    wchar_t prefix[16]{};
+    std::swprintf(prefix, std::size(prefix), L"[%02u:%02u:%02u] ",
+                  unsigned(time.wHour), unsigned(time.wMinute), unsigned(time.wSecond));
+    std::wstring result(prefix);
+    result.append(line);
+    return result;
+}
+inline std::wstring Stamp(std::wstring_view line) {
+    SYSTEMTIME time{};
+    GetLocalTime(&time);
+    return Stamp(line, time);
+}
+}
 
 // Native read-only console: selection, Unicode copying and scrolling are provided
 // by Windows Rich Edit. No clipboard data is read by the launcher.

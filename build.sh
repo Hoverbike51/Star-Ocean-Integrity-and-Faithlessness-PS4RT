@@ -81,9 +81,9 @@ MINGW*|MSYS*)
     bash packaging/windows/copy_dlls.sh out 'out/Star Ocean 5.exe' 'out/Star Ocean 5 Launcher.exe' out/PkgExtractor.exe
     if [[ ${1:-} == --test ]]; then
         ninja -C out/gpu -j "${PS4RT_BUILD_JOBS:-4}" \
-            hud-live-test hud-projection-test ultrawide-test upscaler-support-test \
+            hud-standalone-test runtime-time-test hud-live-test hud-projection-test ultrawide-test upscaler-support-test \
             window-presentation-test native-pkg-test trophy-file-test savedata-backups-test \
-            save-backup-guard-test launcher-updater-test display-sample-gpu-test fsr4-rcas-gpu-test \
+            save-backup-guard-test launcher-shortcuts-test launcher-updater-test display-sample-gpu-test fsr4-rcas-gpu-test \
             dlss-validation-test dlss-device-gate-test transition-snapshot-gpu-test cpu-image-writeback-test \
             color-export-test image-subresource-test gpu-workarounds-test camera-layout-test \
             camera-probe-test camera-comfort-test native-tweaks-test exploration-leader-test \

@@ -24,6 +24,7 @@
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
 #include "video_core/renderer_vulkan/vk_fsr4.h"
+#include "video_core/renderer_vulkan/scene_resolution.h"
 #include "video_core/texture_cache/image.h"
 #include "ps4rt_ultrawide.h"
 
@@ -207,6 +208,7 @@ private:
     SceneTargets& scene_targets;
     int applied_preset = -1;
     int applied_scene_preset=-2,last_good_scene_preset=-1,last_good_scene_output=-1;
+    SceneResolution::InputReadiness scene_input_readiness;
     int applied_native_height=-1;
     int applied_upscaler = -1;
     bool dispatched_last_frame = false;

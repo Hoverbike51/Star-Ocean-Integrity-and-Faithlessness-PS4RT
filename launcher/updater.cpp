@@ -632,7 +632,11 @@ InstallResult Install(const Package& package, const fs::path& target, const fs::
             if (fs::exists(target / relative)) {
                 if (!fs::is_regular_file(target / relative)) throw Error(Code::Install, "Installed file is a directory.");
                 Handle probe(CreateFileW((target / relative).c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr));
-                if (probe.value == INVALID_HANDLE_VALUE) throw Error(Code::InUse, WinError("An installed file is in use or not writable"));
+                if (probe.value == INVALID_HANDLE_VALUE) {
+                    const auto error=GetLastError();
+                    result.retryable=error==ERROR_SHARING_VIOLATION || error==ERROR_LOCK_VIOLATION;
+                    throw Error(Code::InUse, WinError("Installed file is in use or not writable")+": "+Utf8(relative));
+                }
                 needed += fs::file_size(target / relative);
             }
             records.push_back({relative, fs::exists(target / relative)});
@@ -718,9 +722,11 @@ void StartInstaller(const Prepared& prepared, const fs::path& target, const fs::
         current_launcher != target / "PS4RT-Launcher.exe" &&
         current_launcher != target / "bin/Star Ocean 5 Launcher.exe")
         throw Error(Code::Development, "Launcher must be in the player folder or its bin directory.");
-    const auto helper = fs::is_regular_file(target / "bin/SO5-Updater.exe") ?
-        target / "bin/SO5-Updater.exe" : target / "tools/updater/SO5-Updater.exe";
-    CheckVersion(helper, *Version::Parse(PS4RT_VERSION_STRING));
+    // Use the verified NEW helper: an older installed helper may not understand
+    // a new package layout. Run its copy outside both source and target trees.
+    const auto helper = fs::is_regular_file(prepared.package.root / "bin/SO5-Updater.exe") ?
+        prepared.package.root / "bin/SO5-Updater.exe" : prepared.package.root / "tools/updater/SO5-Updater.exe";
+    CheckVersion(helper, prepared.package.version);
     const auto copy = prepared.workspace / "SO5-Updater.exe";
     Plain(copy);
     if (!CopyFileW(helper.c_str(), copy.c_str(), FALSE)) throw Error(Code::Disk, WinError("Could not prepare native installer"));
@@ -748,8 +754,12 @@ void StartInstaller(const Prepared& prepared, const fs::path& target, const fs::
         throw Error(Code::Install, WinError("Could not start native installer"));
     Handle thread(process.hThread), child(process.hProcess);
     HANDLE wait[] = {ready.value, child.value};
-    if (WaitForMultipleObjects(2, wait, FALSE, 8000) != WAIT_OBJECT_0)
+    if (WaitForMultipleObjects(2, wait, FALSE, 15000) != WAIT_OBJECT_0) {
+        // This child has not accepted the transaction; it must not apply it
+        // unexpectedly when the user closes the launcher at some later time.
+        TerminateProcess(child.value, ERROR_CANCELLED); WaitForSingleObject(child.value, 3000);
         throw Error(Code::Install, "Native installer did not accept the staged update. The launcher remains open.");
+    }
 }
 
 std::optional<InstallResult> ReadInstallResult(const fs::path& target) {
@@ -803,15 +813,24 @@ int InstallerMain(int argc, wchar_t** argv) {
         UpdateLock update_lock(target);
         Plain(workspace); package = ValidatePackage(workspace / "package", *version);
         if (!SetEvent(ready.value)) throw Error(Code::Install, "Installer handshake failed.");
-        if (WaitForSingleObject(parent.value, 30000) != WAIT_OBJECT_0) return 3;
+        if (WaitForSingleObject(parent.value, 60000) != WAIT_OBJECT_0)
+            throw Error(Code::InUse, "The launcher did not exit; application files were not changed.");
         const fs::path backup = target / "out" / "updates" / workspace.filename() / "previous";
-        result = Install(package, target, backup);
+        // DLL unloads and antivirus file scans may outlive the process signal
+        // briefly. Retry only a preflight sharing violation, before any backup
+        // or replacement; never retry a partially applied transaction.
+        const auto deadline=GetTickCount64()+10000;
+        do {
+            result = Install(package, target, backup);
+            if(result.success || fs::exists(backup) || !result.retryable || GetTickCount64()>=deadline)break;
+            Sleep(100);
+        } while(true);
         result.workspace = workspace;
         WriteResult(target, result);
         // Remove large staging payloads before relaunch. The tiny running helper copy is
         // removed by the launcher after this process exits. Previous program files stay.
         try {
-            if (result.recovered && package.root.parent_path() == workspace && package.root.filename() == "package") {
+            if (result.success && package.root.parent_path() == workspace && package.root.filename() == "package") {
                 Plain(package.root);
                 for (const auto& entry : fs::recursive_directory_iterator(package.root)) Plain(entry.path());
                 fs::remove_all(package.root);

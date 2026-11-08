@@ -1,4 +1,4 @@
-# Star Ocean 5 for Windows - v1.0.0
+# Star Ocean 5 for Windows - v1.0.1-hotfix 1
 
 **Windows 10/11 x64 player build**
 
@@ -8,6 +8,15 @@
 This Windows adaptation combines a native Cockpit launcher, C++ game preparation and a
 game-specific compatibility runtime. It requires your own supported PS4 game files;
 the original game's complete source code has not been reconstructed.
+
+## Maintenance changes in v1.0.1
+
+- Standalone HUD preset identities, complete default DLSS packaging and the missing
+  time-conversion import reported by the trophy-menu crash diagnostic.
+- More robust update installation handoff and temporary file-lock handling.
+- Separate launcher/quick-play desktop shortcuts and timestamped console records.
+
+These are source changes for validation. The published 1.0.0 asset is unchanged.
 
 ## Highlights since v0.4.0
 
@@ -56,7 +65,7 @@ passcodes cannot be imported by the native extractor.
 ## Clean player folder
 
 The expected distribution folder is
-`ps4rt-star-ocean-5-windows-x64-v1.0.0-latest`.
+`ps4rt-star-ocean-5-windows-x64-v1.0.1-latest`.
 
 | Entry | Purpose |
 | --- | --- |
@@ -71,7 +80,7 @@ game data, personal settings, saves, caches or diagnostic captures. The optional
 probe is disabled by default; its session controls appear when enabled in Advanced.
 For source builds, **build-windows.cmd** creates the player folder under **dist**.
 
-Executable version resources follow **1.0.0 / 1.0.0.0**, with **HoverMods Vault** as the
+Executable version resources follow **1.0.1 / 1.0.1.0**, with **HoverMods Vault** as the
 application company. Third-party code, shader models and game artwork retain their own
 authors, licenses and notices. Preserve corresponding-source obligations when redistributing.
 
@@ -93,11 +102,12 @@ authors, licenses and notices. Preserve corresponding-source obligations when re
 
 ## Validation status
 
-This document describes the current **1.0.0 source update**. The latest clean-repository
-synchronization passed CMake configuration/generation, file/link consistency and whitespace
-checks. It did not compile the application, execute the updated regression suite, create a
-new ZIP or publish a release. Earlier gameplay reports are not validation of an unbuilt
-distribution. Build and test the final player package before publishing it.
+This document describes the current **1.0.1 source update**, which is not yet compiled
+or published. The maintenance changes were checked in an isolated source copy before
+the version bump: 66 native checks and 42 Python checks passed (3 Python checks skipped),
+followed by targeted shortcut/console checks and five synthetic launch scenarios.
+No 1.0.1 executable or ZIP has been generated. Build and test the final player package,
+including in-game HUD/trophy behavior and compatible NVIDIA hardware, before publishing it.
 
 Report issues with the Title ID, APP_VER, Windows version, selected GPU/driver, active
 reconstruction/preset, reproduction steps and an exported diagnostic. Keep an earlier

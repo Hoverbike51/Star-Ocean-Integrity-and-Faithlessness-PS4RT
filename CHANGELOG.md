@@ -5,11 +5,27 @@ Version numbers refer to this Windows project, not to the PS4 game version or th
 upstream release tags. The runtime remains experimental and is not a reconstruction of
 the original game's complete source code.
 
-The current source version is **1.0.0**. Its publication date is intentionally not assigned
-here: preparing sources and a player folder is different from publishing a tested release.
-Earlier private development iterations are summarized where no separate release tag exists.
 
 [README](README.md) · [Launcher guide](docs/LAUNCHER_GUIDE.md) · [In-game menu guide](docs/IN_GAME_MENU_GUIDE.md)
+
+## 1.0.1 — SO5 hotfix 1
+
+- Include verified HUD resource/object identities in the runtime, so compatible HUD
+  presets work without an external authoring catalog.
+- Acquire pinned, SHA-256-verified NVIDIA build dependencies for full builds and require
+  both DLSS components and their license in the player package. Keep GPU compatibility
+  checks and the explicit reduced-build opt-out.
+- Implement the missing `sceKernelConvertUtcToLocaltime` import identified in the
+  trophy-menu crash diagnostic, with timezone/DST and output-width regression checks.
+- Improve update installation handoff, temporary file-lock handling and failure recovery.
+- Create separate desktop shortcuts for the launcher and quick play with saved settings.
+  Quick play stays hidden unless setup or diagnostics require attention.
+- Add stable local-time console timestamps that survive copying and report export.
+- Correct standalone public tests and PowerShell hashing portability.
+- Complete the FSR 4 v07 bundle with 84 missing `4320`-tier shader modules for
+  the existing six model variants, preserving existing shaders/weights. Verify
+  the full asset inventory during packaging to catch incomplete downloads.
+
 
 ## 1.0.0 — Windows source update
 

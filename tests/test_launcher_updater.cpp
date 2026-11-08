@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// All installation targets are disposable fixtures below the CTest working directory.
+// All installation targets are uniquely named disposable temporary fixtures.
 #include "updater.h"
 #include "ps4rt_version.h"
 #include <windows.h>
@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <thread>
 
 namespace U = So5Update;
 namespace fs = std::filesystem;
@@ -91,7 +92,7 @@ void Paths() {
     std::cout << "PASS: Windows path traversal, streams, device aliases and protected user directories\n";
 }
 struct Fixture {
-    fs::path parent = fs::absolute(fs::current_path()).lexically_normal(), root;
+    fs::path parent = fs::absolute(fs::temp_directory_path()).lexically_normal(), root;
     Fixture() {
         GUID guid{}; assert(SUCCEEDED(CoCreateGuid(&guid))); wchar_t token[40]{}; StringFromGUID2(guid, token, 40);
         root = parent / (std::wstring(L"updater-tests-") + token + L"-é 日本語"); assert(fs::create_directory(root));
@@ -125,7 +126,8 @@ void Transactions(const fs::path& root) {
     HANDLE locked = CreateFileW((target / "Star Ocean 5 Launcher.exe").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     assert(locked != INVALID_HANDLE_VALUE);
     auto in_use = U::Install(package, target, target / "out/updates/locked/previous");
-    assert(!in_use.success && in_use.recovered && Read(target / "VERSION") == "0.3.5\n"); CloseHandle(locked);
+    assert(!in_use.success && in_use.recovered && in_use.retryable && Read(target / "VERSION") == "0.3.5\n");
+    assert(in_use.detail.find("Star Ocean 5 Launcher.exe")!=std::string::npos);CloseHandle(locked);
     auto success = U::Install(package, target, target / "out/updates/success/previous");
     assert(success.success && Read(target / "VERSION") == Current.String() + "\n" && Read(target / "new.dll") == "new dependency"); Preserved(target);
     assert(!U::Install(package, target, target / "out/updates/equal/previous").success);
@@ -228,7 +230,13 @@ void Handoff(const fs::path& root, const fs::path& binaries) {
     std::cout << "PASS: complete transfer pipeline, progress, SHA mismatch, truncated download and cancellation cleanup\n";
     const auto target = root / "player";
     fs::copy(package.root, target, fs::copy_options::recursive); Write(target / "VERSION", "0.3.5\n");
+    // The installed helper is intentionally obsolete. Only the verified staged
+    // helper may perform the new transaction, from outside the installation.
+    Write(target / "bin/SO5-Updater.exe", "obsolete helper");
     for (const auto& [path, value] : UserFiles()) Write(target / path, value);
+    HANDLE unloading=CreateFileW((target/"bin/Star Ocean 5 Launcher.exe").c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,0,nullptr);
+    assert(unloading!=INVALID_HANDLE_VALUE);
+    std::thread release_lock([unloading]{Sleep(2000);CloseHandle(unloading);});
     std::wstring command = Quote(target / "Star Ocean 5 Launcher.exe") + L" --handoff-parent " + Quote(workspace) + L" " + Quote(target);
     STARTUPINFOW startup{sizeof(startup)}; PROCESS_INFORMATION process{};
     assert(CreateProcessW((target / "Star Ocean 5 Launcher.exe").c_str(), command.data(), nullptr, nullptr, FALSE,
@@ -238,6 +246,7 @@ void Handoff(const fs::path& root, const fs::path& binaries) {
     const ULONGLONG deadline = GetTickCount64() + 15000;
     while (!fs::exists(target / "relaunched.marker") && GetTickCount64() < deadline) Sleep(20);
     assert(fs::exists(target / "relaunched.marker") && Read(target / "VERSION") == Current.String() + "\n"); Preserved(target);
+    release_lock.join();
     const auto result = U::ReadInstallResult(target);
     assert(result && result->success && fs::exists(result->backup / "transaction.json"));
     assert(!U::ReadInstallResult(target));
@@ -252,7 +261,7 @@ int main() {
     if (argc == 4 && std::wstring(argv[1]) == L"--handoff-parent") {
         const fs::path workspace = argv[2], target = argv[3];
         U::Prepared prepared{workspace, U::ValidatePackage(workspace / "package", Current)};
-        U::StartInstaller(prepared, target, target / "Star Ocean 5 Launcher.exe", GetCurrentProcessId()); return 0;
+        U::StartInstaller(prepared, target, Module(), GetCurrentProcessId()); return 0;
     }
     if (argc == 2 && std::wstring(argv[1]) == L"--live-check") {
         const auto result = U::Check(Current, true, cancel);

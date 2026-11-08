@@ -196,7 +196,6 @@ void CockpitImage() {
     if(!manual) {
     const auto input_output=Ps4RtUltrawide::Content(s.output_res);
     pending_scene_preset=Ps4RtScene::ForOutput(pending_scene_preset,input_output.width,input_output.height);
-    const int first_preset=(input_output.width<1920 || input_output.height<1080)?1:0;
     const char* presets[]={Tr(L"Original 1080p",L"1080p d’origine"),Tr(L"Native (100%)",L"Natif (100 %)"),Tr(L"Quality",L"Qualité"),
         Tr(L"Balanced",L"Équilibré"),Tr(L"Performance",L"Performances"),Tr(L"Ultra Performance",L"Ultra Performance")};
     const int preset_values[]={-1,0,1,2,3,4};std::atomic<int> requested{pending_scene_preset};
@@ -208,7 +207,21 @@ void CockpitImage() {
     const char* preset_title=Tr(L"Quality preset",L"Preset de reconstruction");
     std::snprintf(preset_label,sizeof(preset_label),"%s%s%s",preset_title,
         preset_provider?" · ":"",preset_provider?preset_provider:"");
-    ChoiceRow(preset_label,requested,presets+first_preset,preset_values+first_preset,6-first_preset);
+    Row(preset_label);
+    if(ImGui::BeginCombo("##value",presets[std::clamp(requested.load()+1,0,5)])) {
+        for(int i=0;i<6;++i) {
+            const auto input=Ps4RtScene::Input(preset_values[i],input_output.width,input_output.height,Ps4RtUltrawide::Enabled());
+            const bool fits=input.width<=input_output.width && input.height<=input_output.height;
+            ImGui::BeginDisabled(!fits);
+            if(ImGui::Selectable(presets[i],requested==preset_values[i]) && fits)
+                Store(requested,preset_values[i],true);
+            ImGui::EndDisabled();
+            if(!fits && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s",Tr(L"Requires an output resolution of at least 1080p.",L"Nécessite une résolution de sortie d’au moins 1080p."));
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::PopID();
     pending_scene_preset=requested;
     }
     char dimensions[64]{};

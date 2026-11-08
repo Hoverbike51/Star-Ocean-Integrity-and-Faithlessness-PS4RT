@@ -11,6 +11,8 @@ case "${1:-}" in
 "") ;;
 *) echo "Usage: $0 [--folder-only]" >&2; exit 2 ;;
 esac
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$PWD/scripts/verify-fsr4-assets.ps1")" \
+    -Root "$(cygpath -w "$PWD")"
 [[ -f 'out/Star Ocean 5.exe' ]] || { echo 'Build first: bash build.sh' >&2; exit 1; }
 [[ -f 'out/Star Ocean 5 Launcher.exe' ]] || { echo 'Build the Windows launcher first: bash build.sh' >&2; exit 1; }
 [[ -f out/PkgExtractor.exe ]] || { echo 'Build the branded PKG extractor first: bash build.sh' >&2; exit 1; }
@@ -44,7 +46,10 @@ llvm-strip --strip-debug -o "$stage/Star Ocean 5 Launcher.exe" 'out/bootstrap/St
 # Copy every non-system DLL resolved from the CLANG64 tree. The packaged executable therefore
 # starts from a normal Windows session without an MSYS2 PATH.
 bash packaging/windows/copy_dlls.sh "$stage/bin" "$stage/bin/Star Ocean 5.exe" "$stage/bin/Star Ocean 5 Launcher.exe" "$stage/bin/PkgExtractor.exe"
-if [[ -f out/ps4rt_dlss.dll && -f out/nvngx_dlss.dll ]]; then
+if [[ ${PS4RT_PACKAGE_NO_DLSS:-0} != 1 ]] && [[ ! -f out/ps4rt_dlss.dll || ! -f out/nvngx_dlss.dll || ! -f out/dlss-notices/LICENSE.txt ]]; then
+    echo 'Full player package requires the DLSS bridge, NVIDIA runtime and license. Run build-windows.cmd, or explicitly opt out with PS4RT_PACKAGE_NO_DLSS=1.' >&2; exit 1
+fi
+if [[ ${PS4RT_PACKAGE_NO_DLSS:-0} != 1 && -f out/ps4rt_dlss.dll && -f out/nvngx_dlss.dll ]]; then
     cp out/ps4rt_dlss.dll out/nvngx_dlss.dll "$stage/bin/"
 fi
 

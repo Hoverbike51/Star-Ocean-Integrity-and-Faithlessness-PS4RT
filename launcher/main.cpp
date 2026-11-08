@@ -27,6 +27,7 @@
 #include "save_preview.h"
 #include "ps4rt_version.h"
 #include "updater.h"
+#include "shortcuts.h"
 #include "pkg/progress.h"
 #include "../gpu/shim/ps4rt_upscaler_support.h"
 #include "../gpu/shim/ps4rt_fsr3_policy.h"
@@ -66,6 +67,7 @@ constexpr UINT WM_GAME_STARTED = WM_APP + 3;
 constexpr UINT WM_GAME_ENDED = WM_APP + 4;
 constexpr UINT WM_UPDATE_DONE = WM_APP + 5;
 constexpr UINT WM_CHEATS_READY = WM_APP + 6;
+constexpr UINT WM_QUICK_FAILED = WM_APP + 7;
 constexpr wchar_t kClassName[] = L"PS4RTStarOceanLauncher";
 constexpr wchar_t kVersion[] = PS4RT_VERSION_WSTRING;
 constexpr int kHeaderHeight = 104;
@@ -115,6 +117,7 @@ struct CheatInspection {
 
 struct AppState {
     HWND window{};
+    bool quick_launch = false;
     HWND minimize_button{}, close_button{}, tooltip{};
     DWORD game_pid = 0;
     bool game_running = false;
@@ -188,6 +191,7 @@ struct AppState {
     std::wstring extraction_title; // Protected by mutex; presented on the UI thread.
     fs::path pending_pkg;
     std::vector<std::wstring> logs;
+    So5Log::RetainedDiagnostics retained_diagnostics;
     std::wstring log_stream_pending;
     std::wstring last_update_log;
     std::atomic_bool log_update_pending{false};
@@ -422,7 +426,7 @@ int append_complete_log_lines_locked(const std::wstring& text, bool include_tail
         if (end == std::wstring::npos && !include_tail) break;
         std::wstring line = text.substr(at, end == std::wstring::npos ? text.size() - at : end - at);
         if (!line.empty()) {
-            app.logs.push_back(std::move(line));
+            app.logs.push_back(So5Log::Stamp(line));
             ++added;
         }
         if (end == std::wstring::npos) break;
@@ -430,7 +434,10 @@ int append_complete_log_lines_locked(const std::wstring& text, bool include_tail
         if (text[end] == L'\r' && at < text.size() && text[at] == L'\n') ++at;
     }
     if (app.log_scroll_lines > 0) app.log_scroll_lines += added;
-    if (app.logs.size() > 1200) app.logs.erase(app.logs.begin(), app.logs.begin() + 400);
+    if (app.logs.size() > 1200) {
+        for(size_t i=0;i<400;++i) app.retained_diagnostics.Keep(app.logs[i]);
+        app.logs.erase(app.logs.begin(), app.logs.begin() + 400);
+    }
     if(added) ++app.logs_revision;
     return added;
 }
@@ -1064,28 +1071,13 @@ std::wstring format_size(std::uintmax_t bytes) {
 
 void create_shortcut() {
     PWSTR desktop = nullptr;
-    if (FAILED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &desktop))) return;
-    fs::path shortcut = fs::path(desktop) / L"Star Ocean 5.lnk";
+    HRESULT result = SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &desktop);
+    if (SUCCEEDED(result)) result = So5Shortcuts::Create(desktop, app.root,
+        executable_directory() / L"Star Ocean 5 Launcher.exe", runtime_path());
     CoTaskMemFree(desktop);
-    IShellLinkW* link = nullptr;
-    HRESULT result = CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link));
-    if (SUCCEEDED(result)) {
-        const fs::path entry=app.root / L"Star Ocean 5 Launcher.exe";
-        const fs::path launcher = fs::is_regular_file(entry) ? entry : executable_directory() / L"Star Ocean 5 Launcher.exe";
-        link->SetPath(launcher.c_str());
-        link->SetArguments(L"--play");
-        link->SetWorkingDirectory(app.root.c_str());
-        link->SetDescription(L"STAR OCEAN: Integrity and Faithlessness - Windows Launcher");
-        link->SetIconLocation(launcher.c_str(), 0);
-        IPersistFile* persist = nullptr;
-        if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&persist)))) {
-            result = persist->Save(shortcut.c_str(), TRUE);
-            persist->Release();
-        }
-        link->Release();
-    }
-    app.status = SUCCEEDED(result) ? loc(L"Raccourci créé sur le Bureau",L"Desktop shortcut created") : loc(L"Impossible de créer le raccourci",L"Could not create shortcut");
-    append_log(SUCCEEDED(result) ? L"Desktop shortcut created" : L"ERROR · could not create desktop shortcut");
+    app.status = SUCCEEDED(result) ? loc(L"Deux raccourcis créés sur le Bureau",L"Two desktop shortcuts created") : loc(L"Impossible de créer les deux raccourcis",L"Could not create both shortcuts");
+    append_log(SUCCEEDED(result) ? L"Desktop shortcuts created: launcher and quick play" :
+        L"ERROR · could not create both desktop shortcuts (HRESULT " + std::to_wstring(static_cast<unsigned long>(result)) + L")");
 }
 
 void import_save() {
@@ -1640,6 +1632,7 @@ void run_game(bool prepare_only) {
             app.busy = false; app.prepared = code == 0;
             app.status = code == 0 ? loc(L"Préparation native terminée",L"Native preparation complete") : loc(L"Échec de la préparation native",L"Native preparation failed");
             notify_log_updated();
+            if (!prepare_only) PostMessageW(app.window, WM_QUICK_FAILED, 0, 0);
             return;
         }
         SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
@@ -1647,7 +1640,7 @@ void run_game(bool prepare_only) {
         if (!CreatePipe(&read_pipe, &write_pipe, &security, 0)) {
             append_log(L"ERROR · could not create diagnostics pipe");
             std::lock_guard guard(app.mutex); app.busy = false;
-            notify_log_updated(); return;
+            notify_log_updated(); PostMessageW(app.window, WM_QUICK_FAILED, 0, 0); return;
         }
         SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0);
         const fs::path runtime = program_path(root,L"Star Ocean 5.exe");
@@ -1663,7 +1656,7 @@ void run_game(bool prepare_only) {
             CloseHandle(read_pipe); CloseHandle(write_pipe);
             append_log(L"ERROR · Star Ocean 5.exe is missing from the application bin directory or source build output");
             std::lock_guard guard(app.mutex); app.busy = false; app.status = loc(L"Runtime Windows absent",L"Windows runtime missing");
-            notify_log_updated(); return;
+            notify_log_updated(); PostMessageW(app.window, WM_QUICK_FAILED, 0, 0); return;
         }
         std::wstring command = quote(runtime.wstring()) + L" " + quote((output / "boot-linked.bin").wstring()) +
             L" --app0 " + quote(game) + L" --user " + quote(user.wstring()) + L" --content-profile " +
@@ -1731,7 +1724,7 @@ void run_game(bool prepare_only) {
             CloseHandle(read_pipe);
             append_log(std::wstring(L"ERROR · could not start runtime (code ") + std::to_wstring(GetLastError()) + L")");
             std::lock_guard guard(app.mutex); app.busy = false;
-            notify_log_updated(); return;
+            notify_log_updated(); PostMessageW(app.window, WM_QUICK_FAILED, 0, 0); return;
         }
         HANDLE job = CreateJobObjectW(nullptr, nullptr);
         if (job) {
@@ -2197,7 +2190,7 @@ void draw_game(Graphics& g, REAL x, REAL y, REAL width, REAL height) {
     card(g, right_x, top + 514, right_width, std::max<REAL>(176, height - 584));
     setting_row(g, HitGameLanguage, loc(L"Langue du jeu",L"Game language"), app.game_languages.empty() ? L"—" : app.game_language,
                 right_x + 12, top + 527, right_width - 24, !app.game_languages.empty() && !app.busy && !app.pkg_selected);
-    button(g, HitShortcut, loc(L"Créer un raccourci Bureau",L"Create desktop shortcut"), right_x + 12, top + 587, right_width - 24, 42);
+    button(g, HitShortcut, loc(L"Créer les raccourcis Bureau",L"Create desktop shortcuts"), right_x + 12, top + 587, right_width - 24, 42);
 }
 
 
@@ -2872,7 +2865,13 @@ void export_logs() {
     fwprintf(file, L"PS4RT Windows %ls\nGame: %ls\nPreparer: %ls\nVulkan 1.3: %ls\n\n",
              kVersion, app.game_path.c_str(), app.native_preparer_ok ? L"Native C++" : L"Missing",
              app.vulkan_ok ? L"OK" : L"Missing");
-    { std::lock_guard guard(app.mutex); for (const auto& line : app.logs) fwprintf(file, L"%ls\n", line.c_str()); }
+    { std::lock_guard guard(app.mutex);
+      if(!app.retained_diagnostics.lines.empty()) {
+          fwprintf(file,L"Earlier reconstruction diagnostics (retained before console rollover):\n");
+          for(const auto& line:app.retained_diagnostics.lines) fwprintf(file,L"%ls\n",line.c_str());
+          fwprintf(file,L"\nRecent console output:\n");
+      }
+      for (const auto& line : app.logs) fwprintf(file, L"%ls\n", line.c_str()); }
     fclose(file);
     app.status = std::wstring(loc(L"Rapport exporté : ",L"Report exported: ")) + report.filename().wstring();
     open_path(directory);
@@ -3448,7 +3447,7 @@ void activate(int id) {
     case HitOpenPerformanceCaptures: if(app.performance_tools) open_path(performance_capture_directory()); break;
     case HitClearLogs: {
         std::lock_guard guard(app.mutex);
-        app.logs.clear(); ++app.logs_revision; app.log_stream_pending.clear(); app.log_scroll_lines = 0; app.log_scroll_max = 0;
+        app.logs.clear(); app.retained_diagnostics.Clear(); ++app.logs_revision; app.log_stream_pending.clear(); app.log_scroll_lines = 0; app.log_scroll_max = 0;
         app.last_update_log.clear();
         break;
     }
@@ -3595,6 +3594,20 @@ void confirm_close() {
                    loc(L"Fermer le lanceur",L"Close launcher"), loc(L"Annuler",L"Cancel"), ModalAction::CloseIdle);
     }
     SetFocus(app.window);
+}
+
+void reveal_quick_launch_failure() {
+    if (!app.quick_launch) return;
+    {
+        std::lock_guard guard(app.mutex);
+        if (!app.modal_visible && (app.busy || app.game_running)) return;
+    }
+    app.quick_launch = false;
+    app.page = app.game_verified ? Page::Logs : Page::Game;
+    append_log(L"Quick play could not continue; launcher opened for setup or diagnostics.");
+    ShowWindow(app.window, SW_SHOWNORMAL);
+    SetForegroundWindow(app.window);
+    InvalidateRect(app.window, nullptr, FALSE);
 }
 
 LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -3774,6 +3787,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     }
     case WM_LOG_UPDATED:
         app.log_update_pending = false;
+        if (app.modal_visible) reveal_quick_launch_failure();
         if(app.extraction_active && app.modal_action==ModalAction::CancelExtraction) {
             std::lock_guard guard(app.mutex);
             if(!app.extraction_title.empty()) {
@@ -3788,8 +3802,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         return 0;
     case WM_UPDATE_DONE: receive_update_event(); return 0;
     case WM_CHEATS_READY: receive_native_cheats(); return 0;
+    case WM_QUICK_FAILED: reveal_quick_launch_failure(); return 0;
     case WM_GAME_STARTED:
         app.game_pid = static_cast<DWORD>(wparam); app.game_running = true;
+        if (app.quick_launch) return 0;
         app.waiting_for_game_window = true; app.auto_minimized = false;
         SetTimer(window, 2, 150, nullptr);
         return 0;
@@ -3798,6 +3814,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         read_live_runtime_settings();app.tweaks=So5Tweaks::Read(tweaks_config());refresh_saves();
         app.shader_cache_present=fs::is_directory(cache_directory());
         app.game_pid = 0;
+        if (app.quick_launch) {
+            if (wparam == 0) { DestroyWindow(window); return 0; }
+            reveal_quick_launch_failure();
+        }
         if (app.close_when_idle) {
             if (app.update_running) { app.update_cancel = true; app.close_after_update = true; }
             else DestroyWindow(window);
@@ -3868,7 +3888,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             else KillTimer(window, 1);
             return 0;
         }
-    case WM_AUTOPLAY: run_game(false); InvalidateRect(window, nullptr, FALSE); return 0;
+    case WM_AUTOPLAY:
+        run_game(false);
+        reveal_quick_launch_failure();
+        InvalidateRect(window, nullptr, FALSE); return 0;
     case WM_CLOSE:
         confirm_close(); return 0;
     case WM_DESTROY:
@@ -3887,6 +3910,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     app.root = find_root();
     int argument_count = 0;
     LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argument_count);
+    const auto launch_mode = So5Shortcuts::Mode(argument_count, arguments);
     if(arguments && argument_count==3 && std::wstring(arguments[1])==L"--native-resolution-self-test") {
         const fs::path fixture=fs::absolute(arguments[2]);LocalFree(arguments);
         // Never reuse an existing folder or touch owner settings during this test.
@@ -3947,6 +3971,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     GdiplusStartup(&app.gdiplus_token, &input, nullptr);
     app.config = app.root / "out" / "launcher.ini";
     load_settings();
+    app.quick_launch = launch_mode == So5Shortcuts::LaunchMode::QuickPlay;
     detect_environment();
     app.runtime_present=fs::is_regular_file(runtime_path());
     app.shader_cache_present=fs::is_directory(cache_directory());
@@ -3988,10 +4013,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     SDL_InitSubSystem(SDL_INIT_GAMEPAD);
     DragAcceptFiles(app.window, TRUE);
     app.backup_guard=std::make_unique<SaveBackupGuard>(app.root/L"out/CUSA03219/user/savedata-backups");
-    ShowWindow(app.window, show);
-    UpdateWindow(app.window);
+    if (!app.quick_launch) {
+        ShowWindow(app.window, show);
+        UpdateWindow(app.window);
+    }
     try {
-        if (const auto result = So5Update::ReadInstallResult(app.root)) {
+        if (!app.quick_launch) if (const auto result = So5Update::ReadInstallResult(app.root)) {
             append_log(L"Update result · " + from_utf8(result->detail.c_str(), int(result->detail.size())));
             std::wstring body = result->success
                 ? loc(L"Mise à jour installée avec succès.",L"Update installed successfully.")
@@ -4004,8 +4031,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
         app.update_cleanup = So5Update::PendingCleanup(app.root);
         if (app.update_cleanup) SetTimer(app.window, 4, 1500, nullptr);
     } catch (const std::exception& error) { append_log(L"Update result could not be read · " + from_utf8(error.what(), int(std::strlen(error.what())))); }
-    if (app.update_on_start) check_for_updates(false);
-    if (std::wstring(GetCommandLineW()).find(L"--play") != std::wstring::npos)
+    if (app.update_on_start && !app.quick_launch) check_for_updates(false);
+    if (launch_mode != So5Shortcuts::LaunchMode::Interactive)
         PostMessageW(app.window, WM_AUTOPLAY, 0, 0);
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {

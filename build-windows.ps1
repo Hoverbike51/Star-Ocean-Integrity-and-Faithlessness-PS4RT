@@ -14,9 +14,16 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 if ($Dlss -and $NoDlss) { throw 'Choose -Dlss or -NoDlss, not both.' }
 if (-not $DlssSdk) {
     $candidate = Join-Path $root 'out\dependencies\nvidia-dlss'
-    if (Test-Path -LiteralPath (Join-Path $candidate 'include\nvsdk_ngx_vk.h')) { $DlssSdk = $candidate }
+    if (-not $NoDlss) {
+        & (Join-Path $root 'scripts\get-dlss-sdk.ps1') -Destination $candidate
+        $DlssSdk = $candidate
+    }
 }
-if ($Dlss -and -not $DlssSdk) { throw 'Set -DlssSdk or DLSS_SDK_ROOT to the official NVIDIA DLSS SDK.' }
+if (-not $NoDlss) {
+    foreach ($part in @('include\nvsdk_ngx_vk.h','lib\Windows_x86_64\x64\nvsdk_ngx_s.lib','lib\Windows_x86_64\rel\nvngx_dlss.dll','LICENSE.txt')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $DlssSdk $part))) { throw "Incomplete NVIDIA DLSS SDK: $part" }
+    }
+}
 $bash = Join-Path $Msys2Root 'usr\bin\bash.exe'
 $cygpath = Join-Path $Msys2Root 'usr\bin\cygpath.exe'
 if (-not (Test-Path -LiteralPath $bash) -or -not (Test-Path -LiteralPath $cygpath)) {
@@ -29,8 +36,8 @@ $command = 'export MSYSTEM=CLANG64 MSYS2_ROOT="$2"; cd "$1"; bash build.sh' + $b
 & $bash -lc $command -- $unixRoot $unixMsys2
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-# DLSS is optional. The native application builds and runs without the SDK.
-# No SDK download, Python installation or NVIDIA driver replacement is performed.
+# Full player builds include DLSS. -NoDlss explicitly requests a reduced build.
+# The pinned SDK is a build dependency; no player-side SDK or Python is required.
 if ($DlssSdk -and -not $NoDlss) {
     $cmake = Join-Path $Msys2Root 'clang64\bin\cmake.exe'
     $bridge = Join-Path $root 'out\dlss-bridge'
@@ -69,13 +76,19 @@ if ($NoDlss) {
 }
 
 if ($PlayerFolder) {
+    if (-not $NoDlss) {
+        foreach ($name in @('ps4rt_dlss.dll','nvngx_dlss.dll')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $root "out\$name"))) { throw "Full player build is missing $name" }
+        }
+    }
     $packageCommand = 'export MSYSTEM=CLANG64 MSYS2_ROOT="$2"; cd "$1"; bash packaging/windows/package.sh --folder-only'
+    if ($NoDlss) { $packageCommand = 'export PS4RT_PACKAGE_NO_DLSS=1; ' + $packageCommand }
     & $bash -lc $packageCommand -- $unixRoot $unixMsys2
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     $version = (Get-Content -LiteralPath (Join-Path $root 'VERSION') -Raw).Trim()
     $playerFolderPath = Join-Path $root "dist\ps4rt-star-ocean-5-windows-x64-v$version-latest"
-    & (Join-Path $root 'packaging\windows\smoke-test.ps1') -Package $playerFolderPath
+    & (Join-Path $root 'packaging\windows\smoke-test.ps1') -Package $playerFolderPath -RequireDlss:(-not $NoDlss)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 

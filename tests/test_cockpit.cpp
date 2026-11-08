@@ -65,6 +65,7 @@ int main(int argc,char** argv) {
     }
     if(language) assert(std::strcmp(Tr(L"Output resolution",L"Résolution de sortie"),"Output resolution"));
     for(const wchar_t* text:{L"Applied render resolution",
+        L"Requires an output resolution of at least 1080p.",
         L"Without reconstruction, choose the internal resolution manually. The UI keeps the output resolution. With FSR or DLSS, quality presets control the internal resolution.",
         L"HUD layout",L"Select a HUD preset",L"Refresh presets",L"Open HUD presets folder",
         L"Could not open the HUD presets folder.",L"Ready",L"Controller shortcut R2 + L2",

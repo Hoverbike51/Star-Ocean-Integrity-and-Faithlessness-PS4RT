@@ -59,6 +59,7 @@ struct InstallResult {
     fs::path backup;
     std::string detail;
     fs::path workspace;
+    bool retryable = false; // Sharing violation in preflight; no files touched.
 };
 
 // Windows experimental builds accept prereleases with numeric vMAJOR.MINOR.PATCH tags.

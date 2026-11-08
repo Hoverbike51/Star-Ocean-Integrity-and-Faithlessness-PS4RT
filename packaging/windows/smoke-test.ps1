@@ -1,4 +1,4 @@
-param([Parameter(Mandatory = $true)][string]$Package)
+param([Parameter(Mandatory = $true)][string]$Package, [switch]$RequireDlss)
 $ErrorActionPreference = 'Stop'
 $work = $null
 try {
@@ -13,6 +13,7 @@ try {
         $tree = Get-ChildItem -LiteralPath $work -Directory | Select-Object -First 1 -ExpandProperty FullName
         if (-not $tree) { throw 'The package does not contain a root directory.' }
     }
+    & (Join-Path $PSScriptRoot '..\..\scripts\verify-fsr4-assets.ps1') -Root $tree
     $entry = Join-Path $tree 'Star Ocean 5 Launcher.exe'
     $runtime = Join-Path $tree 'bin\Star Ocean 5.exe'
     $launcher = Join-Path $tree 'bin\Star Ocean 5 Launcher.exe'
@@ -26,6 +27,9 @@ try {
         if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required file is missing: $required" }
     }
     $expectedVersion = (Get-Content -LiteralPath $versionFile -Raw).Trim()
+    $bridge = Test-Path -LiteralPath (Join-Path $tree 'bin\ps4rt_dlss.dll')
+    $nvidia = Test-Path -LiteralPath (Join-Path $tree 'bin\nvngx_dlss.dll')
+    if ($bridge -ne $nvidia -or ($RequireDlss -and -not $bridge)) { throw 'Incomplete DLSS runtime pair in player package.' }
     foreach ($executable in @($entry, $runtime, $launcher, $extractor, $updater)) {
         $metadata = (Get-Item -LiteralPath $executable).VersionInfo
         if ($metadata.FileVersion -ne $expectedVersion -or

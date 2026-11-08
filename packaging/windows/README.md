@@ -10,6 +10,46 @@ The PS4 guest code uses the x86-64 System V ABI. The loader relies on
 crosses guest frames without SEH unwind information. MSVC does not provide these mechanisms.
 The port therefore uses CMake/Ninja with clang/MinGW-w64 in **MSYS2 CLANG64**. Visual Studio can
 be used as an editor, but its compiler and linker must not be selected for this target.
+The separate DLSS bridge uses the official NVIDIA SDK and the Visual Studio C++
+toolchain. This does not change the System V ABI requirements of the main runtime.
+
+## DLSS in full player builds
+
+Install Visual Studio 2022 or newer with **Desktop development with C++**, x64 tools
+and a Windows SDK. `build-windows.cmd` downloads the required SDK files from the
+official NVIDIA repository at a pinned commit, verifies SHA-256 hashes, and builds
+the bridge. Both `ps4rt_dlss.dll` and `nvngx_dlss.dll` and the NVIDIA license must
+be present in a full player package. A partial pair is rejected.
+
+For offline builds use `build-windows.cmd -DlssSdk "D:\Dependencies\DLSS"` or
+`DLSS_SDK_ROOT`. `build-windows.cmd -NoDlss` explicitly creates a reduced build;
+it does not advertise functional DLSS. `bash build.sh` builds the main runtime
+only; use the Windows wrapper for the complete player folder including DLSS.
+
+The SDK is needed only for compilation. DLSS remains restricted to NVIDIA GPUs
+that pass runtime feature checks; shipping the DLLs does not bypass those checks.
+
+## FSR 4 v07 shader assets
+
+The external `fsr4_shaders` folder contains the six existing v07 INT8/DOT4 model
+variants and all three compiled graph tiers: `1080`, `2160` and `4320`.
+The runtime selects the tier by **output dimensions**: up to 1920 x 1080,
+up to 3840 x 2160, then larger supported outputs (within the runtime/GPU limits).
+The `4320` tier supplies missing graph variants; it does not add a quality preset,
+change model weights, retrain a model, or guarantee native ultrawide image quality.
+
+These files are loaded at runtime and copied into the player folder. Adding the
+matching precompiled shaders does not require recompiling C++ executables.
+Arbitrary model names or incompatible shader/weight layouts are not auto-discovered.
+Restart the game after updating assets; already created pipelines retain their code.
+The runtime's embedded edge-safe RCAS remains authoritative.
+
+Packaging and package checks verify all 273 required files against the pinned
+size/SHA-256 inventory, including the `4320` shaders. Run this check separately:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-fsr4-assets.ps1
+```
 
 ## Build dependencies
 
@@ -58,7 +98,7 @@ The following explicit form remains supported:
 ```
 
 The result is created under
-`dist\ps4rt-star-ocean-5-windows-x64-v1.0.0-latest\`. It contains only the executables, required DLLs,
+`dist\ps4rt-star-ocean-5-windows-x64-v1.0.1-latest\`. It contains only the executables, required DLLs,
 assets, integrated PKG extractor, license, and player documentation. Only a static native
 `Star Ocean 5 Launcher.exe` entry remains at the root; the real launcher, runtime, extractor,
 updater and DLLs are in `bin/`. Assets remain under their existing root subdirectories. Source files, CMake/Ninja
@@ -92,8 +132,8 @@ Players do not need Python, MSYS2, or PowerShell.
 Test either the player folder or the ZIP from PowerShell with a `PATH` that does not contain MSYS2:
 
 ```powershell
-.\packaging\windows\smoke-test.ps1 .\dist\ps4rt-star-ocean-5-windows-x64-v1.0.0-latest
-.\packaging\windows\smoke-test.ps1 .\dist\ps4rt-star-ocean-5-windows-x64-v1.0.0-latest.zip
+.\packaging\windows\smoke-test.ps1 .\dist\ps4rt-star-ocean-5-windows-x64-v1.0.1-latest
+.\packaging\windows\smoke-test.ps1 .\dist\ps4rt-star-ocean-5-windows-x64-v1.0.1-latest.zip
 ```
 
 ## Graphics menu

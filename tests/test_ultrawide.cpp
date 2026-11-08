@@ -15,6 +15,14 @@
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "video_core/renderer_vulkan/scene_resolution.h"
 int main(int argc,char** argv) {
+    Vulkan::SceneResolution::InputReadiness readiness;
+    for(unsigned i=1;i<Vulkan::SceneResolution::InputReadiness::Limit;++i) {
+        assert(!readiness.Observe(false));assert(!readiness.Exhausted());
+    }
+    assert(!readiness.Observe(false) && readiness.Exhausted());
+    assert(readiness.Observe(true) && !readiness.Exhausted() && readiness.misses==0);
+    assert(!readiness.Observe(false) && readiness.misses==1);
+    readiness.Reset();assert(!readiness.Exhausted() && readiness.misses==0);
     using namespace Ps4RtUltrawide;
     std::vector<unsigned char> image(AspectAddress+4);
     std::memcpy(image.data()+0x4b0,Constructor,sizeof Constructor);

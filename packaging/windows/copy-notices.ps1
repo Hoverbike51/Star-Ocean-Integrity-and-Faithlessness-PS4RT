@@ -4,6 +4,7 @@ param([Parameter(Mandatory=$true)][string]$Destination,
       [string]$Msys2Root=$(if($env:MSYS2_ROOT){$env:MSYS2_ROOT}else{'C:\msys64'}))
 $ErrorActionPreference='Stop'
 $root=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+. (Join-Path $root 'scripts\file-hash.ps1')
 $stage=(Resolve-Path -LiteralPath $Destination).Path
 $notice=Join-Path $stage 'docs\third-party'
 if(Test-Path -LiteralPath $notice){throw 'Third-party notice output must be new.'}
@@ -47,7 +48,7 @@ if(Test-Path -LiteralPath (Join-Path $bin 'nvngx_dlss.dll')) {
  $inventory.Add('NVIDIA DLSS runtime: separate NVIDIA RTX SDK terms; https://github.com/NVIDIA/DLSS')
  foreach($file in @('ps4rt_dlss.dll','nvngx_dlss.dll')) {
   $dll=Join-Path $bin $file
-  $inventory.Add($file+' | version '+[Diagnostics.FileVersionInfo]::GetVersionInfo($dll).FileVersion+' | SHA256 '+(Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash)
+  $inventory.Add($file+' | version '+[Diagnostics.FileVersionInfo]::GetVersionInfo($dll).FileVersion+' | SHA256 '+(Get-So5FileSha256 $dll))
  }
 }
 $owners=@(& $pacman -Qoq @dlls)

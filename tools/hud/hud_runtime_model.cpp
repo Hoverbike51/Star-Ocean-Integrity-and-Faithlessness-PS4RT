@@ -109,10 +109,18 @@ bool RuntimeCompatible(const Preset& p,Aspect actual) {
     return true;
 }
 namespace {
-std::shared_ptr<const NativeCatalog> native_catalog=std::make_shared<const NativeCatalog>();
+std::shared_ptr<const NativeCatalog> native_catalog;
+std::uint64_t ObjectHash(std::string_view name) {
+    std::uint64_t h=0xcbf29ce484222325;for(unsigned char c:name)h=(h*0x100000001b3)^c;return h;
 }
-void SetNativeCatalog(std::shared_ptr<const NativeCatalog> c){native_catalog=c?std::move(c):std::make_shared<const NativeCatalog>();}
-const NativeCatalog& GetNativeCatalog(){return *native_catalog;}
+std::uint64_t ObjectName(const NativeObject& o,int handle) {
+    auto h=o.name_hash;char suffix[32];std::snprintf(suffix,sizeof suffix,"_%09d",handle);
+    for(const char* c=suffix;*c;++c)h=(h*0x100000001b3)^static_cast<unsigned char>(*c);return h;
+}
+}
+void SetNativeCatalog(std::shared_ptr<const NativeCatalog> c){native_catalog=c?std::move(c):NativeCatalog::Builtin();}
+const NativeCatalog& GetNativeCatalog(){static const auto builtin=NativeCatalog::Builtin();return native_catalog?*native_catalog:*builtin;}
+#include "hud_native_bindings.inc"
 std::shared_ptr<const NativeCatalog> NativeCatalog::Parse(std::string_view text) {
     CheckJson(text,4*1024*1024);auto doc=boost::json::parse(text);const auto& root=doc.as_object();
     if(!root.at("private").as_bool()||root.at("title_id").as_string()!="CUSA03219"||root.at("app_ver").as_string()!="01.00")
@@ -147,12 +155,16 @@ std::shared_ptr<const NativeCatalog> NativeCatalog::Parse(std::string_view text)
         for(const auto& known:RuntimeResources)if(known.resource==entry->name){if(known.bytes!=size||known.english!=hash)throw std::runtime_error("Known UI fingerprint mismatch.");entry->binding.group=known.group;entry->binding.bounds=known.bounds;}
         out->resources.push_back(std::move(entry));
     }
-    for(const auto& resource:out->resources)for(size_t n=0;n<resource->objects.size();++n) {
-        std::uint64_t hash=0xcbf29ce484222325;for(unsigned char c:resource->objects[n].name)hash=(hash*0x100000001b3)^c;
-        out->name_index.push_back({hash,resource.get(),n});
-    }
-    std::ranges::sort(out->name_index,{},&NameEntry::hash);
+    out->Index();
     return out;
+}
+void NativeCatalog::Index() {
+    name_index.clear();
+    for(const auto& resource:resources)for(size_t n=0;n<resource->objects.size();++n) {
+        auto& object=resource->objects[n];if(!object.name_hash)object.name_hash=ObjectHash(object.name);
+        name_index.push_back({object.name_hash,resource.get(),n});
+    }
+    std::ranges::sort(name_index,{},&NameEntry::hash);
 }
 const NativeResource* NativeCatalog::Find(std::string_view name) const {for(const auto& r:resources)if(r->name==name)return r.get();return nullptr;}
 const NativeResource* NativeCatalog::Identify(std::span<const unsigned char> bytes) const {
@@ -171,13 +183,13 @@ const NativeResource* NativeCatalog::Resolve(int handle,std::span<const std::uin
     for(auto it=std::ranges::lower_bound(name_index,hash,{},&NameEntry::hash);it!=name_index.end()&&it->hash==hash;++it) {
         const auto& objects=it->resource->objects;size_t object=it->object,depth=0;
         if(objects[object].type!=type)continue;
-        while(depth<chain.size()&&object!=size_t(-1)&&NativeName(objects[object].name,handle)==chain[depth]) {
+        while(depth<chain.size()&&object!=size_t(-1)&&ObjectName(objects[object],handle)==chain[depth]) {
             object=objects[object].parent_index;++depth;
         }
         if(depth!=chain.size()||object!=size_t(-1))continue;
         if(!tree.empty()) {
             if(tree.size()!=objects.size())continue;bool same=true;
-            for(const auto& o:objects)if(std::ranges::find(tree,NativeName(o.name,handle))==tree.end()){same=false;break;}
+            for(const auto& o:objects)if(std::ranges::find(tree,ObjectName(o,handle))==tree.end()){same=false;break;}
             if(!same)continue;
         }
         if(match&&match!=it->resource){if(ambiguous)*ambiguous=true;return nullptr;}
@@ -187,7 +199,7 @@ const NativeResource* NativeCatalog::Resolve(int handle,std::span<const std::uin
 }
 Identity IdentifyHandle(const NativeResource* r,int handle) {
     auto id=IdentifyHandle(&r->binding,handle);id.native=r;id.object_keys.reserve(r->objects.size());
-    for(const auto& o:r->objects)id.object_keys.emplace_back(NativeName(o.name,handle),o.key);
+    for(const auto& o:r->objects)id.object_keys.emplace_back(ObjectName(o,handle),o.key);
     std::ranges::sort(id.object_keys);return id;
 }
 std::vector<CompiledElement> CompileElements(const Preset& p) {
@@ -195,7 +207,7 @@ std::vector<CompiledElement> CompileElements(const Preset& p) {
     for(const auto& e:p.elements) {
         const auto* r=GetNativeCatalog().Find(e.resource);if(!r)throw std::runtime_error("UI override resource is absent from the verified native catalog.");
         auto key=r->key;auto bounds=r->binding.bounds;
-        if(!e.object.empty()){const auto it=std::ranges::find(r->objects,e.object,&NativeObject::name);if(it==r->objects.end())throw std::runtime_error("UI override object is absent from the verified native catalog.");key=it->key;bounds=it->bounds;}
+        if(!e.object.empty()){const auto it=std::ranges::find(r->objects,ObjectHash(e.object),&NativeObject::name_hash);if(it==r->objects.end())throw std::runtime_error("UI override object is absent from the verified native catalog.");key=it->key;bounds=it->bounds;}
         out.push_back({key,e.value,bounds});
     }
     std::ranges::sort(out,{},&CompiledElement::key);return out;

@@ -1,6 +1,6 @@
 # Star Ocean 5 Launcher Guide
 
-**Windows 10/11 x64 · source version 1.0.0**
+**Windows 10/11 x64 · source version 1.0.1**
 
 The Cockpit launcher prepares your own PS4 game files, manages settings and starts the
 Windows runtime. Screenshot paths and values are examples, not installation defaults.
@@ -123,8 +123,19 @@ play time, location and difficulty. It is a preview, not a save-slot selector or
 to load that slot in the game. Returning to **Game** refreshes the metadata.
 
 **Game language** offers the languages configured for the detected edition. It remains
-independent of the launcher language. **Create desktop shortcut** creates a shortcut with
-the game icon and a launch argument; keep the installed player folder in place afterward.
+independent of the launcher language. **Create desktop shortcuts** creates two desktop links:
+
+- **Star Ocean 5 Launcher** opens the launcher normally.
+- **Star Ocean Integrity and faithlessness** starts the selected game with the last saved
+  settings, without showing the launcher interface. Preparation, GPU/display checks,
+  controller/keyboard mappings and the selected save-backup policy still apply.
+
+A hidden launcher process supervises quick play and exits after a successful game session.
+If setup is incomplete or startup fails, the launcher opens for setup or diagnostics.
+Quick play does not interrupt gameplay with automatic update checks. Both links use the
+application icon and the stable application entry point. Keep the player folder in place;
+after moving it, recreate the links from its launcher. Older `Star Ocean 5` links can be
+removed manually once the new links have been created.
 
 ## Cheats
 
@@ -305,6 +316,9 @@ be muted durring this process. (Was mainly used to test the game after a cutscen
 
 The badges summarize preparation, Vulkan and the validated game ID. Console messages remain
 **English**, regardless of the interface language, so reports can be compared consistently.
+Each completed console line receives a local-time `[HH:mm:ss]` timestamp once when it is
+received. Copying, scrolling and exporting preserve that timestamp. Multi-part runtime
+output is assembled into complete lines before it is timestamped.
 
 - Drag to select console text; use **Ctrl+A** to select all and **Ctrl+C** to copy.
 - Use vertical scrolling to revisit earlier output and horizontal scrolling for long lines.

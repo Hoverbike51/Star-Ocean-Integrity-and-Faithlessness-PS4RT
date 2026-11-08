@@ -31,4 +31,17 @@ struct Coherence {
     void Resolved() { dirty = false; }
     void NativeWrite() { valid = dirty = raster_written = false; }
 };
+// A loading frame can temporarily lack the final color/depth proxies. Do not
+// save a different user preset on its first occurrence, but bound the retry.
+struct InputReadiness {
+    static constexpr unsigned Limit = 120;
+    unsigned misses = 0;
+    void Reset() { misses = 0; }
+    bool Observe(bool ready) {
+        if (ready) { Reset(); return true; }
+        misses = std::min(misses + 1, Limit);
+        return false;
+    }
+    bool Exhausted() const { return misses >= Limit; }
+};
 } // namespace Vulkan::SceneResolution

@@ -1,12 +1,12 @@
 > [!NOTE]
-> The SO5 Windows version is now 1.0.0 and run better with few features! <br>
+> The SO5 Windows version is now 1.0.1-hotfix 1 and run better with few features! <br>
 > Tested with `Ryzen 9 9950X3D2` CPU with `Radeon RX 9070 XT` GPU running Windows 11 x64 <br>
 > Tested with `Intel i5 7th Gen` CPU with `Nvidia GTX 1050 Ti` GPU running Windows 10 x64 (laptop)
 
 > [!IMPORTANT]
-> The `21:9` and `32:9` aspect ratios are now rendered correctly, but this may not work properly <br>
-> with `custom FSR4 v07 presets` designed for the `16:9` aspect ratio! <br>
-> However, I've worked hard to make the `HUD` [customizable!](https://github.com/Hoverbike51/hoverbike51.github.io/tree/main/SO5-HUD-Layout-Studio)
+> The `21:9` and `32:9` aspect ratios are now rendered correctly, It might work better <br>
+> with the newly pre-trained shader model up to `4320p` for `FSR 4`  <br>
+> I've worked hard to make the `HUD` [customizable!](https://github.com/Hoverbike51/hoverbike51.github.io/tree/main/SO5-HUD-Layout-Studio)
 
 # Star Ocean 5 — Windows port
 
@@ -19,7 +19,7 @@
 </p>
 
 
-Version **1.0.0**, for **Windows 10/11 x64**. This branch adapts the game-specific PS4RT
+Version **1.0.1**, for **Windows 10/11 x64**. This branch adapts the game-specific PS4RT
 compatibility runtime for Star Ocean: Integrity and Faithlessness (PS4).
 It is experimental and has not been validated across a complete playthrough or every PC.
 
@@ -94,6 +94,12 @@ Enabling the tools alone does not start a recording.
 
 These instructions apply to the source checkout, not to a player package.
 Install the MSYS2 CLANG64 dependencies listed in `packaging/windows/README.md`.
+Full builds also require Visual Studio 2022 or newer with the x64 C++ build tools
+and Windows SDK for the separate DLSS bridge. The wrapper downloads the pinned
+official NVIDIA SDK build files and verifies their SHA-256 hashes on first use.
+For an offline build, pass `-DlssSdk` or set `DLSS_SDK_ROOT` to a complete SDK.
+Use `-NoDlss` only when intentionally building a reduced package without DLSS.
+Players do not need the SDK, Visual Studio, MSYS2 or Python.
 The project uses **CMake + Ninja + clang/MinGW-w64**, because the PS4 guest boundary needs
 System V ABI support and GNU assembly. MSVC is not supported for that boundary.
 
@@ -101,7 +107,7 @@ From a terminal in the checkout:
 
 ```powershell
 .\build-windows.cmd
-& '.\dist\ps4rt-star-ocean-5-windows-x64-v1.0.0-latest\Star Ocean 5 Launcher.exe'
+& '.\dist\ps4rt-star-ocean-5-windows-x64-v1.0.1-latest\Star Ocean 5 Launcher.exe'
 ```
 
 The CMD build creates a separate, clean player folder without a ZIP by default.
@@ -111,7 +117,7 @@ The explicit form remains available:
 .\build-windows.cmd -PlayerFolder
 ```
 
-The folder is created under `dist/ps4rt-star-ocean-5-windows-x64-v1.0.0-latest/`.
+The folder is created under `dist/ps4rt-star-ocean-5-windows-x64-v1.0.1-latest/`.
 The name is read from `VERSION`; no user-specific absolute path is stored in the build scripts.
 Keep that entire folder for playing; source files and build intermediates stay in the checkout.
 The root launcher is a small native bootstrap, with no application DLLs at the root.

@@ -9,10 +9,23 @@ std::wstring Selected(HWND window) {
     text.resize(size_t(count));return text;
 }
 int main() {
+    So5Log::RetainedDiagnostics history;
+    history.Keep(L"Runtime: semaphore id=1578");assert(history.lines.empty());
+    for(unsigned i=0;i<400;++i) history.Keep(L"[23:01:06] Scene preset refused: "+std::to_wstring(i));
+    assert(history.lines.size()==history.Capacity);
+    assert(history.lines.front().ends_with(L": 0") && history.lines[63].ends_with(L": 63"));
+    assert(history.lines.back().ends_with(L": 399"));
+    history.Clear();assert(history.lines.empty());
     INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_WIN95_CLASSES};assert(InitCommonControlsEx(&controls));
     const auto parent=CreateWindowExW(0,L"STATIC",L"Console fixture",WS_OVERLAPPED,0,0,800,600,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
     assert(parent);{
         LogConsole console;assert(console.Create(parent));const auto w=console.Handle();
+        SYSTEMTIME time{};time.wHour=9;time.wMinute=7;time.wSecond=3;
+        const auto stamped=So5Log::Stamp(L"GPU: Résumé / 中文",time);
+        assert(stamped==L"[09:07:03] GPU: Résumé / 中文");
+        console.Update({stamped});SendMessageW(w,EM_SETSEL,0,-1);assert(Selected(w)==stamped);
+        time.wSecond=4;console.Update({stamped,So5Log::Stamp(L"New output",time)});
+        SendMessageW(w,EM_SETSEL,0,-1);assert(Selected(w).find(stamped)==0);
         console.Place(10,20,600,200);assert(GetWindowLongPtrW(w,GWL_STYLE)&ES_READONLY);
         console.Update({L"First log line",L"Second line",L"GPU: Résumé / 中文"});
         CHARRANGE selection{0,5};SendMessageW(w,EM_EXSETSEL,0,reinterpret_cast<LPARAM>(&selection));assert(Selected(w)==L"First");

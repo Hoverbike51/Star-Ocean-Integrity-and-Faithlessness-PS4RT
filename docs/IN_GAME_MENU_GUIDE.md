@@ -1,6 +1,6 @@
 # Star Ocean 5 In-game Menu Guide
 
-**Windows 10/11 x64 · source version 1.0.0**
+**Windows 10/11 x64 · source version 1.0.1**
 
 [README](../README.md) · [Launcher guide](LAUNCHER_GUIDE.md) · [Changelog](../CHANGELOG.md)
 

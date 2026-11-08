@@ -1,6 +1,6 @@
 # Windows port audit
 
-Current source: **1.0.0 (experimental, unreleased)**. Rendering/input/Tweaks and optional
+Current source: **1.0.1**. Rendering/input/Tweaks and optional
 DLSS additions are described in the [changelog](../CHANGELOG.md) and current player guides.
 The portability and benchmark inventory below records the earlier Windows integration;
 its dated test observations are not a new validation of this source export. The unresolved
