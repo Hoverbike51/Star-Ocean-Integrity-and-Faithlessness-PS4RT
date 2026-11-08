@@ -1,3 +1,5 @@
+#include "ps4rt_speed.h"
+#include "ps4rt_exploration_leader.h"
 // SDL3 window for the native Windows Vulkan swapchain.
 #include <cstdio>
 #include <cstdlib>
@@ -10,8 +12,10 @@
 #include "ps4rt_graphics.h"
 #include "ps4rt_settings.h"
 #include "ps4rt_display.h"
+#include "ps4rt_ultrawide.h"
 
 extern "C" void runtime_pad_refresh_keyboard(void);
+extern "C" void runtime_pad_devices_changed(void);
 
 namespace Frontend {
 
@@ -35,12 +39,12 @@ void ApplyDisplayLimits(SDL_DisplayID display) {
     const auto target=Ps4RtDisplay::Inspect(monitor);
     auto& settings=Ps4RtSettings::Get();
     settings.display_max_width=target.width; settings.display_max_height=target.height;
-    settings.display_window_modes=target.window_modes;
-    settings.display_fullscreen_modes=target.fullscreen_modes;
-    auto modes=settings.display_mode==Ps4RtGraphics::Fullscreen?target.fullscreen_modes:target.window_modes;
+    settings.display_window_modes=Ps4RtUltrawide::SessionModes(target.window_modes);
+    settings.display_fullscreen_modes=Ps4RtUltrawide::SessionModes(target.fullscreen_modes);
+    auto modes=settings.display_mode==Ps4RtGraphics::Windowed?settings.display_window_modes.load():settings.display_fullscreen_modes.load();
     if(!modes) {
-        settings.display_mode=Ps4RtGraphics::Borderless; modes=target.window_modes;
-        std::printf("Display: no supported exclusive output; using borderless\n");
+        settings.display_mode=Ps4RtGraphics::Windowed; modes=settings.display_window_modes;
+        std::printf("Display: no supported fullscreen output for this projection; using windowed\n");
     }
     if(!Ps4RtOutput::Filter(modes,settings.output_aspect)) settings.output_aspect=Ps4RtOutput::All;
     const int requested=settings.output_res;
@@ -201,6 +205,16 @@ bool WindowSDL::PollEvents() {
     Ps4RtOverlay::UpdateCursor(window);
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
+        if(event.type==SDL_EVENT_GAMEPAD_ADDED||event.type==SDL_EVENT_GAMEPAD_REMOVED)
+            runtime_pad_devices_changed();
+        Ps4RtSpeed::Handle(event,text_active||Ps4RtOverlay::CapturesInput());
+        const bool leader_captured=text_active||Ps4RtOverlay::CapturesInput()||
+            !(SDL_GetWindowFlags(window)&SDL_WINDOW_INPUT_FOCUS);
+        if(leader_captured||event.type==SDL_EVENT_WINDOW_FOCUS_LOST)Ps4RtLeader::Cycle(0,true);
+        else if(event.type==SDL_EVENT_KEY_DOWN&&!event.key.repeat) {
+            if(event.key.key==SDLK_O)Ps4RtLeader::Cycle(-1,false);
+            else if(event.key.key==SDLK_P)Ps4RtLeader::Cycle(1,false);
+        }
         if (text_active && (event.type == SDL_EVENT_TEXT_INPUT || event.type == SDL_EVENT_KEY_DOWN)) {
             std::scoped_lock lock{text_mutex};
             if (event.type == SDL_EVENT_TEXT_INPUT) {
@@ -256,6 +270,7 @@ bool WindowSDL::PollEvents() {
             break;
         }
     }
+    if(Ps4RtOverlay::CapturesInput())Ps4RtSpeed::Reset();
     Ps4RtOverlay::UpdateCursor(window);
     return is_open;
 }

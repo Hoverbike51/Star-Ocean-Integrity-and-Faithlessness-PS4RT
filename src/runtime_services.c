@@ -14,6 +14,7 @@
 #include <time.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include "runtime_trophy_file.h"
 
 #define USER_ID 1
 #define USER_NAME "Player"
@@ -130,6 +131,13 @@ static ABI int32_t netctl_nat(uint32_t *info) {
 }
 static ABI int32_t lib_init_id(void) { return new_id(); }
 static ABI int32_t ok_void(void) { return 0; }
+/* The game updates console capture metadata after the final movie. Windows
+ * capture is external (for example OBS); acknowledge the metadata request
+ * without dereferencing guest arguments or pretending to record a video. */
+static ABI int32_t video_recording_set_info(void) {
+    note("video recording metadata acknowledged (console recording unavailable)");
+    return ORBIS_OK;
+}
 /* Console screenshot configuration only. Capture requests remain unresolved;
  * host F12 screenshots are a separate presenter feature. Retain the overlay
  * parameters without inventing an interpretation of the console origin enum. */
@@ -475,7 +483,7 @@ static ABI int32_t ime_result(uint32_t *result) {
 }
 static ABI int32_t ime_term(void) { memset(&ime,0,sizeof(ime)); return 0; }
 
-/* ---- Trophies: accepted locally, recorded in the log (and in PS4RT_TROPHY_FILE if set) ---- */
+/* ---- Trophies: accepted locally, logged and optionally journaled ---- */
 static ABI int32_t trophy_context(int32_t *ctx,int32_t user,uint32_t label,uint64_t options) {
     (void)user; (void)label; (void)options;
     if (!ctx) return TROPHY_INVALID;
@@ -483,59 +491,13 @@ static ABI int32_t trophy_context(int32_t *ctx,int32_t user,uint32_t label,uint6
 }
 static ABI int32_t trophy_handle(int32_t *handle) { if (!handle) return TROPHY_INVALID; *handle=new_id(); return 0; }
 static ABI int32_t trophy_register(int32_t ctx,int32_t handle,uint64_t options) { (void)ctx; (void)handle; (void)options; return 0; }
-/* Unlocks are also written to PS4RT_TROPHY_FILE when a launcher sets it, as
-   {"unlocked":{"001":"2026-11-05T20:00:00Z",...}}, the same file the Sakura Wars and
-   Valkyria Revolution runtimes write. Without the variable nothing changes. */
-static void trophy_note(int32_t id) {
-    const char *path=getenv("PS4RT_TROPHY_FILE");
-    if (!path || !path[0] || id<0 || id>127) return;
-    char body[8192];
-    size_t n=0;
-    FILE *in=fopen(path,"rb");
-    if (in) { n=fread(body,1,sizeof(body)-1,in); fclose(in); }
-    body[n]=0;
-    int seen[128]={0};
-    char saved[128][32];
-    memset(saved,0,sizeof(saved));
-    for (char *cursor=body; (cursor=strchr(cursor,'"')); ) {
-        if (cursor[1]>='0' && cursor[1]<='9' && cursor[2]>='0' && cursor[2]<='9' && cursor[3]>='0' && cursor[3]<='9' && cursor[4]=='"' && cursor[5]==':' && cursor[6]=='"') {
-            int number=(cursor[1]-'0')*100+(cursor[2]-'0')*10+(cursor[3]-'0');
-            if (number>=0 && number<128) {
-                seen[number]=1;
-                size_t len=strcspn(cursor+7,"\"");
-                if (len>31) len=31;
-                memcpy(saved[number],cursor+7,len);
-                saved[number][len]=0;
-            }
-            cursor+=7;
-        } else cursor++;
-    }
-    if (seen[id]) return;
-    seen[id]=1;
-    char when[32];
-    time_t now=time(NULL);
-    struct tm parts;
-#ifdef _WIN32
-    gmtime_s(&parts,&now);
-#else
-    gmtime_r(&now,&parts);
-#endif
-    strftime(when,sizeof(when),"%Y-%m-%dT%H:%M:%SZ",&parts);
-    FILE *out=fopen(path,"wb");
-    if (!out) return;
-    fputs("{\"unlocked\":{",out);
-    int first=1;
-    for (int number=0; number<128; number++) if (seen[number]) {
-        fprintf(out,"%s\"%03d\":\"%s\"",first?"":",",number,number==id?when:saved[number]);
-        first=0;
-    }
-    fputs("}}\n",out);
-    fclose(out);
-}
 static ABI int32_t trophy_unlock(int32_t ctx,int32_t handle,int32_t id,int32_t *platinum) {
     (void)ctx; (void)handle;
     printf("Runtime: trophy %d unlocked\n",id);
-    trophy_note(id); /* recorded aside; the answer below stays the one the game already gets */
+    enum TrophyFileResult recorded=trophy_file_note(id);
+    if (recorded>=TROPHY_FILE_BUSY)
+        printf("Runtime: trophy journal not updated (%s); guest result unchanged\n",
+            recorded==TROPHY_FILE_BUSY?"writer busy":recorded==TROPHY_FILE_INVALID?"invalid existing JSON":"file I/O failed");
     if (platinum) *platinum=-1;
     return 0;
 }
@@ -651,6 +613,7 @@ static ABI int32_t audio_in_open(void) { return AUDIO_IN_NOT_OPENED; }
 
 
 static const RuntimeExport exports[]={
+    {"sceVideoRecordingSetInfo",video_recording_set_info},
     {"sceScreenShotDisable",screenshot_disable},
     {"sceScreenShotEnable",screenshot_enable},
     {"sceScreenShotSetOverlayImageWithOrigin",screenshot_overlay},

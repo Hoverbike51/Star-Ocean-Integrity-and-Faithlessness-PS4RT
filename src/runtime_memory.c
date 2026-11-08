@@ -16,20 +16,35 @@
 #include <time.h>
 #include <errno.h>
 #include <windows.h>
-/* sceKernelGetDirectMemorySize on retail PS4: 5056 MiB. PS4RT_DMEM_MB raises it (the resolution
- * larger scene targets may need additional memory; PS4RT_DMEM_MB overrides it). */
+#include "runtime_memory_budget.h"
+/* Expand allowances only by explicit opt-in. This does not enlarge fixed heaps
+ * inside the guest executable or change GPU/Windows memory availability. */
+static pthread_once_t budget_once = PTHREAD_ONCE_INIT;
+static uint64_t direct_budget, flexible_budget;
+static void initialize_budgets(void) {
+    const char *direct = getenv("PS4RT_DMEM_MB"), *flexible = getenv("PS4RT_FLEX_MB");
+    int direct_ok, flexible_ok;
+    const uint64_t dm = runtime_memory_budget_mb(direct, PS4RT_DIRECT_DEFAULT_MB,
+                                                PS4RT_DIRECT_MAX_MB, &direct_ok);
+    const uint64_t fm = runtime_memory_budget_mb(flexible, PS4RT_FLEXIBLE_DEFAULT_MB,
+                                                PS4RT_FLEXIBLE_MAX_MB, &flexible_ok);
+    direct_budget = dm << 20;
+    flexible_budget = fm << 20;
+    if (direct && !direct_ok) fputs("Runtime: invalid PS4RT_DMEM_MB; using the compatible direct-memory default\n", stderr);
+    if (flexible && !flexible_ok) fputs("Runtime: invalid PS4RT_FLEX_MB; using the compatible flexible-memory default\n", stderr);
+    printf("Runtime: guest memory budgets: direct=%" PRIu64 " MiB, flexible=%" PRIu64
+           " MiB; fixed game heaps and host GPU budgets are independent\n", dm, fm);
+}
 static uint64_t pool_size_bytes(void) {
-    static uint64_t size;
-    if (!size) {
-        const char *env = getenv("PS4RT_DMEM_MB");
-        uint64_t mb = env ? strtoull(env, NULL, 10) : 0;
-        if (mb < 5056 || mb > 16384) mb = 5056;
-        size = mb * 1024 * 1024;
-    }
-    return size;
+    pthread_once(&budget_once, initialize_budgets);
+    return direct_budget;
+}
+static uint64_t flexible_size_bytes(void) {
+    pthread_once(&budget_once, initialize_budgets);
+    return flexible_budget;
 }
 #define POOL_SIZE pool_size_bytes()
-#define FLEXIBLE_SIZE (UINT64_C(448) * 1024 * 1024)
+#define FLEXIBLE_SIZE flexible_size_bytes()
 #define PAGE UINT64_C(16384)
 #define USER_MIN UINT64_C(0x1000000000)
 #define USER_MAX UINT64_C(0xfc00000000)
@@ -71,6 +86,7 @@ static Block blocks[LIMIT];
 static Vma *vmas; static size_t vma_count, vma_capacity;
 static unsigned char *backing_base; /* second view of the pool: host writes bypass guest/GPU page protection */
 #define FLEX_SPAN (UINT64_C(1024) * 1024 * 1024)
+_Static_assert((PS4RT_FLEXIBLE_MAX_MB << 20) <= FLEX_SPAN, "flexible allowance must fit its backing span");
 static uint64_t flex_bitmap[FLEX_SPAN/PAGE/64];
 /* GPU hooks (ps4rtgpu): notified outside the lock, in order, after each operation. */
 typedef void (*GpuRange)(uintptr_t address, uint64_t size);
@@ -80,6 +96,8 @@ typedef struct { int kind; uintptr_t address; uint64_t size; } PendingHook;
 static PendingHook pending[64]; static size_t pending_count;
 static size_t allocations, maps, flexible_maps, protects, queries;
 static uint64_t live_bytes, flexible_bytes;
+static uint64_t peak_direct_bytes, peak_flexible_bytes;
+static size_t direct_allocation_failures, flexible_budget_failures;
 
 static int valid_alignment(uint64_t a) { return a >= PAGE && a <= POOL_SIZE && !(a & (a-1)); }
 static uint64_t align_up(uint64_t n, uint64_t a) { return (n+a-1) & ~(a-1); }
@@ -262,6 +280,10 @@ static int pool(void) {
     section=CreateFileMapping2(INVALID_HANDLE_VALUE,NULL,FILE_MAP_ALL_ACCESS,PAGE_EXECUTE_READWRITE,SEC_COMMIT,bytes,NULL,NULL,0);
     if (!section) { fprintf(stderr,"Runtime: cannot create %" PRIu64 " MiB of guest memory (error %lu); is the page file large enough?\n",bytes>>20,GetLastError()); return -1; }
     backing_base=MapViewOfFile3(section,GetCurrentProcess(),NULL,0,bytes,0,PAGE_READWRITE,NULL,0);
+    if (!backing_base) {
+        fprintf(stderr,"Runtime: cannot map guest-memory backing view (error %lu)\n", GetLastError());
+        CloseHandle(section); section=NULL;
+    }
     return backing_base ? 0 : -1;
 }
 static void queue_hook(int kind, uintptr_t address, uint64_t size) {
@@ -380,7 +402,10 @@ static int32_t place(void **inout, uint64_t size, int prot, int flags, uint64_t 
     void *mapped=(void *)address;
     drop_range(address,address+size);
     if (vma_insert(vma_index(address),(Vma){address,address+size,kind,prot,type,phys})) return NO_MEMORY;
-    if (kind==KIND_FLEXIBLE) flexible_bytes+=size;
+    if (kind==KIND_FLEXIBLE) {
+        flexible_bytes+=size;
+        if (flexible_bytes>peak_flexible_bytes) peak_flexible_bytes=flexible_bytes;
+    }
     if (kind!=KIND_RESERVED) queue_hook(HOOK_MAP,address,size);
     *inout=mapped;
     return 0;
@@ -408,14 +433,28 @@ static ABI int32_t direct_allocate(int64_t low, int64_t high, uint64_t size,
     if (!out || low < 0 || high < 0 || !size || size % PAGE || !valid_alignment(alignment) || type < 0 || type > 10)
         return INVALID;
     uint64_t end = (uint64_t)high < POOL_SIZE ? (uint64_t)high : POOL_SIZE;
-    if ((uint64_t)low >= end || size > end - (uint64_t)low) return NO_SPACE;
     write_lock();
+    if ((uint64_t)low >= end || size > end - (uint64_t)low) {
+        ++direct_allocation_failures;
+        if (direct_allocation_failures<=4)
+            fprintf(stderr,"Runtime: direct allocation refused: requested=%" PRIu64
+                ", range=[%" PRId64 ",%" PRId64 "), guest budget=%" PRIu64
+                "; caller range is preserved\n",size,low,high,POOL_SIZE);
+        write_unlock(); return NO_SPACE;
+    }
     if (pool()) { write_unlock(); return NO_MEMORY; }
     uint64_t start = align_up((uint64_t)low, alignment);
     int slot = -1;
     for (int i=0; i<LIMIT; ++i) if (!blocks[i].used) { slot=i; break; }
     for (;;) {
-        if (slot<0 || start > end || size > end-start) { write_unlock(); return NO_SPACE; }
+        if (slot<0 || start > end || size > end-start) {
+            ++direct_allocation_failures;
+            if (direct_allocation_failures<=4)
+                fprintf(stderr,"Runtime: direct allocation refused: requested=%" PRIu64
+                    ", live=%" PRIu64 ", guest budget=%" PRIu64 ", reason=%s\n",
+                    size,live_bytes,POOL_SIZE,slot<0?"allocation table full":"no aligned space in caller range");
+            write_unlock(); return NO_SPACE;
+        }
         int overlap = 0;
         for (int i=0; i<LIMIT; ++i) {
             Block b = blocks[i];
@@ -427,6 +466,7 @@ static ABI int32_t direct_allocate(int64_t low, int64_t high, uint64_t size,
     }
     blocks[slot] = (Block){start, size, type, 1}; *out = (int64_t)start;
     ++allocations; live_bytes += size;
+    if (live_bytes>peak_direct_bytes) peak_direct_bytes=live_bytes;
     write_unlock();
     printf("Runtime: direct allocation offset=0x%" PRIx64 ", size=%" PRIu64 " bytes, type=%d\n", start, size, type);
     return 0;
@@ -512,7 +552,9 @@ static ABI int32_t direct_release(uint64_t start, uint64_t size) {
 }
 static int32_t map_flexible_locked(void **inout, uint64_t size, int prot, int flags) {
     if (!inout || !size || size%PAGE || (prot & ~0x37)) return INVALID;
-    if (flexible_bytes+size>FLEXIBLE_SIZE || pool()) return NO_MEMORY;
+    const uint64_t limit=FLEXIBLE_SIZE;
+    if (size>limit || flexible_bytes>limit-size) { ++flexible_budget_failures; return NO_MEMORY; }
+    if (pool()) return NO_MEMORY;
     uint64_t phys=flex_alloc(size);
     if (phys==UINT64_MAX) return NO_MEMORY;
     int32_t result=place(inout,size,prot,flags,PAGE,KIND_FLEXIBLE,0,phys);
@@ -809,9 +851,17 @@ int runtime_memory_is_mapped(uintptr_t address, uint64_t size) {
     return result;
 }
 void runtime_memory_report(void) {
+    /* Initialize before taking the table lock, matching allocation paths. */
+    const uint64_t direct_limit=POOL_SIZE, flexible_limit=FLEXIBLE_SIZE;
+    read_lock();
     printf("Runtime: direct memory allocations=%zu, maps=%zu, live=%" PRIu64 ", budget=%" PRIu64 "\n",
-           allocations, maps, live_bytes, POOL_SIZE);
+           allocations, maps, live_bytes, direct_limit);
     printf("Runtime: flexible maps=%zu, in use=%" PRIu64 ", protects=%zu, queries=%zu, regions=%zu\n",
            flexible_maps, flexible_bytes, protects, queries, vma_count);
+    printf("Runtime: memory peaks: direct=%" PRIu64 "/%" PRIu64 ", flexible=%" PRIu64
+           "/%" PRIu64 "; direct range/table refusals=%zu, flexible budget refusals=%zu\n",
+           peak_direct_bytes,direct_limit,peak_flexible_bytes,flexible_limit,
+           direct_allocation_failures,flexible_budget_failures);
+    read_unlock();
 }
 

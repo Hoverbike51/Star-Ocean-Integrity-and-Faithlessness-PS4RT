@@ -1,18 +1,25 @@
 # Star Ocean 5 In-game Menu Guide
 
-**Windows 10/11 x64 · Experimental version 0.4.0**
+**Windows 10/11 x64 · source version 1.0.0**
 
-The in-game Cockpit changes supported runtime settings while Star Ocean 5 is running.
-It is separate from the game's original PS4 menus. This guide follows the five English
-tabs in the supplied screenshots; selected values are examples, not recommended defaults.
+[README](../README.md) · [Launcher guide](LAUNCHER_GUIDE.md) · [Changelog](../CHANGELOG.md)
 
-[Project README](../README.md) · [Launcher guide](LAUNCHER_GUIDE.md) · [Changelog](../CHANGELOG.md)
+The custom Cockpit menu changes supported runtime options without opening the game's
+original settings menus. Screenshots show examples; selected values are not defaults.
 
 ## Contents
 
 - [Open, navigate and close](#open-navigate-and-close)
 - [Display](#display)
 - [Image](#image)
+- [Upscaling](#upscaling)
+- [The presets](#the-presets)
+- [Anisotropic filtering](#anisotropic-filtering)
+- [Sharpening](#sharpening)
+- [Cheats](#cheats)
+- [Tweaks](#tweaks)
+- [Camera fixes](#camera-fixes)
+- [HUD adjustment](#hud-adjustment)
 - [Smoothness](#smoothness)
 - [Controller](#controller)
 - [Performance](#performance)
@@ -37,7 +44,7 @@ does not mean it has changed the current game session.
 
 ## Display
 
-![Display tab with mode, aspect ratio, output size and proportions preview](images/readme/custom_menu/1_ingame_custom_display.png)
+![Display](images/readme/custom_menu/1_ingame_custom_display.png)
 
 **Display mode** selects Windowed, Borderless or Fullscreen. **Aspect ratio** filters the
 available output sizes, and **Output resolution** selects a verified size for the current
@@ -53,16 +60,16 @@ manual mouse resizing remains possible. Exclusive fullscreen requires a verified
 
 | Choice | Result |
 | --- | --- |
-| Original | Preserve the 16:9 image and use bars when proportions differ. |
+| Original | Preserve the `16:9` image and use bars when proportions differ. |
 | Stretch to window | Fill the window, stretching the complete presentation, including the HUD. |
 
-The preview illustrates fitting; it does not prove a new internal render size. A 21:9 or
-32:9 output is not a native ultrawide camera/HUD patch. Output dimensions describe the final
+The preview illustrates fitting; it does not prove a new internal render size. A `21:9` or
+`32:9` output is not a native ultrawide camera/HUD patch. Output dimensions describe the final
 presentation. Internal input dimensions are shown separately in Image.
 
 ## Image
 
-![Image tab with the reconstruction provider, preset, actual/requested input, filtering and sharpening](images/readme/custom_menu/2_ingame_custom_image.png)
+![Image](images/readme/custom_menu/2_ingame_custom_image.png)
 
 ### Upscaling
 
@@ -76,7 +83,7 @@ confirmation, followed by a new game launch. This cannot bypass missing hardware
 or force FSR 4. If reconstruction fails validation, the runtime restores a safe path and
 records the reason. Always check the actual active-provider readout after a fallback.
 
-### Quality presets
+### The presets
 
 A preset requests the scene input size supplied to reconstruction. It does not select a
 bundle of texture, shadow, geometry and lighting quality settings.
@@ -103,8 +110,6 @@ the output width and height. Smaller outputs can require a different input choic
 Select a preset, then close the menu to attempt application. No game restart is intended for
 an accepted live preset change. The menu explains the selected preset and shows per-axis
 input scale and total input pixel percentage; that percentage is not a predicted FPS gain.
-
-### Experimental presets
 
 **Variable scene resolution is experimental and can be refused in real gameplay.** A choice
 being visible does not mean every game pass supports it. Native (100%), Quality, Balanced
@@ -144,9 +149,56 @@ The **Sharpening** slider adjusts edge contrast from 0% to 100%; zero disables s
 It changes live. It cannot recover all detail missing from a low-resolution texture or
 replace a 4K UI texture pack. The screenshot's 80% is an example, not a required setting.
 
+## Cheats
+
+![Cheats](images/readme/custom_menu/3_ingame_cheats.png)
+
+Enable access in the launcher's Cheats tab first. Codes require the matching title,
+APP_VER and original executable bytes; all start off. Infinite HP and MP are independent.
+Progression/currency codes trigger at the event in their description. Movement speed has
+x1 (off), x1.5 and x2 positions. Disable one-hit kills for scripted story battles, which
+can otherwise be blocked. Previously gained values remain after disabling a code.
+External cheat-profile imports and the unsafe mass-inventory hook are not available.
+
+## Tweaks
+
+![Tweaks](images/readme/custom_menu/4_ingame_custom_tweaks.png)
+
+**Change leader (Let Me Lead! Fidel!)** enables exploration cycling with O/P or D-pad
+left/right when the current party/game state permits it. Native transition guards reduce
+repeated entrance triggering.
+
+### Camera fixes
+
+Use **Tweaks > Camera fixes > Camera follow** to choose how the camera follows the
+character's position:
+
+| Mode | Behaviour |
+| --- | --- |
+| Original | Restores the game's original positional follow setting. |
+| Light damping | Adds a gentler positional response than Original, with less immediate following. |
+| Damped follow | Uses stronger positional damping to soften abrupt follow movements further. |
+
+The selected mode applies during play when the prepared executable passes the patch's
+compatibility checks. If those checks fail, the control is disabled. You can also select
+the startup mode in the launcher's **Tweaks** tab. The setting is saved on normal close;
+choose **Original** to restore the original follow response.
+
+These modes adjust the native positional follow filter. They preserve manual camera
+rotation, field of view and the game's collision handling. They do not provide a free
+camera, lock camera height or fully remove vertical movement over uneven terrain. Comfort
+remains subjective; compare the modes on the same route and choose the most comfortable.
+
+### HUD adjustment
+
+**HUD layout** selects compatible JSON presets from the local library, including `16:9`,
+`21:9` and `32:9` layouts. The original HUD is retained without an active custom preset.
+Layouts change mapped placement/visibility rather than replacing textures. Source JSON
+files remain intact. Some groups, including subtitles, still have incomplete support.
+
 ## Smoothness
 
-![Smoothness tab showing VSync, frame cap and asynchronous shaders](images/readme/custom_menu/3_ingame_custom_smoothness.png)
+![Smoothness](images/readme/custom_menu/5_ingame_custom_smoothness.png)
 
 | Control | Effect and tradeoff |
 | --- | --- |
@@ -161,20 +213,16 @@ remove CPU-side waits or guarantee 60 FPS when another part of the runtime is li
 
 ## Controller
 
-![Controller tab with the vibration-strength slider](images/readme/custom_menu/4_ingame_custom_controller.png)
+![Controller](images/readme/custom_menu/6_ingame_custom_controller.png)
 
-**Vibration strength** scales the game's standard two-motor rumble from 0% to 100%.
-100% preserves the requested strength; zero suppresses subsequent vibration commands.
-The setting is live, but it does not generate a test pulse or make the game request rumble
-where no vibration event exists. Device/driver/connection support is still required.
-
-This is standard controller vibration, not DualSense adaptive-trigger or audio-haptics support.
-Use the launcher's **Controls** tab to choose keyboard mode or edit keyboard bindings; this
-in-game tab does not contain a full controller/keyboard mapping editor.
+Adjust the exposed controller options, including vibration and stick behaviour. DS4,
+DualSense and Xbox-style pads use SDL's standardized mapping. Connect/disconnect/reconnect
+is supported during a session. Keyboard/mouse remapping and layout profiles are configured
+in the launcher for the next launch. Avoid duplicate external remapping devices.
 
 ## Performance
 
-![Performance tab with metrics, overlay layout, scale and background opacity](images/readme/custom_menu/5_ingame_custom_perf.png)
+![Performance](images/readme/custom_menu/7_ingame_custom_perf.png)
 
 Enable **Show in game** to display the overlay. The individual controls remain selected but
 are disabled while the master switch is off, as illustrated in the screenshot.
@@ -185,10 +233,12 @@ are disabled while the master switch is off, as illustrated in the screenshot.
 | Frame time | Time per presented frame; 60 FPS corresponds to about 16.7 ms. |
 | Active upscaler | The provider actually in use, useful after a fallback. |
 | GPU name and load | Selected graphics adapter and the available utilization reading. |
-| CPU usage | A utilization summary; a low aggregate percentage does not rule out a busy thread or synchronization bottleneck. |
+| CPU usage | Selected CORE Processor utilization summary; a low aggregate percentage does not rule out a busy thread or synchronization bottleneck. |
 | System memory | Runtime memory usage and system-memory capacity readouts. |
 | Video memory | Available GPU-memory usage/budget readouts. |
 | Application version | The Windows build version. |
+
+You can also show/hide GPU/CPU Brand name and model
 
 Choose one of four corners with **Position**, a single line or one item per line with
 **Layout**, text size from 50% to 300%, and background opacity from 0% to 100%.
@@ -209,6 +259,11 @@ by the launcher's [capture tools](LAUNCHER_GUIDE.md#logs-and-diagnostics).
 | VSync, frame-rate cap and asynchronous shader setting | Live runtime controls. |
 | Vibration strength and performance-overlay controls | Live. |
 | GPU, target monitor, keyboard bindings and the menu's interface language | Configure in the launcher; start a new game session. |
+
+Display, accepted image presets, sharpening, overlay and supported Tweaks can change during
+play. Device selection, launcher language and startup input mappings need a new game
+session. Anisotropic filtering explicitly requires restart. A saved request is not proof
+that an incompatible mode was accepted: check the actual readout and diagnostic.
 
 After a normal game exit, the launcher imports the runtime settings it tracks, including
 anisotropy, so the next launch does not overwrite the menu's saved selection with a stale value.

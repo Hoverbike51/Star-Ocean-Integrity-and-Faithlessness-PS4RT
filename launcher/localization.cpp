@@ -7,6 +7,13 @@ struct CockpitTranslation { const wchar_t* text[12]; };
 const CockpitTranslation kCockpit[] = {
 #include "localization_cockpit.inc"
 #include "localization_live.inc"
+#include "localization_hud.inc"
+#include "localization_041.inc"
+#include "localization_cheats.inc"
+#include "localization_camera.inc"
+#include "localization_leader.inc"
+#include "localization_tweaks.inc"
+#include "localization_performance.inc"
 };
 #undef M
 struct Translation {

@@ -391,6 +391,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .dref_broadcast = RenderOptions::Current().dref,
         .preserve_wqm_helpers = Ps4RtGpuWorkarounds::Current().preserve_wqm_helpers,
         .fixed_grass_view_lighting = Ps4RtGpuWorkarounds::Current().fixed_grass_view_lighting,
+        .fp_legacy = Ps4RtGpuWorkarounds::Current().fp_legacy,
     };
 
     auto [cache_result, cache] = instance.GetDevice().createPipelineCacheUnique({});

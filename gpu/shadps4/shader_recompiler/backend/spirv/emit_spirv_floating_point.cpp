@@ -39,8 +39,30 @@ Id EmitFPFma64(EmitContext& ctx, IR::Inst* inst, Id a, Id b, Id c) {
     return Decorate(ctx, inst, ctx.OpFma(ctx.F64[1], a, b, c));
 }
 
+// ps4rt: PS4RT_FP_LEGACY bit 4. GCN graphics shaders run with IEEE mode off and DX10_CLAMP on:
+// min/max return the non-NaN operand and clamps flush NaN to the low bound, which games rely on
+// to stop a NaN (max(x, 0), saturate). OpFMin/OpFMax/OpFClamp leave a NaN result undefined;
+// OpNMin/OpNMax define it as GCN does (upstream shadPS4 uses them for saturate and min3/max3).
+namespace {
+bool NanMinMax(const EmitContext& ctx) {
+    return ctx.profile.fp_legacy & FpLegacyNanMinMax;
+}
+Id Min32(EmitContext& ctx, Id a, Id b) {
+    return NanMinMax(ctx) ? ctx.OpNMin(ctx.F32[1], a, b) : ctx.OpFMin(ctx.F32[1], a, b);
+}
+Id Max32(EmitContext& ctx, Id a, Id b) {
+    return NanMinMax(ctx) ? ctx.OpNMax(ctx.F32[1], a, b) : ctx.OpFMax(ctx.F32[1], a, b);
+}
+Id Clamp32(EmitContext& ctx, Id value, Id min_value, Id max_value) {
+    if (NanMinMax(ctx)) {
+        return ctx.OpNMin(ctx.F32[1], ctx.OpNMax(ctx.F32[1], value, min_value), max_value);
+    }
+    return ctx.OpFClamp(ctx.F32[1], value, min_value, max_value);
+}
+} // namespace
+
 Id EmitFPMax32(EmitContext& ctx, Id a, Id b) {
-    return ctx.OpFMax(ctx.F32[1], a, b);
+    return Max32(ctx, a, b);
 }
 
 Id EmitFPMax64(EmitContext& ctx, Id a, Id b) {
@@ -48,7 +70,7 @@ Id EmitFPMax64(EmitContext& ctx, Id a, Id b) {
 }
 
 Id EmitFPMin32(EmitContext& ctx, Id a, Id b) {
-    return ctx.OpFMin(ctx.F32[1], a, b);
+    return Min32(ctx, a, b);
 }
 
 Id EmitFPMin64(EmitContext& ctx, Id a, Id b) {
@@ -56,22 +78,32 @@ Id EmitFPMin64(EmitContext& ctx, Id a, Id b) {
 }
 
 Id EmitFPMinTri32(EmitContext& ctx, Id a, Id b, Id c) {
-    if (ctx.profile.supports_trinary_minmax) {
+    if (ctx.profile.supports_trinary_minmax && !NanMinMax(ctx)) {
         return ctx.OpFMin3AMD(ctx.F32[1], a, b, c);
     }
-    return ctx.OpFMin(ctx.F32[1], a, ctx.OpFMin(ctx.F32[1], b, c));
+    return Min32(ctx, a, Min32(ctx, b, c));
 }
 
 Id EmitFPMaxTri32(EmitContext& ctx, Id a, Id b, Id c) {
-    if (ctx.profile.supports_trinary_minmax) {
+    if (ctx.profile.supports_trinary_minmax && !NanMinMax(ctx)) {
         return ctx.OpFMax3AMD(ctx.F32[1], a, b, c);
     }
-    return ctx.OpFMax(ctx.F32[1], a, ctx.OpFMax(ctx.F32[1], b, c));
+    return Max32(ctx, a, Max32(ctx, b, c));
 }
 
 Id EmitFPMedTri32(EmitContext& ctx, Id a, Id b, Id c) {
-    if (ctx.profile.supports_trinary_minmax) {
+    if (ctx.profile.supports_trinary_minmax && !NanMinMax(ctx)) {
         return ctx.OpFMid3AMD(ctx.F32[1], a, b, c);
+    }
+    if (NanMinMax(ctx)) {
+        // As upstream shadPS4: with a NaN operand, GCN's med3 is the min of the others.
+        const Id is_nan{ctx.OpLogicalOr(
+            ctx.U1[1], ctx.OpLogicalOr(ctx.U1[1], ctx.OpIsNan(ctx.U1[1], a), ctx.OpIsNan(ctx.U1[1], b)),
+            ctx.OpIsNan(ctx.U1[1], c))};
+        const Id mmx{ctx.OpFMin(ctx.F32[1], ctx.OpFMax(ctx.F32[1], a, b), c)};
+        const Id med3{ctx.OpFMax(ctx.F32[1], ctx.OpFMin(ctx.F32[1], a, b), mmx)};
+        const Id min3{ctx.OpNMin(ctx.F32[1], a, ctx.OpNMin(ctx.F32[1], b, c))};
+        return ctx.OpSelect(ctx.F32[1], is_nan, min3, med3);
     }
     const Id mmx{ctx.OpFMin(ctx.F32[1], ctx.OpFMax(ctx.F32[1], a, b), c)};
     return ctx.OpFMax(ctx.F32[1], ctx.OpFMin(ctx.F32[1], a, b), mmx);
@@ -148,7 +180,7 @@ Id EmitFPSqrt(EmitContext& ctx, Id value) {
 Id EmitFPSaturate32(EmitContext& ctx, Id value) {
     const Id zero{ctx.ConstF32(f32{0.0})};
     const Id one{ctx.ConstF32(f32{1.0})};
-    return ctx.OpFClamp(ctx.F32[1], value, zero, one);
+    return Clamp32(ctx, value, zero, one);
 }
 
 Id EmitFPSaturate64(EmitContext& ctx, Id value) {
@@ -158,7 +190,7 @@ Id EmitFPSaturate64(EmitContext& ctx, Id value) {
 }
 
 Id EmitFPClamp32(EmitContext& ctx, Id value, Id min_value, Id max_value) {
-    return ctx.OpFClamp(ctx.F32[1], value, min_value, max_value);
+    return Clamp32(ctx, value, min_value, max_value);
 }
 
 Id EmitFPClamp64(EmitContext& ctx, Id value, Id min_value, Id max_value) {

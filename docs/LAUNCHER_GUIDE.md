@@ -1,24 +1,25 @@
 # Star Ocean 5 Launcher Guide
 
-**Windows 10/11 x64 · Experimental version 0.4.0**
+**Windows 10/11 x64 · source version 1.0.0**
 
-The Cockpit launcher selects and prepares your PS4 game, manages local settings and saves,
-and starts the Windows runtime. This guide follows the English interface shown in the
-screenshots. The paths, connected devices and selected values in those screenshots are
-examples from a test installation, not defaults for your computer.
+The Cockpit launcher prepares your own PS4 game files, manages settings and starts the
+Windows runtime. Screenshot paths and values are examples, not installation defaults.
+Building sources and publishing a tested release are separate steps.
 
-[Project README](../README.md) · [In-game menu guide](IN_GAME_MENU_GUIDE.md) · [Changelog](../CHANGELOG.md)
+[README](../README.md) · [In-game menu](IN_GAME_MENU_GUIDE.md) · [Changelog](../CHANGELOG.md)
 
 ## Contents
 
 - [First launch](#first-launch)
 - [Home](#home)
 - [Game](#game)
+- [Cheats](#cheats)
+- [Tweaks](#tweaks)
 - [Video](#video)
 - [Controls](#controls)
 - [Advanced](#advanced)
 - [Logs and diagnostics](#logs-and-diagnostics)
-- [Troubleshooting](#troubleshooting)
+- [Known issues and troubleshooting](#known-issues-and-troubleshooting)
 
 ## First launch
 
@@ -36,23 +37,16 @@ and firmware are not included.
 
 ## Home
 
-![Home tab with the game logo, Play button and status dock](images/readme/launcher/1_Cockpit_launcher_home.png)
+![Home](images/readme/launcher/1_Cockpit_launcher_home.png)
 
-Home is the default tab. Its **Play** button starts the selected game once the required
-checks and preparation have succeeded. When setup is incomplete, follow the button's
-prompt and the status message instead of expecting the game to start immediately.
-
-The bottom dock summarizes the game state, display settings, selected reconstruction
-provider, backup setting and system checks. **Game ready** confirms preparation and
-identity checks; it is not a guarantee that every scene or setting has been validated.
-
-Drag the clear strip at the top of the launcher to move it. The upper-right buttons
-minimize or close it; closing asks for confirmation. The launcher minimizes when the
-game starts. Return to it from the Windows taskbar to inspect diagnostics.
+The main page presents the game logo, **Play** and a bottom status dock. Select and prepare
+a valid game before playing. The dock summarizes the current configuration; it does not
+guarantee compatibility or a particular frame rate. The launcher minimizes when starting
+the game. Use its caption buttons to minimize or close; closing asks for confirmation.
 
 ## Game
 
-![Game tab showing the game folder, save location, detected information and latest save](images/readme/launcher/2_Cockpit_launcher_game.png)
+![Game](images/readme/launcher/2_Cockpit_launcher_game.png)
 
 ### Select an extracted folder
 
@@ -132,13 +126,43 @@ to load that slot in the game. Returning to **Game** refreshes the metadata.
 independent of the launcher language. **Create desktop shortcut** creates a shortcut with
 the game icon and a launch argument; keep the installed player folder in place afterward.
 
+## Cheats
+
+![Cheats](images/readme/launcher/3_Cockpit_launcher_cheats.png)
+
+The native catalogue is checked against Title ID, APP_VER and original executable bytes.
+Enable access here, then apply individual codes in the in-game Cheats tab. All begin off.
+There are eight native codes: infinite HP, infinite MP, fast level-up, maximum stats,
+maximum money, maximum SP, one-hit kills and movement speed.
+
+Movement speed has three positions: `x1` (off), `x1.5` and `x2`. Money/SP/stat codes take effect
+at the event named in their description. Disabling a code does not remove values already
+obtained. One-hit kills can block scripted battles; disable it for story battles.
+External cheat-profile import and the unsafe mass-inventory code are no longer offered.
+
+## Tweaks
+
+![Tweaks](images/readme/launcher/4_Cockpit_launcher_tweaks.png)
+
+Optional native adjustments are grouped here:
+
+- **Change leader (Let Me Lead! Fidel!):** allows exploration leader cycling with O/P or
+  D-pad left/right when supported by the current party/game state. Transition guards limit
+  repeated entrance triggers. It is separate from the game's combat character switching.
+- **Camera fixes:** choose the original or available damped follow behaviour. These modes
+  reduce abrupt following; they are not a free camera or a configurable FOV.
+- **HUD adjustment:** choose a compatible JSON layout or return to the original HUD.
+  **Open HUD presets folder** provides access to the preset library. Source JSON files
+  are preserved. The original layout remains active when no custom layout is selected.
+
 ## Video
 
-![Video tab with GPU, monitor, display and rendering controls](images/readme/launcher/3_Cockpit_launcher_video.png)
+![Video](images/readme/launcher/5_Cockpit_launcher_video.png)
 
-Choose the **Graphics card** first, then the **Target monitor**. Automatic GPU selection is
-available. Use the monitor selector when more than one display is connected; if a remembered
-monitor disappears, the launcher falls back to an available display.
+Choose the GPU and target monitor before starting a game. Output sizes/aspect filters are
+restricted to the selected display's supported catalogue/modes. Fullscreen requires a
+verified display mode; Borderless retains the desktop mode. A selected Windowed size sets
+the initial client dimensions, and manual mouse resizing remains possible.
 
 ### Display controls
 
@@ -146,48 +170,51 @@ monitor disappears, the launcher falls back to an available display.
 | --- | --- |
 | Display mode | Windowed, Borderless or Fullscreen presentation. |
 | Vertical synchronization | Requests synchronized presentation to reduce tearing. |
-| Frame-rate limit | Sets the presentation cap, normally 30 or 60 FPS in the launcher. A cap does not guarantee that frame rate. |
-| Aspect ratio | Filters output choices: All, 4:3, 16:9, 16:10, 21:9 or 32:9, when verified choices exist. |
+| Frame-rate limit | Sets the presentation cap, normally `30` or `60` FPS in the launcher. A cap does not guarantee that frame rate. |
+| Aspect ratio | Filters output choices: `All`, `4:3`, `16:9`, `16:10`, `21:9` or `32:9`, when verified choices exist. |
 | Output resolution | Selects the presentation dimensions from the project's supported catalog and the verified monitor modes. |
-| Image fitting | In Windowed mode, Original preserves proportions with bars; Stretch to window fills the window and can distort the scene and HUD. |
-
-Resolution choices are filtered against the selected display; an entry is not offered just
-because its size appears in a generic list. Exclusive fullscreen additionally uses a verified
-Windows/SDL display mode. Borderless retains the desktop display mode. The selected windowed
-resolution determines the initial client size; you can still resize the window with the mouse.
-
-**Aspect ratio is an output filter, not a native ultrawide rendering patch.** The scene and
-HUD retain their 16:9 composition. A wider output uses bars or the selected windowed stretching.
-Output resolution and internal rendering resolution are different settings.
+| Image fitting | In Windowed mode, Original preserves proportions with bars; Stretch to window fills the window and can distort the scene an
 
 ### Rendering controls
 
+Scene rendering supports native `21:9`/`32:9` widths. This does not automatically reposition
+every HUD element: use a compatible HUD layout. Prerendered video retains its original
+aspect ratio; game menus retain their centered composition. Image fitting controls final
+window presentation and stretching can distort the entire image.
+
+With reconstruction **Disabled**, manual internal scene sizes include `720p`, `1080p`, `1440p`
+and `2160p`, subject to runtime/device checks. With FSR/DLSS enabled, its presets own the
+input size. Output resolution, internal scene resolution and original UI texture quality
+are different things. A higher internal size does not replace source textures.
+
 | Control | What to expect |
 | --- | --- |
-| Upscaling | Disabled, FSR 3.1 or FSR 4 v07, according to the selected GPU and runtime checks. |
+| Upscaling | Disabled, `FSR 3.1` or `FSR 4 v07`, according to the selected GPU and runtime checks. |
 | Render resolution | A status/readout in the launcher. Experimental preset selection is in the in-game Image tab. |
-| Anisotropic filtering | Game setting, x2, x4, x8 or x16. Improves eligible textures viewed at an angle; requires a game restart. |
-| Asynchronous shaders | Reduces first-use compilation stalls, with a possible tradeoff of temporary visual omissions or flicker. |
+| Anisotropic filtering | Game setting, `x2`, `x4`, `x8` or `x16`. Improves eligible textures viewed at an angle; requires a game restart. |
+| Asynchronous shaders | Reduces first-use compilation stalls, with a possible tradeoff of temporary visual omissions or flicker. |d HUD. |
 
-FSR 4 here is the supplied v07 model path. Availability depends on the GPU features and
-model assets, not only the card's brand or marketing name. If it cannot run, the runtime
-uses an allowed fallback or disables reconstruction and reports the reason. FSR 3.1 can
-cost more than it saves on an older GPU. Disabled reconstruction is a valid choice.
-DLSS and XeSS are not selectable providers in this version.
+`FSR 3.1`, `FSR 4 v07` and optional `DLSS` availability depends on GPU features/assets and runtime
+validation. Unsupported choices are disabled. `DLSS` additionally requires the separate
+bridge and `NVIDIA` runtime; `XeSS` and frame generation are not implemented. `FSR` can cost
+more than it saves on older hardware. The explicit lower-tier `FSR 3.1` override is under
+Advanced and cannot bypass missing hardware capabilities.
 
-For live changes and the difference between requested and actual render resolution, see the
-[in-game Image tab](IN_GAME_MENU_GUIDE.md#image).
+Anisotropic filtering affects eligible textures viewed at an angle and requires restart.
+Asynchronous shaders reduce compilation stalls but can briefly omit/flicker some rendering.
+VSync and frame caps control presentation; they do not guarantee a sustained frame rate.
+See [Image](IN_GAME_MENU_GUIDE.md#image) for live presets and sharpening.
 
 ## Controls
 
-![Controls tab showing detected devices and editable keyboard bindings](images/readme/launcher/4_Cockpit_launcher_control.png)
+![Controls](images/readme/launcher/6_Cockpit_launcher_control.png)
 
 **Active device** lists SDL-detected controllers and **Keyboard**. DS4, DualSense and
 Xbox-style devices use SDL's standardized controls. The runtime automatically handles
 controller activity; the displayed name is not an exclusive lock to a particular hardware
 ID when several controllers are connected. Choosing Keyboard prevents gamepad input.
 
-**Keyboard profile** provides AZERTY and QWERTY defaults. To customize a binding:
+**Keyboard profile** provides `AZERTY` and `QWERTY` defaults. To customize a binding:
 
 1. Click its current key button.
 2. Press the replacement key, or press **Escape** to cancel capture.
@@ -196,24 +223,18 @@ ID when several controllers are connected. Choosing Keyboard prevents gamepad in
 Changes are saved immediately, switch the profile to **Custom**, and are passed to the
 runtime on the next launch. Bindings cover the face buttons, shoulders/triggers, stick
 clicks, Options, both touchpad-click sources, D-pad and both stick directions. **Reset**
-restores the selected default layout; selecting AZERTY or QWERTY also replaces the custom set.
+restores the selected default layout; selecting `AZERTY` or `QWERTY` also replaces the custom set.
 
-The screenshot shows an AZERTY example. Read the displayed bindings for your chosen profile
-instead of assuming those letters are the QWERTY defaults. This page provides keyboard
+The screenshot shows an ``AZERTY`` example. Read the displayed bindings for your chosen profile
+instead of assuming those letters are the ``QWERTY`` defaults. This page provides keyboard
 remapping; it does not expose a custom gaming-mouse button mapper or arbitrary gamepad
 rebinding editor. Controller vibration is adjusted in the [in-game Controller tab](IN_GAME_MENU_GUIDE.md#controller).
 
 ## Advanced
 
-![Advanced tab showing language, updates, cache, compatibility and performance options](images/readme/launcher/5_Cockpit_launcher_advanced.png)
+![Advanced](images/readme/launcher/7_Cockpit_launcher_advanced.png)
 
-### Interface language
 
-The first launch uses a supported Windows language, with a fallback when necessary. Available
-interface languages are English, French, Spanish, Portuguese, Brazilian Portuguese, Italian,
-German, Russian, Simplified Chinese, Traditional Chinese, Korean and Japanese.
-The in-game Cockpit receives this language on the next game launch. Game language is separate.
-**Open application folder** opens the installed player root.
 
 ### Updates
 
@@ -250,14 +271,18 @@ runtime. These checks cannot certify a complete playthrough or every graphics op
 ### Force FSR 3.1 availability
 
 The project uses a conservative default policy based on recognized desktop GPU classes,
-with GTX 1080, RX 5700 and Arc A750 among its reference points. It is not a universal
+with `GTX 1080`, `RX 5700` and `Arc A750` among its reference points. It is not a universal
 performance ranking for all newer, mobile or unidentified cards.
 
 If a technically capable GPU is outside that default policy, **Force FSR 3.1 availability**
 can expose it after a confirmation about possible performance loss or instability. The
 choice is off by default and tied to that GPU. It is unavailable when FSR 3.1 is already
-admitted normally, or when required Vulkan features are absent. It cannot force FSR 4 or
+admitted normally, or when required Vulkan features are absent. It cannot force `FSR 4` or
 bypass hardware feature checks. Launch the game again after changing it.
+
+
+![Advanced continued](images/readme/launcher/7_Cockpit_launcher_advanced_2.png)
+
 
 ### Overlay and capture tools
 
@@ -268,11 +293,15 @@ also exposes these options. The overlay does not record a performance report.
 
 **Performance capture tools** is off by default. Enabling it only reveals **Capture next
 session** and **Open captures** in Logs and diagnostics; it does not start a recording.
-Scroll the Advanced page if the lower controls are outside the window.
+Scroll the Advanced page if the lower controls are outside the window. 
+
+**Acceleration** is off by default. Uses F2 or R2+L2, for fast forwad unskippable cutscene. Any sound will 
+be muted durring this process. (Was mainly used to test the game after a cutscene that couldn't be skipped)
+
 
 ## Logs and diagnostics
 
-![Logs and diagnostics with environment badges and the English console](images/readme/launcher/6_Cockpit_launcher_logs.png)
+![Logs and diagnostics](images/readme/launcher/8_Cockpit_launcher_logs.png)
 
 The badges summarize preparation, Vulkan and the validated game ID. Console messages remain
 **English**, regardless of the interface language, so reports can be compared consistently.
@@ -295,18 +324,21 @@ The two capture buttons are intentionally absent in the screenshot because the t
 switched off. Reports remain local; nothing is uploaded automatically. A normal menu exit
 allows the runtime to finalize its report; an external forced termination can leave partial data.
 
-## Troubleshooting
+
+## Known issues and troubleshooting
 
 | Symptom | First action |
 | --- | --- |
 | Missing DLL or executable | Extract the complete player folder again; keep the real applications and DLLs in `bin`. |
 | Wrong or empty game information | Select the extracted game directory itself and wait for validation. |
-| A rendering preset is refused | Return to Original 1080p; see the [experimental preset limits](IN_GAME_MENU_GUIDE.md#experimental-presets). Export diagnostics after the refusal. |
-| Black scene or missing effects with async enabled | Test the same route with Asynchronous shaders disabled. This can increase compilation pauses. |
+| A rendering preset is refused | Return to previous working preset; see the [experimental preset limits](IN_GAME_MENU_GUIDE.md#experimental-presets). Export diagnostics after the refusal. |
+| `FSR 4 v07` can show an outdoor/zone-transition bottom-edge line | No fix currently. Turn it off avoids that reported line but loses temporal smoothing. |
+| Title screen globe 3D scene | Tied `16:9` aspect ratio to prevent the introductory video from being stretched. |
+| Transition zone (`21:9` - `32:9`) | Still revert to the `16:9` aspect ratio as soon as an end-of-zone border indicator is reached and then restore it. |
 | FSR is slower on older hardware | Compare with Upscaling disabled, keeping the same scene and output resolution. |
 | Saves are not found | Check the displayed save path, Title ID and save-slot folder structure. |
 | Backups cannot be replaced | Close the launcher before replacing completed backup snapshots. |
 | No downloadable update | A tag is insufficient; a newer compatible Windows player Release asset and its digest are required. |
 
-Save progress in the game's own save system before using **Exit game**. Closing the custom
+- Save progress in the game's own save system before using **Exit game**. Closing the custom
 settings menu or the launcher is not a command to save game progress.

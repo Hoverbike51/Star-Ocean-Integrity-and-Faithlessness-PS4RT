@@ -6,6 +6,9 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <cmath>
+#include <cstring>
+#include <cpuid.h>
 #include "video_core/renderer_vulkan/vk_instance.h"
 
 #include <windows.h>
@@ -41,11 +44,18 @@ std::string ThreadName(HANDLE thread) {
     return result;
 }
 
-// This process's use of the GPU's 3D engines, as Task Manager shows it ("GPU Engine" counters,
-// any vendor). Negative until the second sample or without the counters.
+// This process's 3D-engine utilization from Windows GPU Engine counters. Restrict the
+// measurement to the selected Vulkan adapter's LUID. Unavailable/invalid data stays negative.
 class GpuUsage {
 public:
-    GpuUsage() {
+    explicit GpuUsage(const Vulkan::Instance& instance) {
+        const auto properties = instance.GetPhysicalDevice().getProperties2<
+            vk::PhysicalDeviceProperties2, vk::PhysicalDeviceIDProperties>();
+        const auto& identity = properties.get<vk::PhysicalDeviceIDProperties>();
+        if (!identity.deviceLUIDValid) return;
+        static_assert(sizeof(identity.deviceLUID) == 8);
+        std::memcpy(&luid_low, identity.deviceLUID.data(), 4);
+        std::memcpy(&luid_high, identity.deviceLUID.data() + 4, 4);
         if (PdhOpenQueryW(nullptr, 0, &query) != ERROR_SUCCESS) {
             query = nullptr;
             return;
@@ -57,8 +67,9 @@ public:
             return;
         }
         PdhCollectQueryData(query);
-        pid = L"pid_" + std::to_wstring(GetCurrentProcessId()) + L"_";
     }
+
+    ~GpuUsage() { if (query) PdhCloseQuery(query); }
 
     float Percent() {
         if (!query || PdhCollectQueryData(query) != ERROR_SUCCESS) {
@@ -76,25 +87,46 @@ public:
             return -1.0f;
         }
         double total = 0.0;
+        bool matched = false;
         for (DWORD i = 0; i < count; ++i) {
             const wchar_t* name = items[i].szName;
-            if (items[i].FmtValue.CStatus == PDH_CSTATUS_VALID_DATA && wcsstr(name, pid.c_str()) &&
-                wcsstr(name, L"engtype_3D")) {
-                total += items[i].FmtValue.doubleValue;
+            const auto status = items[i].FmtValue.CStatus;
+            const double value = items[i].FmtValue.doubleValue;
+            if (name && (status == PDH_CSTATUS_VALID_DATA || status == PDH_CSTATUS_NEW_DATA) &&
+                std::isfinite(value) && value >= 0.0 &&
+                MatchesGpuEngine(name, GetCurrentProcessId(), luid_high, luid_low)) {
+                total += value;
+                matched = true;
             }
         }
-        return std::clamp(float(total), 0.0f, 100.0f);
+        return matched ? std::clamp(float(total), 0.0f, 100.0f) : -1.0f;
     }
 
 private:
     PDH_HQUERY query = nullptr;
     PDH_HCOUNTER counter = nullptr;
-    std::wstring pid;
+    uint32_t luid_low = 0, luid_high = 0;
     std::vector<unsigned char> buffer;
 };
 
+std::string CpuModel() {
+    if (__get_cpuid_max(0x80000000, nullptr) < 0x80000004) return {};
+    char brand[49]{};
+    for (unsigned i = 0; i < 3; ++i) {
+        unsigned registers[4]{};
+        if (!__get_cpuid(0x80000002 + i, &registers[0], &registers[1],
+                         &registers[2], &registers[3])) return {};
+        std::memcpy(brand + i * 16, registers, 16);
+    }
+    std::string result{brand};
+    const auto first = result.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return {};
+    return result.substr(first, result.find_last_not_of(" \t\r\n") - first + 1);
+}
+
 void Run(const Vulkan::Instance* instance) {
-    GpuUsage gpu;
+    GpuUsage gpu{*instance};
+    const std::string gpu_model{instance->GetModelName()}, cpu_model = CpuModel();
     FILETIME created, ended, kernel, user, now;
     uint64_t last_process = 0, last_wall = 0;
     std::unordered_map<DWORD, uint64_t> last_thread_ticks;
@@ -102,7 +134,8 @@ void Run(const Vulkan::Instance* instance) {
     constexpr double GiB = 1024.0 * 1024.0 * 1024.0;
     while (true) {
         Sample s;
-        s.gpu_name = std::string(instance->GetModelName());
+        s.gpu_name = gpu_model;
+        s.cpu_name = cpu_model;
         GetSystemTimeAsFileTime(&now);
         uint64_t wall_delta = 0;
         if (GetProcessTimes(GetCurrentProcess(), &created, &ended, &kernel, &user)) {

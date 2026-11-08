@@ -5,11 +5,52 @@ Version numbers refer to this Windows project, not to the PS4 game version or th
 upstream release tags. The runtime remains experimental and is not a reconstruction of
 the original game's complete source code.
 
-The current source version is **0.4.0**. Its publication date is intentionally not assigned
+The current source version is **1.0.0**. Its publication date is intentionally not assigned
 here: preparing sources and a player folder is different from publishing a tested release.
 Earlier private development iterations are summarized where no separate release tag exists.
 
 [README](README.md) · [Launcher guide](docs/LAUNCHER_GUIDE.md) · [In-game menu guide](docs/IN_GAME_MENU_GUIDE.md)
+
+## 1.0.0 — Windows source update
+
+### Rendering and compatibility
+
+- Add native ultrawide scene rendering for `21:9` and `32:9`. Keep prerendered video at
+  its original aspect ratio and retain centered game menus without stretching their artwork.
+- Extend loading/menu backdrops while preserving foreground text and UI proportions.
+- Support validated HUD JSON layouts through the launcher and the in-game menu, including
+  `16:9`. Retain the original HUD when no custom layout is active.
+- Add manual `720p`/`1080p`/`1440p`/`2160p` internal scene resolution with reconstruction off.
+  FSR/`DLSS` continue to own the render size through their presets. Source UI textures
+  and some guest post-processing stages retain their original resolution.
+- Integrate finite-range GCN color/half-float export corrections and harden Windows fibers.
+- Add optional `NVIDIA` `DLSS` Super Resolution through a separately built native bridge;
+  gate it on device/SDK availability. Keep unavailable reconstruction options visible
+  but disabled, retaining the explicit `FSR 3.1` override for lower-tier devices.
+- Preserve stable submission/cache defaults and report memory peaks/refusals. Memory
+  overrides are explicit; default allowances remain unchanged.
+- Acknowledge video-recording metadata requests so the runtime can continue after the
+  final movie. Optional trophy journaling remains a local, opt-in host feature.
+
+### Launcher, controls and in-game menu
+
+- Add matching `Cheats` and `Tweaks` tabs in the Cockpit launcher and in-game menu.
+- Include eight verified-version native cheats: independent infinite HP/MP, fast level-up,
+  maximum stats/money/SP, one-hit kills and movement speed. Remove imported profiles and
+  the unsafe mass-inventory code. Check title/version and original executable bytes.
+- Use a three-position movement control: off (`x1`), `x1.5` and `x2`. Keep the scripted-battle
+  warning for one-hit kills. Previously gained items/stats are not undone by disabling a code.
+- Add guarded exploration leader switching, `O`/`P` and `D-pad` cycling, camera-follow modes,
+  and access to the `HUD preset` folder under `Tweaks`. These options are optional.
+- Restore controller hot-plug/reconnection and custom keyboard/mouse bindings.
+- Use `F2` or `R2+L2` for hold-to-accelerate, with focus/menu safeguards.
+- Report the actual displayed-frame provider/preset, selected GPU and process CPU usage.
+  Add independent device-name visibility and top/bottom-center overlay positions.
+- Update all twelve UI languages, caption buttons and resize handling.
+- Retain the clean player-folder layout: root launcher bootstrap, application binaries
+  in bin, and a versioned dist folder produced by build-windows.cmd. Build outputs,
+  settings, saves and captures are excluded from the source repository.
+
 
 ## 0.4.0 — Experimental Windows update
 
@@ -89,10 +130,10 @@ Earlier private development iterations are summarized where no separate release 
 
 - Added graphics-adapter and target-monitor selectors, remembered display identity and an
   available-monitor fallback after disconnection.
-- Added output aspect filters for All, 4:3, 16:9, 16:10, 21:9 and 32:9 when verified choices exist.
+- Added output aspect filters for All, 4:3, `16:9`, 16:10, `21:9` and `32:9` when verified choices exist.
 - Filter output dimensions against the selected monitor and the supported resolution catalog;
   exclusive fullscreen also requires an exact verified Windows/SDL mode.
-- Include 480p, 720p, 1080p, 1440p and 2160p 16:9 choices when supported, plus verified
+- Include 480p, `720p`, `1080p`, `1440p` and `2160p` `16:9` choices when supported, plus verified
   catalog entries for the additional aspect families.
 - Apply selected windowed output dimensions to the initial client size while allowing
   ordinary mouse resizing.
@@ -100,19 +141,19 @@ Earlier private development iterations are summarized where no separate release 
   field of view or native HUD layout.
 - Kept VSync, presentation frame caps and asynchronous shader controls connected to the runtime.
 - Strengthened FSR 4 capability/asset checks and safe fallback reporting.
-- Added a conservative default availability policy for FSR 3.1, plus an off-by-default,
+- Added a conservative default availability policy for `FSR 3.1`, plus an off-by-default,
   confirmed force option for technically capable devices outside that policy. The override
   is bound to the selected GPU and cannot bypass missing Vulkan features.
 - Repaired low-output reconstruction selection so a supported provider is not disabled
-  merely because the output is below 1080p; scaled-input validation still applies.
-- Do not expose DLSS, XeSS or unsupported rendering features as functional UI choices.
+  merely because the output is below `1080p`; scaled-input validation still applies.
+- Do not expose `DLSS`, `XeSS` or unsupported rendering features as functional UI choices.
 
 ### In-game Cockpit
 
 - Replaced the old single-page settings layout with **Display, Image, Smoothness,
   Controller and Performance** tabs.
-- Added keyboard/mouse and controller navigation, including Q/E or L1/R1 tab changes.
-- Open with Insert or L2 + R3; use Resume to return or Exit game for a confirmation before shutdown.
+- Added keyboard/mouse and controller navigation, including `Q`/`E` or `L1/R1` tab changes.
+- Open with Insert or `L2 + R3`; use Resume to return or Exit game for a confirmation before shutdown.
 - Pass the launcher's selected language to the menu at game startup and support the required fonts.
 - Improved the exit-confirmation layout, wrapping and default cancel behavior.
 - Restore a usable pointer and release relative/grabbed mouse input while the menu is open,
@@ -124,7 +165,7 @@ Earlier private development iterations are summarized where no separate release 
 
 ### Experimental reconstruction presets
 
-- Added Original 1080p, Native (100%), Quality, Balanced, Performance and Ultra Performance
+- Added Original `1080`p, Native (100%), Quality, Balanced, Performance and Ultra Performance
   scene-input requests with per-preset explanations.
 - Renamed the former Native AA label to **Native (100%)** to distinguish native-resolution
   temporal anti-aliasing from a lower-resolution Quality reconstruction preset.
@@ -136,7 +177,7 @@ Earlier private development iterations are summarized where no separate release 
 - Added `Scene preset refused` and `Scene preset inputs` diagnostics for real-game refusals.
 - **Known limitation:** Native (100%), Quality, Balanced and Ultra Performance have been
   refused in tested scenes. Their presence in the list is not full gameplay validation.
-  Original 1080p remains the conservative baseline; at 4K, Performance requests the same input size.
+  Original `1080`p remains the conservative baseline; at 4K, Performance requests the same input size.
 
 ### Input and vibration
 
@@ -161,7 +202,7 @@ Earlier private development iterations are summarized where no separate release 
 - Kept capture independent of the on-screen overlay and supported report finalization during
   normal custom-menu shutdown. Forced termination can still leave a partial report.
 - Replaced the console display with a read-only native Rich Edit control supporting text
-  selection, Ctrl+A, Ctrl+C and independent horizontal/vertical scrolling.
+  selection, `Ctrl+A`, `Ctrl+C` and independent horizontal/vertical scrolling.
 - Preserve the reader's selection/scroll position while output arrives instead of forcing
   every reader back to the newest line.
 - Corrected premature console wrapping, duplicate presentation and badge/button layout.
@@ -212,11 +253,11 @@ Earlier private development iterations are summarized where no separate release 
 - The later cleanup received C/C++ syntax checks for 34 source files, plus targeted
   rechecks. These checks do not replace a complete rebuild, package smoke test or gameplay test.
 - Windows 10 Acer VX-15 testing with a GTX 1050 and seventh-generation Core i5 reported
-  roughly 50–60 FPS in tested 1080p scenes without reconstruction. FSR 3.1 reduced performance
+  roughly 50–60 FPS in tested `1080`p scenes without reconstruction. `FSR 3.1` reduced performance
   on that system. Delayed textures and a black-scene incident occurred with async enabled;
   their exact cause was not established by that report.
 - User tests on the higher-end AMD system do not establish full compatibility on every
-  NVIDIA, Intel, laptop, driver version, region or game update.
+  `NVIDIA`, Intel, laptop, driver version, region or game update.
 - A complete playthrough and final validation of the newly built distributable remain outstanding.
 - Native ultrawide camera/HUD changes, general texture/mesh mods, cheats, free camera,
   UI replacement, leader-switching mods and Android/iOS/macOS ports are not shipped features.

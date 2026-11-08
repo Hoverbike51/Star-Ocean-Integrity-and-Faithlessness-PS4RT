@@ -42,7 +42,8 @@ bool Visible();
 void ShowNotice(const std::string& text, int milliseconds = 3000);
 
 /// Present thread: draws into `view` (layout ColorAttachmentOptimal).
-void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent, bool title_screen = false);
+void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent,
+            bool title_screen = false, unsigned reconstruction_state = 0);
 
 /// The menu is open or a text entry is shown: the game's input is held neutral.
 bool CapturesInput();

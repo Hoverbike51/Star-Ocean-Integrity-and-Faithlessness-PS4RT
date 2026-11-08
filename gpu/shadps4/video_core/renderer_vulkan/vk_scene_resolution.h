@@ -53,6 +53,7 @@ public:
                                       const VideoCore::ImageViewInfo& info);
     /// Whether SampleProxy would return the proxy of `image` for these levels.
     [[nodiscard]] bool RasterCurrent(const VideoCore::Image& image, u32 level = 0) const;
+    [[nodiscard]] bool ProvenRasterCurrent(const VideoCore::Image& image, u32 level = 0) const;
     [[nodiscard]] bool ProxyCurrent(const VideoCore::Image& image, u32 level = 0,
                                     u32 levels = 1) const;
     /// SampleProxy for a view obtained before (valid while Generation() is unchanged): the

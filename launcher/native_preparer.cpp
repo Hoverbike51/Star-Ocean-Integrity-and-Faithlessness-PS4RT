@@ -1,3 +1,4 @@
+#include "cheat_profiles.h"
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Native Windows port of scripts/prepare.py + scripts/link_modules.py.
 #include "native_preparer.h"
@@ -362,7 +363,8 @@ std::string string_from_sfo(const fs::path& path, const std::string& field) {
 
 std::string title_id_from_sfo(const fs::path& path) {return string_from_sfo(path,"TITLE_ID");}
 
-void prepare_title(const fs::path& game, const fs::path& output, const PrepareLog& log) {
+void prepare_title(const fs::path& game, const fs::path& output, const PrepareLog& log,
+                   So5Cheats::Result* inspection) {
     if (log) log(L"Native C++ preparer · analyzing eboot.bin");
     Module main = parse_module(game / "eboot.bin");
     Module libc = parse_module(game / "sce_module" / "libc.prx");
@@ -478,6 +480,7 @@ void prepare_title(const fs::path& game, const fs::path& output, const PrepareLo
     }
     const auto proc = std::find_if(main.self.ph.begin(), main.self.ph.end(), [](const auto& p) { return p.type == 0x61000001; });
     if (proc == main.self.ph.end()) throw std::runtime_error("process parameter header missing");
+    if(!inspection) {
     fs::create_directories(output);
     std::ofstream out(output / "boot-linked.bin", std::ios::binary | std::ios::trunc);
     const std::array<char, 8> magic{'P','S','4','R','T','B','0','5'}; emit(out, magic);
@@ -497,6 +500,16 @@ void prepare_title(const fs::path& game, const fs::path& output, const PrepareLo
     out.write(reinterpret_cast<const char*>(image.data()), static_cast<std::streamsize>(image.size()));
     if (!out) throw std::runtime_error("cannot finish boot-linked.bin");
     write_content(game / "sce_sys" / "param.sfo", output);
+    }
+    std::vector<So5Cheats::Range> cheat_ranges;
+    for(const auto& p:main.self.ph)if(p.type==1)cheat_ranges.push_back({p.vaddr,p.vaddr+((p.flags&1)?((p.memsz+4095)&~uint64_t(4095)):p.memsz),bool(p.flags&1),bool(p.flags&2)});
+    try {
+        const auto cheats=So5Cheats::Compile(output/"cheats.txt",
+            string_from_sfo(game/"sce_sys/param.sfo","TITLE_ID"),string_from_sfo(game/"sce_sys/param.sfo","APP_VER"),image,cheat_ranges,!inspection);
+        if(inspection)*inspection=cheats;
+        for(const auto& error:cheats.problems)if(log)log(L"Cheats: "+std::wstring(error.begin(),error.end()));
+    }catch(const std::exception& e){if(inspection)throw;if(log)log(L"Cheats: native catalogue compilation refused; game preparation remains available");std::error_code ec;fs::remove(output/"cheats.txt",ec);}
+
     if (log) log(L"Native preparation complete · linked modules: libc.prx, libSceFios2.prx");
     (void)fs_patched;
 }

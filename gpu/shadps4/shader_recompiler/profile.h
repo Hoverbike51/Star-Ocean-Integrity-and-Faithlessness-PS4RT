@@ -7,6 +7,17 @@
 
 namespace Shader {
 
+/// ps4rt: Profile::fp_legacy bits.
+enum : u32 {
+    FpLegacyMul = 1,       ///< V_MAC/V_MAD_LEGACY_F32: 0 * anything = 0
+    FpLegacyClamp = 2,     ///< RCP/RSQ/LOG _CLAMP and _LEGACY: no infinities
+    FpLegacyNanMinMax = 4, ///< min/max/clamp return the non-NaN operand (NMin/NMax/NClamp)
+    FpLegacyHalfSaturate = 8, ///< f32->f16 packs: finite values saturate at +/-65504 (GCN RTZ),
+                              ///< and compressed exports keep the f16 round trip
+    FpLegacyTargetSaturate = 16, ///< colour exports to B10G11R11/f16 targets: finite values
+                                 ///< saturate at the format's largest finite value
+};
+
 struct Profile {
     u32 max_viewport_width{};
     u32 max_viewport_height{};
@@ -59,6 +70,11 @@ struct Profile {
     // Opt-in CUSA03219 cutout experiment; restricted read-only WQM idiom only.
     bool preserve_wqm_helpers{};
     bool fixed_grass_view_lighting{};
+    /// ps4rt: PS4RT_FP_LEGACY bits (FpLegacy*): GCN float semantics, a black-screen experiment.
+    u32 fp_legacy{};
+    /// ps4rt: PS4RT_NAN_DEBUG: NaN/Inf checks on colour exports and storage image writes,
+    /// switched per draw by PushData::nan_mode.
+    bool nan_debug{};
 
     bool operator==(const Profile&) const = default;
 };

@@ -110,6 +110,37 @@ void Translator::ExportRenderTarget(const GcnInst& inst) {
             continue;
         }
         auto converted = ApplyWriteNumberConversion(ir, swizzled_comp, color_buffer.num_conversion);
+        if (color_buffer.num_format == AmdGpu::NumberFormat::Float) {
+            float minimum = -65504.f;
+            float maximum = 0.f;
+            // These are physical Vulkan attachment components, after swizzling.
+            // Both GCN packed-float layouts map to B10G11R11_UFLOAT_PACK32.
+            switch (color_buffer.data_format) {
+            case AmdGpu::DataFormat::Format10_11_11:
+            case AmdGpu::DataFormat::Format11_11_10:
+                if (i < 3) {
+                    minimum = 0.f;
+                    maximum = i == 2 ? 64512.f : 65024.f;
+                }
+                break;
+            case AmdGpu::DataFormat::Format16:
+            case AmdGpu::DataFormat::Format16_16:
+            case AmdGpu::DataFormat::Format16_16_16_16:
+                maximum = 65504.f;
+                break;
+            default:
+                break;
+            }
+            // Packed FP16 exports can already contain infinity when unpacked.
+            // Preserve the export's finite range even on a 32-bit attachment.
+            if (!maximum && exp.compr &&
+                color_buffer.export_format == AmdGpu::ShaderExportFormat::ABGR_FP16) {
+                maximum = 65504.f;
+            }
+            if (maximum) {
+                converted = ir.FPClamp(converted, ir.Imm32(minimum), ir.Imm32(maximum));
+            }
+        }
         if (needs_unorm_fixup) {
             // FIXME: Fix-up for GPUs where float-to-unorm rounding is off from expected.
             converted = ir.FPSub(converted, ir.Imm32(1.f / 127500.f));

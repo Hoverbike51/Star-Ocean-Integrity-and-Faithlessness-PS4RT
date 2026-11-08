@@ -58,7 +58,7 @@ The following explicit form remains supported:
 ```
 
 The result is created under
-`dist\ps4rt-star-ocean-5-windows-x64-v0.4.0-latest\`. It contains only the executables, required DLLs,
+`dist\ps4rt-star-ocean-5-windows-x64-v1.0.0-latest\`. It contains only the executables, required DLLs,
 assets, integrated PKG extractor, license, and player documentation. Only a static native
 `Star Ocean 5 Launcher.exe` entry remains at the root; the real launcher, runtime, extractor,
 updater and DLLs are in `bin/`. Assets remain under their existing root subdirectories. Source files, CMake/Ninja
@@ -92,8 +92,8 @@ Players do not need Python, MSYS2, or PowerShell.
 Test either the player folder or the ZIP from PowerShell with a `PATH` that does not contain MSYS2:
 
 ```powershell
-.\packaging\windows\smoke-test.ps1 .\dist\ps4rt-star-ocean-5-windows-x64-v0.4.0-latest
-.\packaging\windows\smoke-test.ps1 .\dist\ps4rt-star-ocean-5-windows-x64-v0.4.0-latest.zip
+.\packaging\windows\smoke-test.ps1 .\dist\ps4rt-star-ocean-5-windows-x64-v1.0.0-latest
+.\packaging\windows\smoke-test.ps1 .\dist\ps4rt-star-ocean-5-windows-x64-v1.0.0-latest.zip
 ```
 
 ## Graphics menu
@@ -107,7 +107,7 @@ detected Vulkan 1.3 GPU; **Automatic** remains the recommended setting.
 The launcher can record one gameplay investigation without Windows Performance Recorder. Enable **Performance capture tools** in Advanced, then open
 **Logs & diagnostics** and select **Capture next session**, start the game, and exit through the
 in-game menu. **Open captures** opens the directory containing the English CSV timeline and JSON
-summary. The 0.4.0 report includes frame-time percentiles, CPU/GPU utilization, shader activity,
+summary. The report includes frame-time percentiles, CPU/GPU utilization, shader activity,
 draw packets, DrawRec busy time, draw-queue occupancy, drain waits, the highest-cost drain reasons,
 and a recording-phase breakdown. Disable the capture toggle for normal gameplay after collecting
 the report.

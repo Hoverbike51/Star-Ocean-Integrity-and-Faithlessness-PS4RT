@@ -47,6 +47,7 @@ public:
         u32 input_width, input_height, output_width, output_height;
         int quality;
         bool hdr;
+        bool depth_inverted = false;
         bool operator==(const FeatureDesc&) const = default;
     };
     struct Frame {

@@ -10,6 +10,7 @@
 
 #include "ps4rt_toggles.h"
 #include "ps4rt_settings.h"
+#include "ps4rt_ultrawide.h"
 
 #include "video_core/host_shaders/camera_motion_comp.h"
 
@@ -58,7 +59,7 @@ CameraMotion::CameraMotion(const Instance& instance_, Scheduler& scheduler_,
     const char* upscaler = std::getenv("PS4RT_UPSCALER");
     // The upscaler can be switched on from the menu at any time: the camera is always tracked
     // unless PS4RT_UPSCALER=none.
-    for_upscaler = !(upscaler && std::strcmp(upscaler, "none") == 0);
+    for_upscaler = Ps4RtUltrawide::Enabled() || !(upscaler && std::strcmp(upscaler, "none") == 0);
     const auto device = instance.GetDevice();
     if (for_upscaler) {
         const std::array<vk::DescriptorSetLayoutBinding, 3> motion_bindings = {{
@@ -185,6 +186,7 @@ void CameraMotion::OnConstants(const float* data) {
     std::memcpy(current.inv_view.data(), data + 180, 12 * sizeof(float));
     current.proj = {data[52], data[57], data[62], data[63]};
     current.valid = current.proj[0] != 0.0f && current.proj[1] != 0.0f;
+    frame_aspect = current.valid ? std::abs(current.proj[1]/current.proj[0]) : 0.f;
     const std::array<u32, 2> size{u32(data[4]), u32(data[5])};
     if (size != render_size) {
         std::printf("Camera motion: scene render size %ux%u\n", size[0], size[1]);
@@ -201,6 +203,17 @@ void CameraMotion::OnPs4RtConstants(const float* data, u64 bytes) {
     candidate.view = camera.view;
     candidate.inv_view = camera.inverse_view;
     candidate.proj = camera.projection;
+    frame_aspect = std::abs(candidate.proj[1]/candidate.proj[0]);
+    if(Ps4RtUltrawide::Enabled()) {
+        static int reported=-1;
+        const bool matches=Ps4RtUltrawide::CameraMatches(candidate.proj[0],candidate.proj[1],Ps4RtUltrawide::session_output);
+        if(reported!=int(matches)) {
+            std::printf("Ultrawide: observed perspective aspect %.6f, requested %.6f; %s\n",
+                double(std::abs(candidate.proj[1]/candidate.proj[0])),double(Ps4RtUltrawide::Ratio(Ps4RtUltrawide::session_output)),
+                matches?"projection matches":"projection mismatch (capture required)");
+            reported=int(matches);
+        }
+    }
     candidate.depth_transform = pending_depth_transform;
     candidate.valid = true;
     pass_camera.SetCamera(candidate);

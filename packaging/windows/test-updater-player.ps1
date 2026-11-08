@@ -37,7 +37,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $root 'fsr4_shaders') -Destination $stage -Recurse
     & (Join-Path $PSScriptRoot 'copy-notices.ps1') -Destination $stage
     $privateFiles = @(Get-ChildItem -LiteralPath $stage -Recurse -File | Where-Object {
-        $_.Name -match '(?i)\.(etl|wpaprofile|csv|ps1|cmd|py|log)$|^performance.*\.json$|settings.*\.ini$'
+        $_.Name -match '(?i)\.(etl|wpaprofile|csv|ps1|cmd|py|log)$|^performance.*\.json$|settings.*\.ini$|HUD.*Studio|^HUD_.*\.(md|txt|m)$|^hud-map.*\.json$|^hud-preset\.schema\.json$|^hud-private.*\.json$'
     })
     if ($privateFiles.Count) { throw 'Player payload contains personal diagnostics, settings or developer tracing tools.' }
     $env:PATH = "$build;$env:SystemRoot\System32;$env:SystemRoot"

@@ -13,6 +13,7 @@ struct GpuWorkarounds {
     bool preserve_wqm_helpers = false;
     bool fixed_grass_view_lighting = false;
     bool preserve_transition_snapshot = false;
+    unsigned fp_legacy = 31; // reviewed GCN arithmetic; export clamps remain unconditional
 };
 
 // Initialize inherited native-port workarounds before GPU threads start.

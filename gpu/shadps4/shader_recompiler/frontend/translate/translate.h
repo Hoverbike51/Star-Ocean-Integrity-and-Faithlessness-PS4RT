@@ -162,6 +162,9 @@ public:
     void V_SUBREV_F32(const GcnInst& inst);
     void V_MUL_F32(const GcnInst& inst);
     void V_MUL_LEGACY_F32(const GcnInst& inst);
+    IR::F32 LegacyMul(const IR::F32& src0, const IR::F32& src1);
+    void V_MAC_LEGACY_F32(const GcnInst& inst);
+    void V_MAD_LEGACY_F32(const GcnInst& inst);
     void V_MUL_I32_I24(const GcnInst& inst, bool is_signed);
     void V_MIN_F32(const GcnInst& inst, bool is_legacy = false);
     void V_MAX_F32(const GcnInst& inst, bool is_legacy = false);
@@ -191,6 +194,8 @@ public:
     void V_CVT_PKNORM_U16_F32(const GcnInst& inst);
     void V_CVT_PKNORM_I16_F32(const GcnInst& inst);
     void V_CVT_PKRTZ_F16_F32(const GcnInst& inst);
+    IR::F32 HalfSaturate(const IR::F32& value);
+    IR::F32 SaturateFinite(const IR::F32& value, float max);
     void V_ADD_F16(const GcnInst& inst);
     void V_SUB_F16(const GcnInst& inst);
     void V_MUL_F16(const GcnInst& inst);
@@ -223,10 +228,14 @@ public:
     void V_FLOOR_F32(const GcnInst& inst);
     void V_EXP_F32(const GcnInst& inst);
     void V_LOG_F32(const GcnInst& inst);
+    void V_LOG_CLAMP_F32(const GcnInst& inst);
     void V_RCP_F32(const GcnInst& inst);
+    void V_RCP_CLAMP_F32(const GcnInst& inst);
     void V_RCP_LEGACY_F32(const GcnInst& inst);
     void V_RCP_F64(const GcnInst& inst);
     void V_RSQ_F32(const GcnInst& inst);
+    void V_RSQ_CLAMP_F32(const GcnInst& inst);
+    void V_RSQ_LEGACY_F32(const GcnInst& inst);
     void V_SQRT_F32(const GcnInst& inst);
     void V_SIN_F32(const GcnInst& inst);
     void V_COS_F32(const GcnInst& inst);

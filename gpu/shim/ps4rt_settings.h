@@ -30,12 +30,17 @@ inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
 struct Values {
     // Star Ocean-derived native-scene path: this template is intentionally game-adaptable.
     bool native_scene = true;
+    // Private, environment-only native 4K experiment; never saved to the user's INI.
+    std::atomic<bool> native_4k_test{false};
     bool CompactGraphicsMenu() const { return native_scene; }
     std::atomic<bool> spatial_aa{false}; ///< Final game image AA before spatial upscaling.
     std::atomic<int> upscaler{UpscalerFsr3};
     std::atomic<int> preset{NativeAA};
     // -1 preserves the validated fixed 1080p scene for existing installations.
     std::atomic<int> scene_preset{-1},scene_preset_applied{-1};
+    // Independent manual raster height, used only with reconstruction disabled.
+    std::atomic<int> native_render_height{1080};
+    std::atomic<int> raster_max_width{4096},raster_max_height{4096};
     std::atomic<bool> scene_preset_failed{false};
     std::atomic<bool> sharpen{true};
     std::atomic<float> sharpness{0.3f};
@@ -48,9 +53,13 @@ struct Values {
     std::atomic<int> debug_view{DebugNone};
     std::atomic<bool> show_fps{false};
     /// Performance overlay (ps4rt_perf_stats.h): items shown, font size and background opacity
-    /// in percent, corner (0 top left, 1 top right, 2 bottom left, 3 bottom right), layout
+    /// in percent, position (0 top left, 1 top right, 2 bottom left, 3 bottom right,
+    /// 4 top center, 5 bottom center), layout
     /// (0 one line, 1 one item per line). menu_tab: the menu's last tab.
     std::atomic<unsigned> overlay_items{7};
+    std::atomic<bool> overlay_gpu_model{true}, overlay_cpu_model{false};
+    // Runtime-only successful reconstruction snapshot; never saved as a requested setting.
+    std::atomic<unsigned> overlay_reconstruction{0};
     std::atomic<int> overlay_scale{100}, overlay_corner{1}, overlay_opacity{50}, overlay_layout{0};
     std::atomic<int> menu_tab{0};
     // Graphics (ps4rt_graphics.h). Live: applied on the next frame.
@@ -73,6 +82,12 @@ struct Values {
     std::atomic<int> frames_queued{2};
     /// Controller vibration strength in percent; 0 turns it off (runtime_pad.c). Live.
     std::atomic<int> vibration{100};
+    // Verified native positional follow tuning; 0 retains the game's filter.
+    std::atomic<int> camera_follow{0};
+    // Preferred exploration character; -1 leaves native control unchanged.
+    std::atomic<int> exploration_leader{-1};
+    // Native exploration QoL. Disabling returns control to the original game.
+    std::atomic<bool> exploration_leader_enabled{true};
     // Startup-only compatibility settings shared with the developer preparation helper.
     std::atomic<int> render_resolution{0};
     std::atomic<int> engine_fps{120};
@@ -106,7 +121,7 @@ struct Values {
     std::atomic<bool> fsr4_supported{false}, fsr411_supported{false};
     std::atomic<bool> fsr3_configured{false},fsr3_available{true};
     /// DLSS (ps4rt_dlss.dll, NVIDIA RTX) is ready, or why not (null before the device exists).
-    std::atomic<bool> dlss_supported{false};
+    std::atomic<bool> dlss_supported{false},dlss_configured{false};
     std::atomic<const char*> dlss_problem{nullptr};
 
     /// Startup settings for the explicit PS4RT_RENDER_RES compatibility patch only.

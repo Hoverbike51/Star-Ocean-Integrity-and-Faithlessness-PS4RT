@@ -25,12 +25,14 @@
 #include "video_core/renderer_vulkan/vk_dlss.h"
 #include "video_core/renderer_vulkan/vk_fsr4.h"
 #include "video_core/texture_cache/image.h"
+#include "ps4rt_ultrawide.h"
 
 struct FfxVkPortableUpscaleContext;
 
 namespace VideoCore {
 class TextureCache;
 }
+namespace Ps4RtPresentation { enum class Stage; }
 
 namespace Vulkan {
 
@@ -48,7 +50,7 @@ public:
     ~TemporalUpscaler();
 
     [[nodiscard]] bool Enabled() const noexcept {
-        return enabled;
+        return enabled || Ps4RtUltrawide::Enabled();
     }
 
     /// A draw into a full-size RGBA16F target with the scene depth: the scene color.
@@ -69,14 +71,20 @@ public:
     bool OnFrameStart();
     /// Complete native-scene rendering before the final display copy.
     void BeforeDisplay();
+    // Read-only, bounded observations of actual vertex-constant copies. Does
+    // not promote unknown shaders to scene cameras or change guest matrices.
+    void ObserveProjection(u64 vertex,const float* data,u64 bytes,
+                           VideoCore::ImageId color,VideoCore::ImageId depth);
     bool RasterScaling() const;
+    bool NativeRasterTest() const;
+    bool ManualRaster() const;
     /// ps4rt: LOD bias for scene materials, log2(render / output) while a reduced scene is
     /// upscaled (0 at native size, for TAA and without an upscaler).
     [[nodiscard]] float SceneMipBias() const;
     /// ps4rt: the state RedirectColor/RedirectDepth/RasterScaling depend on, for memoizing a
     /// draw's render state (Rasterizer::BeginRendering).
     [[nodiscard]] u64 RedirectState() const noexcept {
-        return u64(ui_phase) | u64(display_redirect) << 1 | u64(done_this_frame) << 2 |
+        return u64(ui_phase) | u64(display_redirect) << 1 | u64(done_this_frame) << 2 | u64(display_ui_snapshot) << 3 |
                u64(ui_color.index) << 8 | u64(ui_depth.index) << 36;
     }
 
@@ -147,6 +155,10 @@ private:
     void RejectScenePreset(const char* reason);
     void AnnounceSceneDispatch(u32 w, u32 h, u32 ow, u32 oh, int provider);
     void RunUiOnly(VideoCore::ImageId color, VideoCore::ImageId depth);
+    void TracePresentation(Ps4RtPresentation::Stage stage, VideoCore::ImageId color,
+                           VideoCore::ImageId depth={}, bool native_viewport=false,
+                           u64 vertex=0, u64 pixel=0, u32 extra_flags=0,
+                           u32 constant_bytes=0,int projection_aspect=0);
     void EnsureUiResources(u32 width, u32 height, vk::Format color, vk::Format depth);
     void PrepareUiDepth(VideoCore::ImageId depth);
     void PrepareDepth(VideoCore::ImageId source, vk::Image destination, vk::Format format,
@@ -195,8 +207,10 @@ private:
     SceneTargets& scene_targets;
     int applied_preset = -1;
     int applied_scene_preset=-2,last_good_scene_preset=-1,last_good_scene_output=-1;
+    int applied_native_height=-1;
     int applied_upscaler = -1;
     bool dispatched_last_frame = false;
+    unsigned performance_reconstruction_state = 0;
     bool last_active = false, last_jitter = false;
 
 
@@ -225,7 +239,14 @@ private:
     VideoCore::ImageId ui_color{}, ui_depth{};
     bool ui_phase = false;         ///< from the upscale to the next display pass
     bool display_redirect = false; ///< the display pass of an upscaled frame
+    bool display_ui_snapshot = false; ///< a composition was actually produced in this frame
+    bool pending_wide_display = false; ///< current camera evidence, consumed at the next display boundary
+    u32 display_width = 1920, display_height = 1080;
     u64 display_frame = 0;
+    u32 presentation_seen = 0;
+    u32 presentation_display_samples = 0;
+    std::array<std::pair<u64,u64>,24> projection_observations{};
+    u32 projection_observation_count = 0;
     VideoCore::ImageId display_depth_source{};
     bool ui_read_barrier = false;
     VideoCore::UniqueImage ui_image;
@@ -239,6 +260,7 @@ private:
     u32 display_depth_width = 0, display_depth_height = 0;
     bool depth_blit = false;
     bool scaled_session = false;
+    u64 native_4k_frames = 0, native_4k_refused = 0;
     u32 ui_width = 0, ui_height = 0;
     u32 render_width = 0, render_height = 0;
     vk::Format ui_format = vk::Format::eUndefined;

@@ -1,8 +1,10 @@
+#include "../../src/runtime_cheats.h"
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ps4rt_overlay.h"
 #include "ps4rt_version.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cfloat>
 #include <chrono>
@@ -14,7 +16,9 @@
 #include <vector>
 #include <filesystem>
 #include <windows.h>
+#include <shellapi.h>
 #include "../../launcher/localization.h"
+#include "../../launcher/cheat_catalog.h"
 
 #include <SDL3/SDL.h>
 #include "ps4rt_settings.h"
@@ -22,6 +26,11 @@
 #include "ps4rt_menu_sounds.h"
 #include "ps4rt_graphics.h"
 #include "ps4rt_scene_preset.h"
+#include "ps4rt_hud_runtime.h"
+#include "ps4rt_camera_comfort.h"
+#include "ps4rt_exploration_leader.h"
+#include "hud_preset_library.h"
+#include "ps4rt_ultrawide.h"
 #include "ps4rt_window_cursor.h"
 #include "ps4rt_perf_stats.h"
 
@@ -95,7 +104,8 @@ float frame_ms_avg = 0.0f;
 
 void CommitPendingPreset() {
     auto& s=Ps4RtSettings::Get();
-    const auto output=Ps4RtOutput::Content(s.output_res);
+    if(s.upscaler==Ps4RtSettings::UpscalerOff) return;
+    const auto output=Ps4RtUltrawide::Content(s.output_res);
     pending_scene_preset=Ps4RtScene::ForOutput(pending_scene_preset,output.width,output.height);
     if(s.native_scene && s.scene_preset!=pending_scene_preset) {s.scene_preset=pending_scene_preset;dirty=true;}
 }
@@ -288,6 +298,25 @@ const char* UpscalerLabel(int upscaler) {
 }
 
 const Vulkan::Instance* overlay_instance = nullptr; // for the overlay's measurements
+unsigned presented_reconstruction = 0; // Under imgui_mutex; follows the presented queued frame.
+const char* Tr(const wchar_t* english, const wchar_t* french);
+
+std::string ReconstructionLabel(unsigned state) {
+    using namespace Ps4RtSettings;
+    const int provider = Ps4RtPerfStats::ReconstructionProvider(state);
+    const int preset = Ps4RtPerfStats::ReconstructionPreset(state);
+    if (provider == UpscalerOff) return "Native · NO PRESET";
+    if (provider == UpscalerDlss && preset == NativeAA) return "DLAA";
+    const std::string name = UpscalerLabel(provider);
+    if (provider == UpscalerTaa) return name + " · NO PRESET";
+    const char* label = preset < 0 ? Tr(L"Original 1080p", L"1080p d’origine") :
+        preset == NativeAA ? Tr(L"Native (100%)", L"Natif (100 %)") :
+        preset == Quality ? Tr(L"Quality", L"Qualité") :
+        preset == Balanced ? Tr(L"Balanced", L"Équilibré") :
+        preset == Performance ? Tr(L"Performance preset", L"Performance") :
+        Tr(L"Ultra Performance", L"Ultra Performance");
+    return name + " · " + label;
+}
 
 // The performance overlay's text with the current settings (also the menu's preview).
 std::string OverlayText() {
@@ -300,7 +329,9 @@ std::string OverlayText() {
     P::Sample sample = P::Latest();
     sample.fps = frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f;
     sample.frame_ms = frame_ms_avg;
-    sample.upscaler = UpscalerLabel(s.upscaler);
+    sample.upscaler = ReconstructionLabel(presented_reconstruction);
+    sample.show_gpu_model = s.overlay_gpu_model;
+    sample.show_cpu_model = s.overlay_cpu_model;
     sample.version = PS4RT_VERSION_STRING;
     return P::Format(sample, items, s.overlay_layout == 0);
 }
@@ -318,7 +349,7 @@ void GameTab() {
 void CompactGraphics() {
     auto& s = Ps4RtSettings::Get();
     if (BeginRows("##scene_image")) {
-        const auto modes=s.display_mode==Ps4RtGraphics::Fullscreen?s.display_fullscreen_modes.load():s.display_window_modes.load();
+        const auto modes=Ps4RtUltrawide::SessionModes(s.display_mode==Ps4RtGraphics::Windowed?s.display_window_modes.load():s.display_fullscreen_modes.load());
         const char* aspects[Ps4RtOutput::AspectCount]{}; int aspect_values[Ps4RtOutput::AspectCount]{},aspect_count=0;
         for(int aspect=0;aspect<Ps4RtOutput::AspectCount;++aspect) if(Ps4RtOutput::Filter(modes,aspect)) {
             aspects[aspect_count]=Ps4RtOutput::AspectNames[aspect]; aspect_values[aspect_count++]=aspect;
@@ -361,7 +392,7 @@ void CompactGraphics() {
             Ps4RtSettings::SetSceneUpscaler(provider, false);
         const bool temporal = s.upscaler != Ps4RtSettings::UpscalerOff;
         const int output = s.output_res;
-        const auto content=Ps4RtOutput::Content(output);
+        const auto content=Ps4RtUltrawide::Content(output);
         char preset[80]{};
         std::snprintf(preset,sizeof(preset),"Custom %.2fx (1080p input)",float(content.width)/1920);
         InfoRow("Quality preset", !temporal || s.temporal_problem ? "Original (1080p input)" :
@@ -533,9 +564,11 @@ void OverlayTab() {
     }
     ImGui::SeparatorText("Appearance");
     if (BeginRows("##appearance")) {
+        CheckRow("Show GPU model", s.overlay_gpu_model);
+        CheckRow("Show CPU model", s.overlay_cpu_model);
         SliderRow("Font size", s.overlay_scale, 50, 300, "%d%%", "Size of the overlay text.");
-        static const char* const corners[] = {"Top left", "Top right", "Bottom left", "Bottom right"};
-        ChoiceRow("Corner", s.overlay_corner, corners, nullptr, 4, "Where the overlay sits.");
+        static const char* const corners[] = {"Top left", "Top right", "Bottom left", "Bottom right", "Top center", "Bottom center"};
+        ChoiceRow("Position", s.overlay_corner, corners, nullptr, 6, "Where the overlay sits.");
         SliderRow("Background opacity", s.overlay_opacity, 0, 100, "%d%%", "0% is no background.");
         static const char* const layouts[] = {"One line", "One item per line"};
         ChoiceRow("Layout", s.overlay_layout, layouts, nullptr, 2, "Items side by side or stacked.");
@@ -869,11 +902,10 @@ void FpsCounter() {
     }
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     const float pad = 12.0f * base_scale;
-    const int corner = s.overlay_corner;
-    const bool right = corner == 1 || corner == 3, bottom = corner >= 2;
-    ImGui::SetNextWindowPos(ImVec2(right ? viewport->WorkPos.x + viewport->WorkSize.x - pad : viewport->WorkPos.x + pad,
-                                   bottom ? viewport->WorkPos.y + viewport->WorkSize.y - pad : viewport->WorkPos.y + pad),
-                            ImGuiCond_Always, ImVec2(right ? 1.0f : 0.0f, bottom ? 1.0f : 0.0f));
+    const auto anchor = Ps4RtPerfStats::PositionAnchor(s.overlay_corner);
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + pad + (viewport->WorkSize.x - 2 * pad) * anchor.x,
+                                  viewport->WorkPos.y + pad + (viewport->WorkSize.y - 2 * pad) * anchor.y),
+                            ImGuiCond_Always, ImVec2(anchor.x, anchor.y));
     ImGui::SetNextWindowBgAlpha(s.overlay_opacity / 100.0f);
     ImGui::Begin("##fps", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
@@ -1420,7 +1452,8 @@ void SetTextEntry(bool active, const std::string& prompt, const std::string& tex
     text_entry_text = text;
 }
 
-void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent, bool title_screen) {
+void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent,
+            bool title_screen, unsigned reconstruction_state) {
     // Present interval for the FPS readout (measured also while nothing is drawn).
     const auto now = std::chrono::steady_clock::now();
     const float ms = std::chrono::duration<float, std::milli>(now - last_present).count();
@@ -1435,6 +1468,7 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent, b
     std::scoped_lock lock{imgui_mutex};
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(float(extent.width), float(extent.height));
+    presented_reconstruction = reconstruction_state;
     io.DeltaTime = ms > 0.0f && ms < 1000.0f ? ms / 1000.0f : 1.0f / 60.0f;
     // UI scale follows the display height (1080p = 1).
     const float scale = std::max(float(extent.height) / 1080.0f, 0.75f);

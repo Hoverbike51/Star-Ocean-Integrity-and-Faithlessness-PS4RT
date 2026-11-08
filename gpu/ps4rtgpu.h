@@ -13,10 +13,16 @@ typedef struct {
     uint32_t sdk_version;       /* from the eboot's procparam */
     uint32_t psf_attributes;    /* param.sfo ATTRIBUTE */
     int32_t width, height;      /* initial window size */
+    unsigned char *game_image;  /* writable loaded image, before guest initializers */
+    uint64_t game_image_size;
+    const char *app_version;
 } Ps4RtGpuConfig;
 /* Registers kernel event queues (needed with or without graphics). */
 void ps4rtgpu_register_kernel(void);
 /* Creates window, Vulkan device, presenter and GPU command processor. */
+uint32_t ps4rtgpu_speed(void);
+int ps4rtgpu_fast_forward_combo(void);
+void ps4rtgpu_leader_input(uint32_t buttons, int captured);
 int ps4rtgpu_init(const Ps4RtGpuConfig *config);
 /* Function for an imported NID ("NID#lib#mod"), or 0 when the GPU library does not provide it. */
 uintptr_t ps4rtgpu_resolve(const char *scoped_nid);

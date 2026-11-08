@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <cwchar>
+#include <string_view>
 
 namespace Vulkan {
 class Instance;
@@ -35,11 +37,45 @@ struct Sample {
     std::string upscaler;
     std::string version;
     std::string gpu_name;
+    std::string cpu_name;
+    bool show_gpu_model = true, show_cpu_model = false;
     std::string busiest_thread_name;
     float gpu_percent = -1.0f, cpu_percent = -1.0f, busiest_thread_percent = -1.0f;
     unsigned busiest_thread_id = 0, thread_count = 0;
     double ram_used_gb = -1.0, ram_total_gb = -1.0, vram_used_gb = -1.0, vram_total_gb = -1.0;
 };
+
+// Stable saved IDs: four original corners, then top center and bottom center.
+struct Anchor { float x, y; };
+inline Anchor PositionAnchor(int position) {
+    switch (position) {
+    case 0: return {0, 0};
+    case 2: return {0, 1};
+    case 3: return {1, 1};
+    case 4: return {.5f, 0};
+    case 5: return {.5f, 1};
+    default: return {1, 0};
+    }
+}
+
+// PDH engine instance identity. Do not combine another process or adapter's activity.
+inline bool MatchesGpuEngine(std::wstring_view name, unsigned process, uint32_t high, uint32_t low) {
+    unsigned pid = 0, luid_high = 0, luid_low = 0;
+    int end = 0;
+    const std::wstring terminated{name};
+    return std::swscanf(terminated.c_str(), L"pid_%u_luid_0x%x_0x%x_%n",
+                       &pid, &luid_high, &luid_low, &end) == 3 && end > 0 &&
+           pid == process && luid_high == high && luid_low == low &&
+           name.find(L"_engtype_3D", size_t(end)) != std::wstring_view::npos;
+}
+
+// Publish provider and preset together, only after a successful dispatch. Provider IDs are
+// Ps4RtSettings::Upscaler; preset -1 means the original fixed-resolution scene.
+inline unsigned ReconstructionState(int provider, int preset) {
+    return unsigned(provider & 0xff) | (unsigned(std::clamp(preset, -1, 4) + 1) << 8);
+}
+inline int ReconstructionProvider(unsigned state) { return int(state & 0xff); }
+inline int ReconstructionPreset(unsigned state) { return int((state >> 8) & 0xff) - 1; }
 
 /// Process CPU time over wall time on every core, 0 to 100; -1 without a wall interval.
 inline float CpuPercent(uint64_t process_delta, uint64_t wall_delta, unsigned cores) {
@@ -77,23 +113,24 @@ inline std::string Format(const Sample& s, unsigned mask, bool row) {
         add();
     }
     if (mask & Upscaler) {
-        std::snprintf(part, sizeof(part), "%s", s.upscaler.empty() ? "Native" : s.upscaler.c_str());
+        std::snprintf(part, sizeof(part), "%s", s.upscaler.empty() ? "Native · NO PRESET" : s.upscaler.c_str());
         add();
     }
     if (mask & Gpu) {
-        const char* name = s.gpu_name.empty() ? "GPU" : s.gpu_name.c_str();
+        const char* name = !s.show_gpu_model || s.gpu_name.empty() ? "GPU" : s.gpu_name.c_str();
         if (s.gpu_percent < 0.0f) {
-            std::snprintf(part, sizeof(part), "%s n/a", name);
+            std::snprintf(part, sizeof(part), "%s N/A", name);
         } else {
             std::snprintf(part, sizeof(part), "%s %.0f%%", name, s.gpu_percent);
         }
         add();
     }
     if (mask & Cpu) {
+        const char* name = !s.show_cpu_model || s.cpu_name.empty() ? "CPU" : s.cpu_name.c_str();
         if (s.cpu_percent < 0.0f) {
-            std::snprintf(part, sizeof(part), "CPU n/a");
+            std::snprintf(part, sizeof(part), "%s N/A", name);
         } else {
-            std::snprintf(part, sizeof(part), "CPU %.0f%%", s.cpu_percent);
+            std::snprintf(part, sizeof(part), "%s %.0f%%", name, s.cpu_percent);
         }
         add();
     }

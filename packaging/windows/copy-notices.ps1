@@ -30,8 +30,26 @@ foreach($name in @('THIRD_PARTY_GPL3.txt','THIRD_PARTY_LGPL21.txt','THIRD_PARTY_
  Copy-Notice (Join-Path $root ('docs\'+$name)) ('common\'+$name)
 }
 $pacman=Join-Path $Msys2Root 'usr\bin\pacman.exe'
-$dlls=@(Get-ChildItem -LiteralPath $stage -Filter '*.dll' -File | ForEach-Object {'/clang64/bin/'+$_.Name})
+$dllDirectories=@($stage)
+$bin=Join-Path $stage 'bin'
+if(Test-Path -LiteralPath $bin -PathType Container){$dllDirectories+=$bin}
+$dlls=@(Get-ChildItem -LiteralPath $dllDirectories -Filter '*.dll' -File |
+ Where-Object {$_.Name -notin 'ps4rt_dlss.dll','nvngx_dlss.dll'} | ForEach-Object {'/clang64/bin/'+$_.Name} | Sort-Object -Unique)
 if(-not $dlls.Count){throw 'No staged DLLs to audit.'}
+if(Test-Path -LiteralPath (Join-Path $bin 'ps4rt_dlss.dll')) {
+ Copy-Notice (Join-Path $root 'gpu\dlss_bridge\LICENSE.txt') 'dlss-bridge\LICENSE.txt'
+ $inventory.Add('Optional DLSS bridge: MIT; IFreemz, bbport and PS4RT contributors. Host/bridge ABI 2.')
+}
+if(Test-Path -LiteralPath (Join-Path $bin 'nvngx_dlss.dll')) {
+ $sdkLicense=Join-Path $root 'out\dlss-notices\LICENSE.txt'
+ if(-not (Test-Path -LiteralPath $sdkLicense)){throw 'Optional NVIDIA runtime requires its matching SDK license. Build with -DlssSdk or omit DLSS.'}
+ Copy-Notice $sdkLicense 'nvidia-dlss\LICENSE.txt'
+ $inventory.Add('NVIDIA DLSS runtime: separate NVIDIA RTX SDK terms; https://github.com/NVIDIA/DLSS')
+ foreach($file in @('ps4rt_dlss.dll','nvngx_dlss.dll')) {
+  $dll=Join-Path $bin $file
+  $inventory.Add($file+' | version '+[Diagnostics.FileVersionInfo]::GetVersionInfo($dll).FileVersion+' | SHA256 '+(Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash)
+ }
+}
 $owners=@(& $pacman -Qoq @dlls)
 if($LASTEXITCODE -ne 0){throw 'Could not identify all staged DLL packages.'}
 $owners+=@('mingw-w64-clang-x86_64-boost','mingw-w64-clang-x86_64-fmt',

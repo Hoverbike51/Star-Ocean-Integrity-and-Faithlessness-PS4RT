@@ -495,6 +495,10 @@ bool SceneTargets::ProxyCurrent(const VideoCore::Image& image, u32 level, u32 le
     // validates depth separately with RasterCurrent and a depth-only view.
     return !image.info.props.is_depth && levels==1 && RasterCurrent(image,level);
 }
+bool SceneTargets::ProvenRasterCurrent(const VideoCore::Image& image,u32 level) const {
+    if(!RasterCurrent(image,level)) return false;
+    return entries.find(Key(image.image_uid,level))->second->state.raster_written;
+}
 vk::ImageLayout SceneTargets::PrepareSample(const VideoCore::Image& image, u32 level) {
     auto& e = *entries.find(Key(image.image_uid, level))->second;
     constexpr auto layout = vk::ImageLayout::eShaderReadOnlyOptimal;

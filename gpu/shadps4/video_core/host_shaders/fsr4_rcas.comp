@@ -1,0 +1,73 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 Advanced Micro Devices, Inc.
+// SPDX-License-Identifier: MIT
+// FSR 4 v07 RCAS, retaining the model's log-colour transform and constants ABI.
+// Bound every neighbour to the visible output, not the padded history texture.
+#version 450
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_samplerless_texture_functions : require
+#extension GL_EXT_spirv_intrinsics : require
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 43, scalar) uniform Constants {
+    uvec4 config;
+    float preExposure;
+    uvec3 pad;
+} constants;
+layout(set = 0, binding = 6) uniform texture2D exposureTexture;
+layout(set = 0, binding = 18) uniform texture2D inputTexture;
+layout(set = 0, binding = 32, rgba16f) uniform writeonly image2D outputImage;
+
+// Match the v07 model's number-min/max semantics for flat black/white regions.
+spirv_instruction(set = "GLSL.std.450", id = 79) float numberMin(float, float);
+spirv_instruction(set = "GLSL.std.450", id = 80) float numberMax(float, float);
+spirv_instruction(set = "GLSL.std.450", id = 79) vec3 numberMin(vec3, vec3);
+spirv_instruction(set = "GLSL.std.450", id = 80) vec3 numberMax(vec3, vec3);
+
+float reciprocal(float value) {
+    float estimate = uintBitsToFloat(2129764351u - floatBitsToUint(value));
+    return estimate * (2.0 - estimate * value);
+}
+vec3 loadColour(ivec2 position, ivec2 lastPixel) {
+    return texelFetch(inputTexture, clamp(position, ivec2(0), lastPixel), 0).rgb;
+}
+float luma(vec3 colour) { return colour.b * 0.5 + (colour.r * 0.5 + colour.g); }
+
+void sharpen(ivec2 position) {
+    ivec2 size = imageSize(outputImage);
+    if (any(greaterThanEqual(position, size))) return;
+    ivec2 lastPixel = min(size, textureSize(inputTexture, 0)) - 1;
+    vec3 top = loadColour(position + ivec2(0, -1), lastPixel);
+    vec3 left = loadColour(position + ivec2(-1, 0), lastPixel);
+    vec3 centre = loadColour(position, lastPixel);
+    vec3 right = loadColour(position + ivec2(1, 0), lastPixel);
+    vec3 bottom = loadColour(position + ivec2(0, 1), lastPixel);
+    float b = luma(top), d = luma(left), e = luma(centre);
+    float f = luma(right), h = luma(bottom);
+    float range = numberMax(numberMax(b, numberMax(d, e)), numberMax(f, h)) -
+                  numberMin(numberMin(b, numberMin(d, e)), numberMin(f, h));
+    float noise = 1.0 - 0.5 * clamp(abs(0.25 * (((b + d) + f) + h) - e) *
+                                   reciprocal(range), 0.0, 1.0);
+    vec3 low = numberMin(numberMin(top, numberMin(left, right)), bottom);
+    vec3 high = numberMax(numberMax(top, numberMax(left, right)), bottom);
+    float ratio = clamp(e / numberMin(numberMin(b, numberMin(d, f)), h), 0.0, 1.0);
+    vec3 hitLow = -(low * (vec3(0.25) / high)) * ratio;
+    vec3 hitHigh = (vec3(1.0) - high) / (4.0 * low - vec3(4.0));
+    vec3 lobes = numberMax(hitLow, hitHigh);
+    float lobe = numberMax(-0.1875, numberMin(numberMax(numberMax(lobes.r, lobes.g),
+                          lobes.b), 0.0)) * uintBitsToFloat(constants.config.x) * noise;
+    vec3 filtered = (lobe * (((top + left) + bottom) + right) + centre) *
+                    reciprocal(4.0 * lobe + 1.0);
+    float exposure = texelFetch(exposureTexture, ivec2(0), 0).r;
+    if (exposure == 0.0) exposure = 1.0;
+    vec3 linear = numberMax((exp(filtered * 8.5178804397583) - vec3(1.0)) *
+                           0.006666666828095913, vec3(0.0));
+    imageStore(outputImage, position, vec4(linear / (exposure / constants.preExposure), 1.0));
+}
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    ivec2 pixel = ivec2((lane >> 1u) & 7u, (lane & 1u) | ((lane >> 3u) & 6u)) +
+                  ivec2(gl_WorkGroupID.xy * 16u);
+    sharpen(pixel);
+    sharpen(pixel + ivec2(8, 0));
+    sharpen(pixel + ivec2(8, 8));
+    sharpen(pixel + ivec2(0, 8));
+}

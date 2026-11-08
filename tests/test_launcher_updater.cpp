@@ -173,7 +173,7 @@ void Archives(const fs::path& root) {
 fs::path Module() { wchar_t module[32768]{}; GetModuleFileNameW(nullptr, module, 32768); return module; }
 U::Package PlayerPackage(const fs::path& root, const fs::path& binaries) {
     fs::create_directories(root / "bin");
-    fs::copy_file(Module(),root / "Star Ocean 5 Launcher.exe");
+    fs::copy_file(binaries / "bootstrap/Star Ocean 5 Launcher.exe", root / "Star Ocean 5 Launcher.exe");
     for (const char* name : {"Star Ocean 5.exe", "Star Ocean 5 Launcher.exe", "PkgExtractor.exe"}) fs::copy_file(Module(), root / "bin" / name);
     fs::copy_file(binaries / "SO5-Updater.exe", root / "bin/SO5-Updater.exe");
     for (const char* name : {"SDL3.dll", "libc++.dll", "libunwind.dll", "libwinpthread-1.dll"}) fs::copy_file(binaries / name, root / "bin" / name);
@@ -187,11 +187,11 @@ void Handoff(const fs::path& root, const fs::path& binaries) {
     const auto workspace = root / "so5-update-{handoff}";
     Write(workspace / "workspace.marker", "SO5 update workspace v1\n");
     auto package = PlayerPackage(workspace / "package", binaries);
-    fs::rename(package.root / "libc++.dll", package.root / "libc++.disabled");
+    fs::rename(package.root / "bin/libc++.dll", package.root / "bin/libc++.disabled");
     const auto missing_dll_started = GetTickCount64();
     Reject([&] { U::ProbePackage(package); });
     assert(GetTickCount64() - missing_dll_started < 5000);
-    fs::rename(package.root / "libc++.disabled", package.root / "libc++.dll");
+    fs::rename(package.root / "bin/libc++.disabled", package.root / "bin/libc++.dll");
     // Full native extraction and resource validation, with non-ASCII staging paths.
     std::vector<std::pair<std::string, std::string>> entries;
     for (const auto& file : package.files) entries.push_back({"player/" + Utf8(file), Read(package.root / file)});

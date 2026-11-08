@@ -49,8 +49,11 @@ int main() {
     const VkBufferCreateInfo bc{.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,.size=bytes,.usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     const VmaAllocationCreateInfo ac{.flags=VMA_ALLOCATION_CREATE_MAPPED_BIT|VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,.usage=VMA_MEMORY_USAGE_AUTO_PREFER_HOST};
     assert(vmaCreateBuffer(instance.GetAllocator(),&bc,&ac,&buffer,&allocation,&mapped)==VK_SUCCESS);
-    for(const auto preset:{1,2,3,4,0,-1}) {
-        const auto requested=Ps4RtScene::Input(preset,3840,2160);
+    for(const auto output:std::array<Ps4RtScene::Size,4>{{{3840,2160},{3440,1440},{5120,1440},{1920,1080}}})
+    for(const auto preset:{1,2,3,4,0,-1,720,1080,1440,2160}) {
+        const bool wide=output.width*9>output.height*16;
+        const auto requested=preset>4?Ps4RtScene::NativeInput(preset,output.width,output.height,wide):
+            Ps4RtScene::Input(preset,output.width,output.height,wide);
         const auto generation=targets.Generation();const auto old=targets.Size();
         assert(targets.TrySetSize({requested.width,requested.height}));
         assert(targets.Size().width==requested.width && targets.Size().height==requested.height);
@@ -58,11 +61,13 @@ int main() {
         ImageViewInfo view;view.format=info.pixel_format;
         const auto proxy=targets.Attachment(ImageId{0},view);
         assert(proxy.view && proxy.image!=color.GetImage() && targets.ProxyCurrent(color));
+        assert(targets.ProvenRasterCurrent(color));
         assert(targets.ProxySize(half).width==requested.width/2);
         const auto depth_size=targets.ProxySize(depth);assert(depth_size.width==requested.width);
         ImageViewInfo depth_view;depth_view.format=depth_info.pixel_format;
         const auto dp=targets.Attachment(ImageId{2},depth_view);assert(dp.view && targets.RasterCurrent(depth) && !targets.ProxyCurrent(depth));
         targets.NativeAccess(depth,vk::AccessFlagBits2::eShaderRead); // depth resolve is a real blit
+        assert(targets.ProvenRasterCurrent(depth));
         const auto read=targets.Read(ImageId{0},view,vk::PipelineStageFlagBits2::eTransfer,vk::AccessFlagBits2::eTransferWrite);
         scheduler.CommandBuffer().clearColorImage(read.image,read.layout,vk::ClearColorValue(std::array{.25f,.5f,.75f,1.f}),range,dispatch);
         runtime.Transit(&color,vk::ImageLayout::eTransferSrcOptimal,vk::PipelineStageFlagBits2::eTransfer,vk::AccessFlagBits2::eTransferRead);
@@ -75,10 +80,66 @@ int main() {
             assert(data[pixel*4]>=63 && data[pixel*4]<=64);assert(data[pixel*4+1]>=127 && data[pixel*4+1]<=128);
             assert(data[pixel*4+2]>=191 && data[pixel*4+2]<=192);assert(data[pixel*4+3]==255);
         }
+        // Filling a 4K image from guest 1080p pixels must never count as native raster proof.
+        targets.NativeAccess(color,vk::AccessFlagBits2::eShaderWrite);
+        assert(!targets.ProvenRasterCurrent(color));
+        (void)targets.Read(ImageId{0},view);
+        assert(targets.RasterCurrent(color) && !targets.ProvenRasterCurrent(color));
         const auto before=targets.Generation();assert(!targets.TrySetSize({0,1}));
         assert(!targets.TrySetSize({instance.GetMaxFramebufferWidth()+1,1080}));
         assert(targets.Generation()==before && targets.Size().width==requested.width);
         std::printf("PASS: real color/depth %ux%u, native resolve and rejected invalid transition\n",requested.width,requested.height);
     }
+    // Render a one-pixel marker outside the original guest extent, then copy
+    // it 1:1 to a real 4K output. A 1080p intermediate cannot preserve this.
+    assert(targets.TrySetSize({3840,2160}));
+    ImageViewInfo view;view.format=info.pixel_format;
+    const auto native4k=targets.Attachment(ImageId{0},view);
+    scheduler.EndRendering();
+    const vk::RenderingAttachmentInfo attachment{.imageView=native4k.view,.imageLayout=native4k.layout,
+        .loadOp=vk::AttachmentLoadOp::eClear,.storeOp=vk::AttachmentStoreOp::eStore,
+        .clearValue=vk::ClearValue(vk::ClearColorValue(std::array{0.f,0.f,0.f,1.f}))};
+    const vk::RenderingInfo rendering{.renderArea={{0,0},{3840,2160}},.layerCount=1,
+        .colorAttachmentCount=1,.pColorAttachments=&attachment};
+    auto cmd=scheduler.CommandBuffer();cmd.beginRendering(rendering,dispatch);
+    const vk::ClearAttachment white{.aspectMask=vk::ImageAspectFlagBits::eColor,.colorAttachment=0,
+        .clearValue=vk::ClearValue(vk::ClearColorValue(std::array{1.f,1.f,1.f,1.f}))};
+    const vk::ClearRect corner{.rect={{3839,2159},{1,1}},.baseArrayLayer=0,.layerCount=1};
+    cmd.clearAttachments(white,corner,dispatch);cmd.endRendering(dispatch);
+    UniqueImage output(instance.GetDevice(),instance.GetAllocator());
+    output.Create({.imageType=vk::ImageType::e2D,.format=info.pixel_format,.extent={3840,2160,1},
+        .mipLevels=1,.arrayLayers=1,.samples=vk::SampleCountFlagBits::e1,
+        .usage=vk::ImageUsageFlagBits::eTransferSrc|vk::ImageUsageFlagBits::eTransferDst});
+    const auto transition=[&](vk::Image image,vk::ImageLayout before,vk::ImageLayout after) {
+        const vk::ImageMemoryBarrier2 b{.srcStageMask=vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask=vk::AccessFlagBits2::eMemoryRead|vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask=vk::PipelineStageFlagBits2::eTransfer,
+            .dstAccessMask=vk::AccessFlagBits2::eTransferRead|vk::AccessFlagBits2::eTransferWrite,
+            .oldLayout=before,.newLayout=after,.image=image,.subresourceRange=range};
+        cmd.pipelineBarrier2({.imageMemoryBarrierCount=1,.pImageMemoryBarriers=&b},dispatch);
+    };
+    transition(native4k.image,native4k.layout,vk::ImageLayout::eTransferSrcOptimal);
+    transition(output.image,vk::ImageLayout::eUndefined,vk::ImageLayout::eTransferDstOptimal);
+    const vk::ImageCopy exact{.srcSubresource={vk::ImageAspectFlagBits::eColor,0,0,1},
+        .dstSubresource={vk::ImageAspectFlagBits::eColor,0,0,1},.extent={3840,2160,1}};
+    cmd.copyImage(native4k.image,vk::ImageLayout::eTransferSrcOptimal,output.image,
+        vk::ImageLayout::eTransferDstOptimal,exact,dispatch);
+    transition(output.image,vk::ImageLayout::eTransferDstOptimal,vk::ImageLayout::eTransferSrcOptimal);
+    auto readback_info=bc;readback_info.size=3840ull*2160*4;
+    VkBuffer full{};VmaAllocation full_alloc{};VmaAllocationInfo full_map{};
+    assert(vmaCreateBuffer(instance.GetAllocator(),&readback_info,&ac,&full,&full_alloc,&full_map)==VK_SUCCESS);
+    const vk::BufferImageCopy full_copy{.imageSubresource={vk::ImageAspectFlagBits::eColor,0,0,1},.imageExtent={3840,2160,1}};
+    cmd.copyImageToBuffer(output.image,vk::ImageLayout::eTransferSrcOptimal,full,full_copy,dispatch);
+    scheduler.Finish();assert(vmaInvalidateAllocation(instance.GetAllocator(),full_alloc,0,VK_WHOLE_SIZE)==VK_SUCCESS);
+    const auto* pixels=static_cast<const unsigned char*>(full_map.pMappedData);
+    const size_t last=(3840ull*2160-1)*4;
+    assert(pixels[last]==255 && pixels[last+1]==255 && pixels[last+2]==255);
+    assert(pixels[last-4]==0 && pixels[last-3]==0 && pixels[last-2]==0);
+    assert(pixels[0]==0 && pixels[3]==255);
+    vmaDestroyBuffer(instance.GetAllocator(),full,full_alloc);
+    std::puts("PASS: real 3840x2160 attachment rendering and 1:1 output preserve an isolated bottom-right pixel (no upscaler)");
+    // Restore the proxy layout contract before its normal resolve/destruction.
+    cmd=scheduler.CommandBuffer();
+    transition(native4k.image,vk::ImageLayout::eTransferSrcOptimal,native4k.layout);
     scheduler.Finish();vmaDestroyBuffer(instance.GetAllocator(),buffer,allocation);
 }

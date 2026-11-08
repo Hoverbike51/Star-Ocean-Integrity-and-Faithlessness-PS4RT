@@ -43,11 +43,10 @@ llvm-strip --strip-debug -o "$stage/Star Ocean 5 Launcher.exe" 'out/bootstrap/St
 
 # Copy every non-system DLL resolved from the CLANG64 tree. The packaged executable therefore
 # starts from a normal Windows session without an MSYS2 PATH.
-(ldd "$stage/bin/Star Ocean 5.exe"; ldd "$stage/bin/Star Ocean 5 Launcher.exe"; ldd "$stage/bin/PkgExtractor.exe") |
-awk '/\/clang64\/bin\// {print $3}' | sort -u |
-while IFS= read -r dll; do
-    [[ -n $dll ]] && cp -u "$dll" "$stage/bin/"
-done
+bash packaging/windows/copy_dlls.sh "$stage/bin" "$stage/bin/Star Ocean 5.exe" "$stage/bin/Star Ocean 5 Launcher.exe" "$stage/bin/PkgExtractor.exe"
+if [[ -f out/ps4rt_dlss.dll && -f out/nvngx_dlss.dll ]]; then
+    cp out/ps4rt_dlss.dll out/nvngx_dlss.dll "$stage/bin/"
+fi
 
 cp -r gpu/assets/. "$stage/gpu/assets/"
 cp -r fsr4_shaders "$stage/"
@@ -67,7 +66,10 @@ forbidden=$(find "$stage" \( -iname eboot.bin -o -iname sce_module -o -iname sce
     -o -iname savedata -o -iname user -o -iname cache -o -iname '*.log' -o -iname '*.pkg' \
     -o -iname '*.sprx' -o -iname '*.prx' -o -iname '*.etl' -o -iname '*.wpaprofile' \
     -o -iname '*.csv' -o -iname 'performance*.json' -o -iname '*settings*.ini' \
-    -o -iname '*.ps1' -o -iname '*.cmd' -o -iname '*.py' \) -print)
+    -o -iname '*.ps1' -o -iname '*.cmd' -o -iname '*.py' \
+    -o -iname '*HUD*Studio*' -o -iname 'HUD_*.md' -o -iname 'HUD_*.txt' \
+    -o -iname 'HUD_*.m' -o -iname 'hud-map*.json' -o -iname 'hud-preset.schema.json' \
+    -o -iname 'hud-private*.json' \) -print)
 if [[ -n $forbidden ]]; then
     echo "Package contains private/generated files:" >&2
     echo "$forbidden" >&2

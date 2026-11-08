@@ -55,6 +55,9 @@ public:
         return depth_id;
     }
     [[nodiscard]] bool HasCurrentCamera() const { return frame_has_camera && current.valid; }
+    [[nodiscard]] bool HasFrameCamera() const { return frame_has_camera; }
+    // Measured from this frame's geometry, independent of temporal history.
+    [[nodiscard]] float FrameAspect() const { return frame_has_camera ? frame_aspect : 0.f; }
     /// The render size in the scene constants (the game's viewport; its targets may be
     /// allocated larger, e.g. 1916x1080 for a 1916x1078 scene), or zero before the first camera.
     [[nodiscard]] std::array<u32, 2> RenderSize() const noexcept {
@@ -116,6 +119,7 @@ private:
     Camera current, previous;
     SceneCameraHistory<Camera, VideoCore::ImageId> pass_camera;
     bool frame_has_camera = false;
+    float frame_aspect = 0;
     std::array<float, 3> pending_depth_transform{};
     std::array<float, 2> jitter{}, previous_jitter{};
     std::array<u32, 2> render_size{};

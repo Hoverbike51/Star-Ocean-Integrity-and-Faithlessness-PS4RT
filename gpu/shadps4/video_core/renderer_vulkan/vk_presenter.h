@@ -39,6 +39,8 @@ struct Frame {
     u64 ready_tick;
     bool is_hdr{false};
     bool title_screen{false};
+    unsigned reconstruction_state{0}; ///< Successful provider/preset for this queued frame.
+    bool original_aspect{false};
     u8 id{};
     vk::Format format{}; ///< ps4rt: of `image` (screenshots)
 };
@@ -107,7 +109,7 @@ public:
     Frame* PrepareLastFrame();
 
 private:
-    Frame* GetRenderFrame();
+    Frame* GetRenderFrame(bool original_aspect=false);
 
     void RecreateFrame(Frame* frame, u32 width, u32 height);
 

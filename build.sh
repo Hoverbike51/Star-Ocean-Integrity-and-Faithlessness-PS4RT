@@ -78,18 +78,19 @@ MINGW*|MSYS*)
     mkdir -p out/bootstrap
     cp 'out/gpu/bootstrap/Star Ocean 5 Launcher.exe' 'out/bootstrap/Star Ocean 5 Launcher.exe'
     # Keep both development executables directly runnable outside an MSYS2 shell.
-    (ldd 'out/Star Ocean 5.exe'; ldd 'out/Star Ocean 5 Launcher.exe'; ldd out/PkgExtractor.exe) |
-    awk '/\/clang64\/bin\// {print $3}' | sort -u |
-    while IFS= read -r dll; do
-        [[ -n $dll ]] && cp -u "$dll" out/
-    done
+    bash packaging/windows/copy_dlls.sh out 'out/Star Ocean 5.exe' 'out/Star Ocean 5 Launcher.exe' out/PkgExtractor.exe
     if [[ ${1:-} == --test ]]; then
-        ninja -C out/gpu -j "${PS4RT_BUILD_JOBS:-4}" display-sample-gpu-test \
-            transition-snapshot-gpu-test scene-targets-gpu-test cpu-image-writeback-test color-export-test \
-            image-subresource-test gpu-workarounds-test camera-layout-test \
-            scene-camera-history-test menu-input-test pad-input-test menu-sounds-test graphics-settings-test \
-            ahsl-cache-test shader-capture-test launcher-updater-test savedata-backups-test native-pkg-test \
-            log-console-test window-presentation-test upscaler-support-test save-backup-guard-test cockpit-test
+        ninja -C out/gpu -j "${PS4RT_BUILD_JOBS:-4}" \
+            hud-live-test hud-projection-test ultrawide-test upscaler-support-test \
+            window-presentation-test native-pkg-test trophy-file-test savedata-backups-test \
+            save-backup-guard-test launcher-updater-test display-sample-gpu-test fsr4-rcas-gpu-test \
+            dlss-validation-test dlss-device-gate-test transition-snapshot-gpu-test cpu-image-writeback-test \
+            color-export-test image-subresource-test gpu-workarounds-test camera-layout-test \
+            camera-probe-test camera-comfort-test native-tweaks-test exploration-leader-test \
+            scene-camera-history-test menu-input-test pad-input-test menu-sounds-test \
+            graphics-settings-test memory-budget-test cockpit-test ahsl-cache-test \
+            shader-capture-test scene-targets-gpu-test log-console-test fiber-test \
+            half-precision-test native-cheats-test game-languages-test fast-forward-test
         ctest --test-dir out/gpu --output-on-failure
         python -m unittest discover -s tests -p 'test_*.py' -v
     fi

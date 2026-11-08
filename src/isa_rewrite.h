@@ -36,6 +36,7 @@ IsaReport isa_rewrite_apply(IsaTable *t, unsigned char *image, unsigned char *st
  * 0 otherwise, with regs and *next_rip untouched. */
 int isa_rewrite_trap(IsaTable *t, uintptr_t address, IsaRegs *regs, uintptr_t *next_rip);
 /* Site index whose stub holds rip, or -1. */
+int isa_rewrite_overlaps(const IsaTable *t, uint64_t offset, uint64_t size, uint64_t *site_offset);
 int isa_rewrite_site_of_stub(const IsaTable *t, uintptr_t rip);
 /* "ISA: most executed sites:" then up to 10 lines "  0x<offset> <mnemonic> <hits>" (hits > 0 only),
  * descending hits, ties by ascending offset. */

@@ -2,6 +2,13 @@
 #include <SDL3/SDL.h>
 #include <assert.h>
 static bool french_layout;
+static bool isolate_gamepads;
+static SDL_JoystickID visible_gamepad;
+static SDL_JoystickID *test_gamepads(int *count) {
+    if(!isolate_gamepads)return SDL_GetGamepads(count);
+    SDL_JoystickID *ids=SDL_calloc(2,sizeof(*ids));assert(ids);
+    *count=visible_gamepad?1:0;ids[0]=visible_gamepad;return ids;
+}
 static SDL_Scancode test_scancode_from_key(SDL_Keycode key, SDL_Keymod *mods) {
     (void)mods;
     if (french_layout) {
@@ -17,10 +24,15 @@ static SDL_Scancode test_scancode_from_key(SDL_Keycode key, SDL_Keymod *mods) {
     return SDL_GetScancodeFromName(SDL_GetKeyName(key));
 }
 #define SDL_GetScancodeFromKey test_scancode_from_key
+#define SDL_GetGamepads test_gamepads
 #include "../src/runtime_pad.c"
 #undef SDL_GetScancodeFromKey
+#undef SDL_GetGamepads
 
-int ps4rtgpu_overlay_captures_input(void) { return 0; }
+static bool overlay_capture;
+int ps4rtgpu_overlay_captures_input(void) { return overlay_capture; }
+static uint32_t observed_leader_buttons;
+void ps4rtgpu_leader_input(uint32_t buttons,int captured) { observed_leader_buttons=captured?0:buttons; }
 static int vibration_strength=100;
 int ps4rtgpu_vibration_percent(void) { return vibration_strength; }
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {
@@ -85,6 +97,44 @@ static void vibration_test(void) {
     assert(pad_close(PAD_HANDLE)==0);
     puts("Controller vibration: PS4 export, SDL motors, intensity, stop and failure diagnostics PASS");
 }
+int ps4rtgpu_fast_forward_combo(void){return 0;}
+static void hotplug_test(void) {
+    isolate_gamepads=true;visible_gamepad=0;keyboard_only=false;sdl_ready=1;next_gamepad_discovery=0;
+    assert(current_gamepad()==NULL);
+    SDL_VirtualJoystickDesc desc;SDL_INIT_INTERFACE(&desc);
+    desc.type=SDL_JOYSTICK_TYPE_GAMEPAD;desc.naxes=6;desc.nbuttons=15;desc.name="SO5 hot-plug test";
+    SDL_JoystickID id=SDL_AttachVirtualJoystick(&desc);assert(id);visible_gamepad=id;
+    runtime_pad_devices_changed();
+    PadData d;sample_host(&d);assert(gamepad&&SDL_GetGamepadID(gamepad)==id);
+    SDL_Joystick *joystick=SDL_GetGamepadJoystick(gamepad);
+    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_EAST,true));
+    SDL_UpdateJoysticks();SDL_UpdateGamepads();sample_host(&d);
+    assert(d.buttons&BTN_CIRCLE);
+    bool keys[SDL_SCANCODE_COUNT]={0};keys[SDL_SCANCODE_LEFTBRACKET]=true;
+    sample_keyboard(&d,keys);assert((d.buttons&(BTN_CIRCLE|BTN_TRIANGLE))==(BTN_CIRCLE|BTN_TRIANGLE));
+    assert(SDL_DetachVirtualJoystick(id));visible_gamepad=0;SDL_UpdateJoysticks();SDL_UpdateGamepads();runtime_pad_devices_changed();
+    sample_host(&d);assert(gamepad==NULL&&d.buttons==0&&d.left_x==128&&d.right_x==128);
+    sample_keyboard(&d,keys);assert(d.buttons&BTN_TRIANGLE);
+    id=SDL_AttachVirtualJoystick(&desc);assert(id);visible_gamepad=id;runtime_pad_devices_changed();
+    sample_host(&d);assert(gamepad&&SDL_GetGamepadID(gamepad)==id);
+    joystick=SDL_GetGamepadJoystick(gamepad);assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,true));
+    SDL_UpdateJoysticks();SDL_UpdateGamepads();sample_host(&d);assert(d.buttons&BTN_CROSS);
+    // The leader observer receives remapped PS4 directions, not raw SDL
+    // indices; game/menu input is unchanged and held menu presses are hidden.
+    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,false));
+    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_DPAD_RIGHT,true));
+    SDL_UpdateJoysticks();SDL_UpdateGamepads();sample(&d);
+    assert(d.buttons==BTN_RIGHT && observed_leader_buttons==BTN_RIGHT);
+    overlay_capture=true;sample(&d);assert(observed_leader_buttons==0);
+    overlay_capture=false;sample(&d);assert(d.buttons==0 && observed_leader_buttons==0);
+    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_DPAD_RIGHT,false));
+    SDL_UpdateJoysticks();SDL_UpdateGamepads();sample(&d);assert(!hold_after_capture);
+    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_DPAD_LEFT,true));
+    SDL_UpdateJoysticks();SDL_UpdateGamepads();sample(&d);
+    assert(d.buttons==BTN_LEFT && observed_leader_buttons==BTN_LEFT);
+    SDL_CloseGamepad(gamepad);gamepad=NULL;assert(SDL_DetachVirtualJoystick(id));visible_gamepad=0;isolate_gamepads=false;
+    puts("Controller hot-plug: late connection, input, unplug, keyboard fallback and reconnect PASS");
+}
 int main(void) {
     assert(SDL_Init(0));
     environment("PS4RT_KEY_PROFILE","azerty");
@@ -144,6 +194,7 @@ int main(void) {
     key_axis(&merged,true,false); assert(merged==0);
     key_axis(&merged,false,true); assert(merged==255);
     vibration_test();
+    hotplug_test();
     SDL_Quit();
     puts("Pad input: AZERTY/QWERTY, custom overrides, layout refresh, keyboard-only and stick dead zone PASS");
 }

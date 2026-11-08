@@ -6,6 +6,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include "runtime.h"
+#include "runtime_cheats.h"
 #include "cpu_check.h"
 #include "isa_rewrite.h"
 #include "gpu/ps4rtgpu.h"
@@ -130,6 +131,9 @@ static void isa_context_regs(CONTEXT *c, IsaRegs *regs, int to_context) {
 static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     DWORD code=record->ExceptionCode;
+    if (code==EXCEPTION_BREAKPOINT && runtime_cheat_trap((uintptr_t)record->ExceptionAddress)) {
+        info->ContextRecord->Rip=(DWORD64)record->ExceptionAddress; return EXCEPTION_CONTINUE_EXECUTION;
+    }
     if (code==EXCEPTION_BREAKPOINT && isa_table) {
         /* An int3 ISA site: emulated here; any other breakpoint goes on to the report below. */
         IsaRegs regs;
@@ -313,12 +317,14 @@ int main(int argc, char **argv) {
     runtime_thread_tcb_offset();
     int cpu_only = 0, strict_imports = 0, check_imports = 0;
     unsigned timeout_seconds = 10;
+    const char *cheat_file=NULL;
     const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL, *isa_file=NULL;
     const char *mounts[8]; int mount_count=0;
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--cpu-only")) cpu_only = 1;
         else if (!strcmp(argv[i], "--strict-imports")) strict_imports = 1;
         else if (!strcmp(argv[i], "--check-imports")) check_imports = 1;
+        else if (!strcmp(argv[i], "--cheats") && i+1<argc) cheat_file=argv[++i];
         else if (!strcmp(argv[i], "--content-profile") && i+1<argc) content_profile=argv[++i];
         else if (!strcmp(argv[i], "--app0") && i+1<argc) app0=argv[++i];
         else if (!strcmp(argv[i], "--user") && i+1<argc) user_dir=argv[++i];
@@ -397,7 +403,7 @@ int main(int argc, char **argv) {
     }
     (void)timeout_seconds; /* no watchdog on Windows */
     FILE *f = fopen(argv[1], "rb");
-    if (!f) fail("cannot open boot file; run prepare.py first");
+    if (!f) fail("cannot open boot file; prepare the game with Star Ocean 5 Launcher first");
     char magic[8];
     if (fread(magic, 1, 8, f) != 8 || (memcmp(magic, "PS4RTB01", 8) && memcmp(magic, "PS4RTB02", 8) && memcmp(magic,"PS4RTB03",8) && memcmp(magic,"PS4RTB04",8) && memcmp(magic,"PS4RTB05",8))) fail("bad boot file signature");
     uint64_t size = read64(f), entry = read64(f), ns = read64(f), nr = read64(f);
@@ -501,21 +507,28 @@ int main(int argc, char **argv) {
     image = allocate(round_page(size) + stub_area);
     unsigned char *stubs = image + round_page(size);
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
+    if(cheat_file) {
+        CheatRange data[64];size_t count=0;
+        for(uint64_t i=0;i<ns&&count<64;++i)if((segments[i].flags&3)==2)data[count++]=(CheatRange){segments[i].address,segments[i].address+segments[i].size};
+        runtime_cheats_bind_image(image,size,data,count);
+    }
+
     fclose(f);
     if (isa_table && isa_table_matches(isa_table, image, size)) {
         printf("STOP: this CPU lacks %s and no rewrite table matches the image\n", missing);
         return 20;
     }
     if (!cpu_only) {
-        char title[128]="PS4RT", serial[16]="UNKNOWN", sfo[4096];
+        char title[128]="PS4RT", serial[16]="UNKNOWN", version[16]="", sfo[4096];
         uint32_t attributes=0;
         snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
         sfo_value(sfo,"TITLE",title,sizeof(title),NULL);
         sfo_value(sfo,"TITLE_ID",serial,sizeof(serial),NULL);
+        sfo_value(sfo,"APP_VER",version,sizeof(version),NULL);
         sfo_value(sfo,"ATTRIBUTE",NULL,0,&attributes);
         uint64_t sdk=0;
         if (procparam) memcpy(&sdk,image+procparam+16,8); /* procparam: size, magic, count, sdk_version */
-        Ps4RtGpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080};
+        Ps4RtGpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080,image,size,version};
         gpu_enabled=1; /* page tracking starts while the rasterizer registers guest memory */
         if (ps4rtgpu_init(&gpu)) fail("GPU initialization failed");
         printf("GPU: window and Vulkan presenter ready; SDK 0x%08x, %u HLE symbols\n",(unsigned)sdk,ps4rtgpu_symbol_count());
@@ -590,6 +603,12 @@ int main(int argc, char **argv) {
             executable_entry = 1;
     }
     if (!executable_entry) fail("entry is not executable");
+    if(cheat_file&&!patch_file) {
+        CheatRange exec[64];size_t count=0;
+        for(uint64_t i=0;i<ns&&count<64;++i)if(segments[i].flags&1)exec[count++]=(CheatRange){segments[i].address,segments[i].address+round_page(segments[i].size)};
+        runtime_cheats_load(cheat_file,image,exec,count,NULL);
+    }else if(cheat_file)puts("Cheats: refused while developer --patches is active");
+
     printf("Mapped %" PRIu64 " bytes, %" PRIu64 " segments; applied %" PRIu64 " relocations\n", size, ns, nr);
     if (native_libc) {
         for (uint64_t m=0;m<module_count;++m) {

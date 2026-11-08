@@ -308,7 +308,7 @@ void FoldMul(IR::Block& block, IR::Inst& inst) {
     }
 }
 
-void ConstantPropagation(IR::Block& block, IR::Inst& inst) {
+void ConstantPropagation(IR::Block& block, IR::Inst& inst, bool keep_half_packs) {
     switch (inst.GetOpcode()) {
     case IR::Opcode::IAdd32:
         return FoldAdd<u32>(block, inst);
@@ -374,8 +374,15 @@ void ConstantPropagation(IR::Block& block, IR::Inst& inst) {
     case IR::Opcode::UnpackSint2x16:
         return FoldInverseFunc(inst, IR::Opcode::PackSint2x16);
     case IR::Opcode::PackHalf2x16:
+        if (keep_half_packs) {
+            return;
+        }
         return FoldInverseFunc(inst, IR::Opcode::UnpackHalf2x16);
     case IR::Opcode::UnpackHalf2x16:
+        // ps4rt: FpLegacyHalfSaturate keeps a compressed export's f16 round trip, as on GCN.
+        if (keep_half_packs) {
+            return;
+        }
         return FoldInverseFunc(inst, IR::Opcode::PackHalf2x16);
     // 4x8
     case IR::Opcode::PackUnorm4x8:
@@ -602,12 +609,12 @@ void ConstantPropagation(IR::Block& block, IR::Inst& inst) {
     }
 }
 
-void ConstantPropagationPass(IR::BlockList& program) {
+void ConstantPropagationPass(IR::BlockList& program, bool keep_half_packs) {
     const auto end{program.rend()};
     for (auto it = program.rbegin(); it != end; ++it) {
         IR::Block* const block{*it};
         for (IR::Inst& inst : block->Instructions()) {
-            ConstantPropagation(*block, inst);
+            ConstantPropagation(*block, inst, keep_half_packs);
         }
     }
 }

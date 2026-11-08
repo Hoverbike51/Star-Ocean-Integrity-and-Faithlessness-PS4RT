@@ -1,3 +1,5 @@
+#include "gpu/ps4rtgpu.h"
+#include <stdatomic.h>
 /* libkernel/libScePosix process services: clocks, sleeping, errno mapping,
  * pthread once/keys, signal bookkeeping and a narrow sysctl. Guest values
  * use FreeBSD numbering; host errno values never reach the guest directly. */
@@ -50,11 +52,15 @@ static int host_clock(uint32_t id,clockid_t *out) {
     default: return 0;
     }
 }
+static uint64_t guest_elapsed_ns(void);
 static int clock_read(uint32_t id,GuestTimespec *ts) {
     clockid_t host;
     if (!ts || !host_clock(id,&host)) return EINVAL;
     struct timespec t;
-    if (clock_gettime(host,&t)) return errno;
+    if (host==CLOCK_MONOTONIC) {
+        uint64_t ns=(uint64_t)process_start.tv_sec*1000000000+(uint64_t)process_start.tv_nsec+guest_elapsed_ns();
+        t.tv_sec=(time_t)(ns/1000000000);t.tv_nsec=(long)(ns%1000000000);
+    }else if (clock_gettime(host,&t)) return errno;
     if (id==13) t.tv_nsec=0;
     ts->sec=t.tv_sec; ts->nsec=t.tv_nsec; return 0;
 }
@@ -71,14 +77,44 @@ static ABI int32_t posix_clock_getres(uint32_t id,GuestTimespec *ts) {
     if (ts) { ts->sec=t.tv_sec; ts->nsec=t.tv_nsec; }
     return 0;
 }
-static ABI uint64_t process_time(void) {
+static _Atomic uint32_t warp_seq;
+static _Atomic uint64_t warp_host, warp_guest;
+static _Atomic uint32_t warp_factor=1;
+static pthread_mutex_t warp_lock=PTHREAD_MUTEX_INITIALIZER;
+static uint64_t host_elapsed_ns(void) {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
-    return (uint64_t)(t.tv_sec-process_start.tv_sec)*1000000+(uint64_t)((t.tv_nsec-process_start.tv_nsec)/1000);
+    return (uint64_t)((int64_t)(t.tv_sec-process_start.tv_sec)*1000000000+(t.tv_nsec-process_start.tv_nsec));
 }
-static ABI uint64_t process_time_counter(void) {
-    struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
-    return (uint64_t)(t.tv_sec-process_start.tv_sec)*1000000000+(uint64_t)(t.tv_nsec-process_start.tv_nsec);
+static uint64_t warp(uint64_t host,uint64_t base_host,uint64_t base_guest,uint32_t factor) {
+    return base_guest+(host>base_host ? host-base_host : 0)*factor;
 }
+static uint64_t guest_elapsed_ns(void) {
+
+    const uint32_t want=ps4rtgpu_speed();
+    if (want!=atomic_load_explicit(&warp_factor,memory_order_relaxed)) {
+        pthread_mutex_lock(&warp_lock);
+        const uint32_t old=atomic_load_explicit(&warp_factor,memory_order_relaxed);
+        if (want!=old) {
+            const uint64_t now=host_elapsed_ns();
+            const uint64_t guest=warp(now,atomic_load(&warp_host),atomic_load(&warp_guest),old);
+            atomic_fetch_add(&warp_seq,1);
+            atomic_store(&warp_host,now); atomic_store(&warp_guest,guest);
+            atomic_store(&warp_factor,want);
+            atomic_fetch_add(&warp_seq,1);
+        }
+        pthread_mutex_unlock(&warp_lock);
+    }
+    for (;;) {
+        const uint32_t seq=atomic_load(&warp_seq);
+        if (seq&1) continue;
+        const uint64_t base_host=atomic_load(&warp_host), base_guest=atomic_load(&warp_guest);
+        const uint32_t factor=atomic_load(&warp_factor);
+        const uint64_t host=host_elapsed_ns();
+        if (atomic_load(&warp_seq)==seq) return warp(host,base_host,base_guest,factor);
+    }
+}
+static ABI uint64_t process_time(void) { return guest_elapsed_ns()/1000; }
+static ABI uint64_t process_time_counter(void) { return guest_elapsed_ns(); }
 static ABI uint64_t process_time_frequency(void) { return 1000000000; }
 /* The guest's TSC is the process clock in nanoseconds. The raw rdtsc differs per core on some
  * hosts (3.9 s apart on a Xeon E5-2680 v4, #42), so a thread moving cores made the game jump. */
@@ -90,7 +126,8 @@ uint64_t runtime_process_time_counter(void) { return process_time_counter(); }
 uint64_t runtime_tsc_frequency(void) { return tsc_frequency(); }
 uint64_t runtime_read_tsc(void) { return read_tsc(); }
 static int sleep_ns(uint64_t ns) {
-    compat_sleep_ns(ns);
+    const uint32_t speed=ps4rtgpu_speed();
+    compat_sleep_ns(speed>1?ns/speed:ns);
     return 0;
 }
 static ABI int32_t kernel_usleep(uint32_t usec) { sleep_ns((uint64_t)usec*1000); return 0; }

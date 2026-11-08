@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unittest
 EXE = Path(os.environ.get(
-    'PS4RT_EXECUTABLE', ROOT / ('out/ps4rt' + ('.exe' if sys.platform == 'win32' else ''))))
+    'PS4RT_EXECUTABLE', ROOT / 'out' / 'Star Ocean 5.exe'))
 
 def package(code, relocs=(), names=(), capabilities=None):
     image = code.ljust(4096, b'\x00')
@@ -127,6 +127,26 @@ class LoaderTests(unittest.TestCase):
         ok = self.run_image(package(code, [(32, 1, 0, 0)], ['bzQExy189ZI#libc'], 1), '--check-imports')
         self.assertEqual(ok.returncode, 0, ok.stderr)
         self.assertIn('Imports: 0 missing', ok.stdout)
+
+    def test_recording_metadata_returns_to_the_game_before_credits(self):
+        # Call the real import using the guest System V ABI, then continue to a
+        # named sentinel. The stub must not dereference the deliberately invalid
+        # metadata pointer, start a recorder, or swallow unrelated missing APIs.
+        code = (b'\x48\x83\xec\x08' + b'\xbf\x01\x00\x00\x00' +
+                b'\x48\xc7\xc6\x01\x00\x00\x00' +
+                b'\xff\x15\x12\x00\x00\x00' + b'\x48\x83\xc4\x08' +
+                b'\x85\xc0\x75\x06' + b'\xff\x25\x0c\x00\x00\x00' + b'\x0f\x0b')
+        data = package(code, [(40, 1, 0, 0), (48, 1, 1, 0)],
+                       ['Fc8qxlKINYQ#libSceVideoRecording', 'credits-continued'], 1)
+        result = self.run_image(data)
+        self.assertEqual(result.returncode, 20, result.stdout + result.stderr)
+        self.assertIn('video recording metadata acknowledged', result.stdout)
+        self.assertIn('first unsupported PS4 import: credits-continued', result.stdout)
+        self.assertNotIn('first unsupported PS4 import: Fc8qxlKINYQ', result.stdout)
+        wrong_library = self.run_image(package(b'\x0f\x0b', [(40, 1, 0, 0)],
+                                              ['Fc8qxlKINYQ#libSceFixture'], 1), '--check-imports')
+        self.assertEqual(wrong_library.returncode, 1, wrong_library.stderr)
+        self.assertIn('MISSING: Fc8qxlKINYQ#libSceFixture', wrong_library.stdout)
 
     def test_unverified_runtime_stays_disabled(self):
         r = self.run_image(package(b'\xff%\x02\x00\x00\x00\x90\x90', [(8, 1, 0, 0)], ['bzQExy189ZI#libc'], 0))

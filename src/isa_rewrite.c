@@ -307,6 +307,21 @@ int isa_rewrite_trap(IsaTable *t, uintptr_t address, IsaRegs *regs, uintptr_t *n
     return 1;
 }
 
+int isa_rewrite_overlaps(const IsaTable *t, uint64_t offset, uint64_t size, uint64_t *site_offset) {
+    if (!t || !t->image) return 0;
+    for (uint32_t i = 0; i < t->count; i++) {
+        const IsaSite *s = &t->sites[i];
+        uint64_t end = s->offset + (s->mode == ISA_MODE_JMP_RELOCATE ? 4u + s->relocated_length : s->length);
+        if (s->offset >= offset + size || end <= offset) continue;
+        if (memcmp(t->image + s->offset, s->original, s->length) != 0) {
+            *site_offset = s->offset;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+
 int isa_rewrite_site_of_stub(const IsaTable *t, uintptr_t rip) {
     if (!t || !t->stubs || rip < (uintptr_t)t->stubs) return -1;
     uintptr_t at = rip - (uintptr_t)t->stubs;

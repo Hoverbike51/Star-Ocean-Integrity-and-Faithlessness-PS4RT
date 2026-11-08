@@ -28,6 +28,7 @@
 #include "ps4rt_overlay.h"
 #include "ps4rt_gpu_workarounds.h"
 #include "ps4rt_shader_capture.h"
+#include "ps4rt_hud_runtime.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
@@ -41,7 +42,7 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 9u; // ps4rt: preserve single-channel export sources
+static constexpr u32 ShaderBinaryVersion = 11u; // preserve half precision and GCN legacy arithmetic
 static constexpr u32 ShaderMetaVersion = 9u; // ps4rt: refreshed color export specialization
 static constexpr u32 PipelineKeyVersion = 7u; // ps4rt: corrected color write-mask direction
 } // namespace Serialization
@@ -51,13 +52,14 @@ namespace Vulkan {
 namespace {
 // PS4RT_AMD_PATHS_OFF=shaderext, CUSA03219 WQM helper experiment) get their own
 // shader binary cache version. No cache deletion is needed for A/B comparisons.
-u32 CurrentShaderBinaryVersion() {
+u32 CurrentShaderBinaryVersion(u64 program=0) {
     return RenderOptions::ShaderBinaryVersion(
-        Serialization::ShaderBinaryVersion,
+        Serialization::ShaderBinaryVersion + (Ps4RtHud::VertexProgram(program)?1u:0u),
         RenderOptions::ShaderBinarySalt(RenderOptions::Current().dref,
                                        AmdPathsOff::Current().shaderext) |
             (Ps4RtGpuWorkarounds::Current().preserve_wqm_helpers ? 4u : 0u) |
-            (Ps4RtGpuWorkarounds::Current().fixed_grass_view_lighting ? 8u : 0u));
+            (Ps4RtGpuWorkarounds::Current().fixed_grass_view_lighting ? 8u : 0u) |
+            ((Ps4RtGpuWorkarounds::Current().fp_legacy & 31u) << 4));
 }
 
 std::filesystem::path OneTimeWarmUpMarkerPath() {
@@ -651,7 +653,7 @@ void RegisterShaderMeta(const Shader::Info& info,
     Serialization::Writer meta{ar};
 
     meta.Write(Serialization::ShaderMetaVersion);
-    meta.Write(CurrentShaderBinaryVersion());
+    meta.Write(CurrentShaderBinaryVersion(info.pgm_hash));
 
     meta.Write(perm_hash);
     meta.Write(perm_idx);
@@ -676,7 +678,7 @@ void RegisterShaderCapture(const Shader::Info& info, const Shader::StageSpeciali
     Serialization::Archive metadata_archive;
     Serialization::Writer metadata{metadata_archive};
     metadata.Write(Serialization::ShaderMetaVersion);
-    metadata.Write(CurrentShaderBinaryVersion());
+    metadata.Write(CurrentShaderBinaryVersion(info.pgm_hash));
     metadata.Write(perm_hash);
     metadata.Write(perm_idx);
     spec.Serialize(metadata_archive);
@@ -734,9 +736,7 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
 
     u32 binary_version{};
     meta.Read(binary_version);
-    if (binary_version != CurrentShaderBinaryVersion()) {
-        return false;
-    }
+    if(binary_version!=CurrentShaderBinaryVersion()&&binary_version!=CurrentShaderBinaryVersion(0xc87f248e))return false;
 
     u64 perm_hash_ar{};
     meta.Read(perm_hash_ar);
@@ -744,6 +744,9 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
 
     spec.Deserialize(ar);
     info.Deserialize(ar);
+    // Only the four GUI vertex programs need the new projection epilogue.
+    // Keep the scene shader cache and retained capture sources intact.
+    if(binary_version!=CurrentShaderBinaryVersion(info.pgm_hash))return false;
 
     // Motion vertex shaders embed session-local buffer device addresses. They must be
     // recompiled for the current allocation, never loaded from a previous process.

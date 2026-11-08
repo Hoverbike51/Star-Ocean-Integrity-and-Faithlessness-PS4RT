@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ps4rt_settings.h"
 #include "ps4rt_graphics.h"
+#include "ps4rt_camera_comfort.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -10,6 +11,7 @@
 #include <string_view>
 #include <mutex>
 #include "ps4rt_scene_preset.h"
+#include "ps4rt_ultrawide.h"
 
 namespace Ps4RtSettings {
 
@@ -37,12 +39,14 @@ void Set(Values& v, const std::string& key, const std::string& value) {
             return;
         }
     }
+    if (key == "overlay_gpu_model") { v.overlay_gpu_model = i != 0; return; }
+    if (key == "overlay_cpu_model") { v.overlay_cpu_model = i != 0; return; }
     if (key == "overlay_scale") {
         v.overlay_scale = std::clamp(i, 50, 300);
         return;
     }
     if (key == "overlay_corner") {
-        v.overlay_corner = i >= 0 && i <= 3 ? i : 1;
+        v.overlay_corner = i >= 0 && i <= 5 ? i : 1;
         return;
     }
     if (key == "overlay_opacity") {
@@ -54,7 +58,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         return;
     }
     if (key == "menu_tab") {
-        v.menu_tab = i >= 0 && i <= 4 ? i : 0;
+        v.menu_tab = i >= 0 && i <= 6 ? i : 0;
         return;
     }
     if (key == "upscaler") {
@@ -65,6 +69,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         }
     } else if(key=="scene_preset") {
         v.scene_preset=std::clamp(i,-1,PresetCount-1);
+    } else if(key=="native_render_height") {
+        v.native_render_height=Ps4RtScene::NativeHeight(i);
     } else if (key == "preset") {
         v.preset = std::clamp(i, 0, PresetCount - 1);
     } else if (key == "sharpen") {
@@ -119,6 +125,12 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.anisotropy = Ps4RtGraphics::ParseAnisotropy(i);
     } else if (key == "vibration") {
         v.vibration = value.empty() ? 100 : std::clamp(i, 0, 100);
+    } else if (key == "camera_follow") {
+        v.camera_follow = i>=0 && i<Ps4RtCameraComfort::Count ? i : 0;
+    } else if (key == "exploration_leader") {
+        v.exploration_leader = i>=-1 && i<=5 ? i : -1;
+    } else if (key == "exploration_leader_enabled") {
+        v.exploration_leader_enabled = i != 0;
     } else if (key == "restart_unconfirmed") {
         v.restart_unconfirmed = i != 0;
     } else if (key == "fsr4_auto_exposure") {
@@ -151,6 +163,11 @@ void Load() {
     v.native_scene = true;
     v.temporal_problem = nullptr;
     v.scene_preset = -1;
+    v.native_render_height = 1080;
+    v.overlay_gpu_model = true;
+    v.overlay_cpu_model = false;
+    v.exploration_leader = -1;
+    v.exploration_leader_enabled = true;
     if (v.native_scene) {
         v.upscaler = UpscalerOff;
         v.output_res = OutputDefault;
@@ -238,11 +255,12 @@ void SetSceneUpscaler(int selected, bool object_motion) {
     // Scaled presets provide a real input no larger than the selected output.
     if (v.native_scene && !Ps4RtOutput::TemporalAllowed(v.output_res)) selected = UpscalerOff;
     if (selected != UpscalerOff && selected != UpscalerFsr3 &&
-        selected != UpscalerFsr4 && selected != UpscalerFsr411) selected = UpscalerOff;
+        selected != UpscalerFsr4 && selected != UpscalerFsr411 && selected != UpscalerDlss) selected = UpscalerOff;
     if(selected==UpscalerFsr3 && v.fsr3_configured && !v.fsr3_available) selected=UpscalerOff;
+    if(selected==UpscalerDlss && v.dlss_configured && !v.dlss_supported) selected=UpscalerOff;
     const bool temporal = selected != UpscalerOff;
     if(temporal && v.native_scene) {
-        const auto output=Ps4RtOutput::Content(v.output_res);
+        const auto output=Ps4RtUltrawide::Content(v.output_res);
         v.scene_preset=Ps4RtScene::ForOutput(v.scene_preset,output.width,output.height);
     }
     v.jitter = temporal;
@@ -278,6 +296,7 @@ void ConfigureUpscalerSupport(bool fsr4, bool fsr411) {
 void ConfigureDlssSupport(bool available, const char* problem) {
     auto& v = Get();
     v.dlss_supported = available;
+    v.dlss_configured = true;
     static std::string kept;
     kept = problem ? problem : "";
     v.dlss_problem = available || kept.empty() ? nullptr : kept.c_str();
@@ -317,6 +336,7 @@ void Save() {
         return;
     }
     std::fprintf(file,"scene_preset=%d\n",v.scene_preset.load());
+    std::fprintf(file,"native_render_height=%d\n",v.native_render_height.load());
     std::fprintf(file,
                  "# ps4rt settings (in-game menu: Insert / R3+L2)\n"
                  "upscaler=%s\npreset=%d\nsharpen=%d\nsharpness=%.2f\njitter=%d\n"
@@ -338,6 +358,8 @@ void Save() {
                  int(v.overlay_items >> 3 & 1), int(v.overlay_items >> 4 & 1), int(v.overlay_items >> 5 & 1),
                  int(v.overlay_items >> 6 & 1), v.overlay_scale.load(), v.overlay_corner.load(),
                  v.overlay_opacity.load(), v.overlay_layout.load(), v.menu_tab.load(), int(v.overlay_items >> 7 & 1));
+    std::fprintf(file, "overlay_gpu_model=%d\noverlay_cpu_model=%d\n",
+                 int(v.overlay_gpu_model.load()), int(v.overlay_cpu_model.load()));
     std::fprintf(file,
                  "display_mode=%s\nvsync=%d\nfps_limit=%d\nasync_shaders=%d\n"
                  "fsr1=%d\nrcas=%d\nrcas_strength=%d\nframes_queued=%d\n"
@@ -352,6 +374,9 @@ void Save() {
                  int(v.restart_unconfirmed.load()));
     std::fprintf(file, "anisotropy=%d\nvibration=%d\nwindow_stretch=%d\n",
                  v.anisotropy.load(), v.vibration.load(), int(v.window_stretch.load()));
+    std::fprintf(file, "camera_follow=%d\n",v.camera_follow.load());
+    std::fprintf(file, "exploration_leader=%d\n",v.exploration_leader.load());
+    std::fprintf(file, "exploration_leader_enabled=%d\n",int(v.exploration_leader_enabled.load()));
     std::fprintf(file, "spatial_aa=%d\n", int(v.spatial_aa.load()));
     // Retained for developer startup preparation.
     std::fprintf(file, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"

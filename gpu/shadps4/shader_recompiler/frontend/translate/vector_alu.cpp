@@ -26,7 +26,7 @@ void Translator::EmitVectorAlu(const GcnInst& inst) {
     case Opcode::V_SUBREV_F32:
         return V_SUBREV_F32(inst);
     case Opcode::V_MAC_LEGACY_F32:
-        return V_MAC_F32(inst);
+        return V_MAC_LEGACY_F32(inst);
     case Opcode::V_MUL_LEGACY_F32:
         return V_MUL_LEGACY_F32(inst);
     case Opcode::V_MUL_F32:
@@ -170,7 +170,7 @@ void Translator::EmitVectorAlu(const GcnInst& inst) {
     case Opcode::V_EXP_F32:
         return V_EXP_F32(inst);
     case Opcode::V_LOG_CLAMP_F32:
-        return V_LOG_F32(inst);
+        return V_LOG_CLAMP_F32(inst);
     case Opcode::V_LOG_F32:
         return V_LOG_F32(inst);
     case Opcode::V_RCP_F32:
@@ -182,11 +182,11 @@ void Translator::EmitVectorAlu(const GcnInst& inst) {
     case Opcode::V_RCP_IFLAG_F32:
         return V_RCP_F32(inst);
     case Opcode::V_RCP_CLAMP_F32:
-        return V_RCP_F32(inst);
+        return V_RCP_CLAMP_F32(inst);
     case Opcode::V_RSQ_CLAMP_F32:
-        return V_RSQ_F32(inst);
+        return V_RSQ_CLAMP_F32(inst);
     case Opcode::V_RSQ_LEGACY_F32:
-        return V_RSQ_F32(inst);
+        return V_RSQ_LEGACY_F32(inst);
     case Opcode::V_RSQ_F32:
         return V_RSQ_F32(inst);
     case Opcode::V_SQRT_F32:
@@ -416,7 +416,7 @@ void Translator::EmitVectorAlu(const GcnInst& inst) {
 
         // VOP3a
     case Opcode::V_MAD_LEGACY_F32:
-        return V_MAD_F32(inst);
+        return V_MAD_LEGACY_F32(inst);
     case Opcode::V_MAD_F32:
         return V_MAD_F32(inst);
     case Opcode::V_MAD_I32_I24:
@@ -605,17 +605,43 @@ void Translator::V_MUL_F32(const GcnInst& inst) {
     SetDst(inst.dst[0], ir.FPMul(GetSrc<IR::F32>(inst.src[0]), GetSrc<IR::F32>(inst.src[1])));
 }
 
-void Translator::V_MUL_LEGACY_F32(const GcnInst& inst) {
-    // GCN V_MUL_LEGACY_F32: if either source is zero, the result is +0.0
+IR::F32 Translator::LegacyMul(const IR::F32& src0, const IR::F32& src1) {
+    // GCN legacy multiply: if either source is zero, the result is +0.0
     // regardless of the other operand (even if NaN or Inf).
     // Standard IEEE multiply would produce NaN for 0 * Inf.
-    const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
-    const IR::F32 src1{GetSrc<IR::F32>(inst.src[1])};
     const IR::F32 zero{ir.Imm32(0.0f)};
     const IR::U1 src0_zero{ir.FPEqual(src0, zero)};
     const IR::U1 src1_zero{ir.FPEqual(src1, zero)};
     const IR::U1 either_zero{ir.LogicalOr(src0_zero, src1_zero)};
-    SetDst(inst.dst[0], IR::F32{ir.Select(either_zero, zero, ir.FPMul(src0, src1))});
+    return IR::F32{ir.Select(either_zero, zero, ir.FPMul(src0, src1))};
+}
+
+void Translator::V_MUL_LEGACY_F32(const GcnInst& inst) {
+    const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
+    const IR::F32 src1{GetSrc<IR::F32>(inst.src[1])};
+    SetDst(inst.dst[0], LegacyMul(src0, src1));
+}
+
+// ps4rt: the legacy multiply-adds use the legacy multiply with PS4RT_FP_LEGACY bit 1 (as
+// upstream shadPS4 does); without it, the IEEE multiply (0 * inf = NaN) as before.
+void Translator::V_MAC_LEGACY_F32(const GcnInst& inst) {
+    if (!(profile.fp_legacy & FpLegacyMul)) {
+        return V_MAC_F32(inst);
+    }
+    const auto src0 = GetSrc<IR::F32>(inst.src[0]);
+    const auto src1 = GetSrc<IR::F32>(inst.src[1]);
+    const auto dst0 = GetSrc<IR::F32>(inst.dst[0]);
+    SetDst(inst.dst[0], ir.FPAdd(LegacyMul(src0, src1), dst0));
+}
+
+void Translator::V_MAD_LEGACY_F32(const GcnInst& inst) {
+    if (!(profile.fp_legacy & FpLegacyMul)) {
+        return V_MAD_F32(inst);
+    }
+    const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
+    const IR::F32 src1{GetSrc<IR::F32>(inst.src[1])};
+    const IR::F32 src2{GetSrc<IR::F32>(inst.src[2])};
+    SetDst(inst.dst[0], ir.FPAdd(LegacyMul(src0, src1), src2));
 }
 
 void Translator::V_MUL_I32_I24(const GcnInst& inst, bool is_signed) {
@@ -842,9 +868,30 @@ void Translator::V_CVT_PKNORM_I16_F32(const GcnInst& inst) {
     SetDst(inst.dst[0], ir.Pack2x16(AmdGpu::NumberFormat::Snorm, vec_f32));
 }
 
+// ps4rt: GCN converts to f16 rounding toward zero, so a finite value above the largest half
+// (65504) saturates there. SPIR-V's PackHalf2x16/FConvert round to nearest and give +/-Inf from
+// 65520 up. With FpLegacyHalfSaturate, clamp finite values to +/-65504 first; NaN and Inf pass
+// through unchanged (|NaN| > 65504 is false).
+IR::F32 Translator::HalfSaturate(const IR::F32& value) {
+    if (!(profile.fp_legacy & FpLegacyHalfSaturate)) {
+        return value;
+    }
+    return SaturateFinite(value, 65504.f);
+}
+
+// ps4rt: clamps finite values to +/-max; NaN and Inf pass through (|NaN| > max is false).
+IR::F32 Translator::SaturateFinite(const IR::F32& value, float max) {
+    const IR::F32 limit{ir.Imm32(max)};
+    const IR::U1 overflow{ir.LogicalAnd(ir.FPGreaterThan(IR::F32{ir.FPAbs(value)}, limit),
+                                        ir.LogicalNot(ir.FPIsInf(value)))};
+    const IR::F32 saturated{
+        ir.Select(ir.FPLessThan(value, ir.Imm32(0.f)), ir.Imm32(-max), limit)};
+    return IR::F32{ir.Select(overflow, saturated, value)};
+}
+
 void Translator::V_CVT_PKRTZ_F16_F32(const GcnInst& inst) {
-    const IR::Value vec_f32 =
-        ir.CompositeConstruct(GetSrc<IR::F32>(inst.src[0]), GetSrc<IR::F32>(inst.src[1]));
+    const IR::Value vec_f32 = ir.CompositeConstruct(ir.FPClamp(GetSrc<IR::F32>(inst.src[0]), ir.Imm32(-65504.f), ir.Imm32(65504.f)),
+                                                    ir.FPClamp(GetSrc<IR::F32>(inst.src[1]), ir.Imm32(-65504.f), ir.Imm32(65504.f)));
     SetDst(inst.dst[0], ir.Pack2x16(AmdGpu::NumberFormat::Float, vec_f32));
 }
 
@@ -935,7 +982,7 @@ void Translator::V_CVT_I32_F32(const GcnInst& inst) {
 }
 
 void Translator::V_CVT_F16_F32(const GcnInst& inst) {
-    const IR::F32 src0 = GetSrc<IR::F32>(inst.src[0]);
+    const IR::F32 src0 = HalfSaturate(GetSrc<IR::F32>(inst.src[0]));
 
     IR::U32 src0fp16;
     if (profile.support_float16) {
@@ -1045,12 +1092,59 @@ void Translator::V_RCP_F32(const GcnInst& inst) {
     SetDst(inst.dst[0], ir.FPRecip(src0));
 }
 
+// ps4rt: the clamped and legacy reciprocals never return an infinity on GCN. With
+// PS4RT_FP_LEGACY bit 2 they are clamped as upstream shadPS4 does; without it, as before.
+namespace {
+constexpr float FloatMax = 3.402823466e+38f;
+}
+
+void Translator::V_RCP_CLAMP_F32(const GcnInst& inst) {
+    if (!(profile.fp_legacy & FpLegacyClamp)) {
+        return V_RCP_F32(inst);
+    }
+    const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
+    SetDst(inst.dst[0], IR::F32{ir.FPClamp(ir.FPRecip(src0), ir.Imm32(-FloatMax),
+                                           ir.Imm32(FloatMax))});
+}
+
+void Translator::V_RSQ_CLAMP_F32(const GcnInst& inst) {
+    if (!(profile.fp_legacy & FpLegacyClamp)) {
+        return V_RSQ_F32(inst);
+    }
+    const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
+    SetDst(inst.dst[0], IR::F32{ir.FPClamp(ir.FPRecipSqrt(src0), ir.Imm32(-FloatMax),
+                                           ir.Imm32(FloatMax))});
+}
+
+void Translator::V_RSQ_LEGACY_F32(const GcnInst& inst) {
+    if (!(profile.fp_legacy & FpLegacyClamp)) {
+        return V_RSQ_F32(inst);
+    }
+    const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
+    const IR::F32 zero{ir.Imm32(0.0f)};
+    const IR::F32 clamped{
+        ir.FPClamp(ir.FPRecipSqrt(src0), ir.Imm32(-FloatMax), ir.Imm32(FloatMax))};
+    SetDst(inst.dst[0], IR::F32{ir.Select(ir.FPEqual(src0, zero), zero, clamped)});
+}
+
+void Translator::V_LOG_CLAMP_F32(const GcnInst& inst) {
+    if (!(profile.fp_legacy & FpLegacyClamp)) {
+        return V_LOG_F32(inst);
+    }
+    const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
+    SetDst(inst.dst[0], IR::F32{ir.FPClamp(ir.FPLog2(src0), ir.Imm32(-FloatMax),
+                                           ir.Imm32(FloatMax))});
+}
+
 void Translator::V_RCP_LEGACY_F32(const GcnInst& inst) {
     const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
     const auto result = ir.FPRecip(src0);
     const auto inf = ir.FPIsInf(result);
 
-    const auto raw_result = ir.ConvertFToU(32, result);
+    // ps4rt: the sign of the infinity is its bit pattern's (ConvertFToU converted the value).
+    const auto raw_result = (profile.fp_legacy & FpLegacyClamp)
+                                ? IR::U32{ir.BitCast<IR::U32>(IR::F32{result})}
+                                : IR::U32{ir.ConvertFToU(32, result)};
     const auto sign_bit = ir.ShiftRightLogical(raw_result, ir.Imm32(31u));
     const auto sign_bit_set = ir.INotEqual(sign_bit, ir.Imm32(0u));
     const IR::F32 inf_result{ir.Select(sign_bit_set, ir.Imm32(-0.0f), ir.Imm32(0.0f))};

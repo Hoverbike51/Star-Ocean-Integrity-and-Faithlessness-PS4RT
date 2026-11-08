@@ -81,6 +81,13 @@ inline Target Inspect(HMONITOR monitor) {
     }
     result.fullscreen_modes&=sdl_modes;
     result.window_modes=result.fullscreen_modes;
+    // Client surfaces are not monitor timings. Reserve space for window borders
+    // and the taskbar when offering ultrawide previews on a 16:9 desktop.
+    const int work_width=result.info.rcWork.right-result.info.rcWork.left;
+    const int work_height=result.info.rcWork.bottom-result.info.rcWork.top;
+    const auto fitting=Ps4RtOutput::Fitting(std::max(0,work_width-64),std::max(0,work_height-96));
+    result.window_modes|=Ps4RtOutput::Filter(fitting,Ps4RtOutput::Ratio21_9) |
+                         Ps4RtOutput::Filter(fitting,Ps4RtOutput::Ratio32_9);
     return result;
 }
 inline std::vector<Target> Enumerate() {

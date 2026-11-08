@@ -25,9 +25,10 @@ constexpr Size Unpack(uint32_t packed) {
 // need a resolve after proxy writes; native writes invalidate the cached proxy.
 struct Coherence {
     bool valid = false, dirty = false;
-    void ProxyWrite() { valid = dirty = true; }
-    void CopiedToProxy() { valid = true; dirty = false; }
+    bool raster_written = false; // A native-image fill is not proof of higher-resolution rasterization.
+    void ProxyWrite() { valid = dirty = raster_written = true; }
+    void CopiedToProxy() { valid = true; dirty = raster_written = false; }
     void Resolved() { dirty = false; }
-    void NativeWrite() { valid = dirty = false; }
+    void NativeWrite() { valid = dirty = raster_written = false; }
 };
 } // namespace Vulkan::SceneResolution

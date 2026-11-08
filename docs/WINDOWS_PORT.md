@@ -1,5 +1,11 @@
 # Windows port audit
 
+Current source: **1.0.0 (experimental, unreleased)**. Rendering/input/Tweaks and optional
+DLSS additions are described in the [changelog](../CHANGELOG.md) and current player guides.
+The portability and benchmark inventory below records the earlier Windows integration;
+its dated test observations are not a new validation of this source export. The unresolved
+FSR 4 v07 outdoor/bottom-edge defect remains listed in the current changelog.
+
 ## Code and build
 
 - Runtime and loader: C11, plus x86-64 GNU assembly embedded in C.

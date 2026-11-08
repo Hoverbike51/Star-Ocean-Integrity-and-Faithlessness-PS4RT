@@ -1,3 +1,4 @@
+#include "gpu/ps4rtgpu.h"
 /* libSceAudioOut on SDL3 audio streams. sceAudioOutOutput returns once per
  * buffer period on a steady clock, like PS4 hardware: FMOD's output thread
  * reads 256-frame slots out of its mixer's 512-frame ring, and returning in
@@ -172,6 +173,8 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
     pthread_mutex_lock(&p->lock);
     size_t samples=(size_t)p->frames*(size_t)p->channels, bytes=samples*(size_t)p->sample_bytes;
     uint64_t period=(uint64_t)p->frames*1000000000u/48000u;
+    const uint32_t speed=ps4rtgpu_speed();
+    if(speed>1)period/=speed;
     if (data) {
         /* Apply per-channel volume and map PS4 8ch (L R C LFE SL SR BL BR) to SDL 7.1 order. */
         unsigned char converted[2048*8*4];
@@ -192,7 +195,8 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
             else sleep_until(p->next_deadline_ns);
             p->next_deadline_ns+=period;
         }
-        if (p->stream) {
+        if(speed>1 && p->stream) {SDL_ClearAudioStream(p->stream);p->window_count=0;p->adjust_ns=0;}
+        if (p->stream && speed==1) {
             /* The device drains the queue in quanta (21 ms on PipeWire), so the level
                is a sawtooth: its minimum over ~32 buffers is what gets controlled. */
             int low=2*(int)bytes, queued=SDL_GetAudioStreamQueued(p->stream);

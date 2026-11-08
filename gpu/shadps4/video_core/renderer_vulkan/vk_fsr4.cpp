@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <deque>
 #include <fstream>
+#include <cstring>
 #include <string>
 #include <utility>
 #include <vector>
@@ -16,6 +17,7 @@
 #include "video_core/renderer_vulkan/fsr411/fsr411.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/host_shaders/fsr4_rcas_comp.h"
 
 namespace Vulkan {
 
@@ -136,14 +138,18 @@ struct Fsr4Upscaler::Impl {
             if (ReadFile(dir + name, data)) {
                 return true;
             }
-            Fail("missing " + dir + name + " (run tools/fetch_fsr4_assets.sh)", true);
+            Fail("missing " + dir + name + " (restore the fsr4_shaders folder from the Windows package)", true);
             return false;
         };
         if (!load(assets.pre, code[0])) return false;
         for (u32 pass = 0; pass < FFX_FSR4_MODEL_PASS_COUNT; ++pass) {
             if (!load(assets.model[pass], code[1 + pass])) return false;
         }
-        if (!load(assets.post, code[13]) || !load(assets.rcas, code[14]) ||
+        // Embedded RCAS retains the v07 ABI/math and clamps neighbour reads at
+        // the visible edges. The external blob reads beyond the image there.
+        code[14].resize(sizeof(FSR4_RCAS_COMP));
+        std::memcpy(code[14].data(), FSR4_RCAS_COMP, code[14].size());
+        if (!load(assets.post, code[13]) ||
             !load(assets.spdAutoExposure, code[15]) || !load(assets.initializer, initializer) ||
             !load(assets.prePassWeights, weights)) {
             return false;

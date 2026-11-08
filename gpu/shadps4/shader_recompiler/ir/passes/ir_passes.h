@@ -25,7 +25,8 @@ void LowerPhisToRegsPass(IR::Program& program);
 void DeadCodeEliminationPass(IR::Program& program);
 /// ps4rt: exact integers from interpolated float varyings on GPUs without manual interpolation.
 void InterpolatedIntegerPass(IR::Program& program);
-void ConstantPropagationPass(IR::BlockList& program);
+/// keep_half_packs (ps4rt, FpLegacyHalfSaturate): leave UnpackHalf2x16(PackHalf2x16(x)) alone.
+void ConstantPropagationPass(IR::BlockList& program, bool keep_half_packs = false);
 void FlattenExtendedUserdataPass(IR::Program& program);
 void ReadLaneEliminationPass(IR::Program& program);
 ResourceDiscoveryList ResourceDiscoverPass(IR::Program& program, const Profile& profile);

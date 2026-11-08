@@ -18,6 +18,7 @@
 #endif
 #include <windows.h>
 #include "../../../dlss_bridge/ps4rt_dlss_bridge.h"
+#include "../../../dlss_bridge/dlss_validation.h"
 #endif
 
 namespace Vulkan {
@@ -109,12 +110,15 @@ Dlss* Dlss::Get() {
 
 Dlss::Dlss() : impl{std::make_unique<Impl>()} {
     const auto directory = ExecutableDirectory();
-    impl->module = LoadLibraryW((directory / BridgeName).c_str());
+    impl->module = LoadLibraryExW((directory / BridgeName).c_str(),nullptr,
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     const auto get_api =
         impl->module ? reinterpret_cast<Ps4RtDlssGetApiFn>(GetProcAddress(impl->module, "Ps4RtDlssGetApi"))
                      : nullptr;
     impl->api = get_api ? get_api() : nullptr;
-    if (!impl->api || impl->api->abi != PS4RT_DLSS_BRIDGE_ABI) {
+    if (!impl->api || impl->api->abi != PS4RT_DLSS_BRIDGE_ABI || !impl->api->Configure ||
+        !impl->api->InstanceExtensions || !impl->api->DeviceExtensions || !impl->api->Initialize ||
+        !impl->api->CreateFeature || !impl->api->Evaluate || !impl->api->ReleaseFeature || !impl->api->Shutdown) {
         impl->Disable("ps4rt_dlss.dll is missing or from another version");
         return;
     }
@@ -200,22 +204,28 @@ bool Dlss::HasFeature(const FeatureDesc& desc) const {
 }
 
 bool Dlss::CreateFeature(vk::CommandBuffer command, const FeatureDesc& desc) {
-    if (!impl->available) {
+    if (!impl->available || !command) {
+        return false;
+    }
+    const Ps4RtDlssFeature feature{desc.input_width,  desc.input_height, desc.output_width,
+                                desc.output_height, desc.quality,      desc.depth_inverted ? 1 : 0,
+                                0,                  desc.hdr ? 1 : 0};
+    if (const char* reason = So5Dlss::FeatureProblem(feature)) {
+        impl->problem = reason;
         return false;
     }
     impl->feature.reset();
-    const Ps4RtDlssFeature feature{desc.input_width,  desc.input_height, desc.output_width,
-                                desc.output_height, desc.quality,      0,
-                                0,                  desc.hdr ? 1 : 0};
     if (!impl->api->CreateFeature(command, &feature)) {
+        impl->problem = "NVIDIA DLSS feature creation failed";
         return false;
     }
     impl->feature = desc;
+    impl->problem.clear();
     return true;
 }
 
 bool Dlss::Evaluate(vk::CommandBuffer command, const Frame& frame) {
-    if (!impl->available || !impl->feature) {
+    if (!impl->available || !impl->feature || !command) {
         return false;
     }
     const auto image = [](const Resource& r) {
@@ -230,7 +240,19 @@ bool Dlss::Evaluate(vk::CommandBuffer command, const Frame& frame) {
     const Ps4RtDlssEvaluate parameters{image(frame.color),  image(frame.depth), image(frame.motion),
                                     image(frame.output), frame.jitter_x,     frame.jitter_y,
                                     frame.reset ? 1 : 0, frame.frame_ms,     frame.sharpness};
-    return impl->api->Evaluate(command, &parameters) != 0;
+    const auto& desc = *impl->feature;
+    const Ps4RtDlssFeature feature{desc.input_width,desc.input_height,desc.output_width,
+        desc.output_height,desc.quality,desc.depth_inverted?1:0,0,desc.hdr?1:0};
+    if (const char* reason = So5Dlss::FrameProblem(feature,parameters)) {
+        impl->problem = reason;
+        return false;
+    }
+    if (!impl->api->Evaluate(command, &parameters)) {
+        impl->problem = "NVIDIA DLSS evaluation failed";
+        return false;
+    }
+    impl->problem.clear();
+    return true;
 }
 
 void Dlss::ReleaseFeature() {

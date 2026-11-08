@@ -17,8 +17,12 @@
 #include <vk_mem_alloc.h>
 
 #include "ps4rt_settings.h"
+#include "ps4rt_perf_stats.h"
+#include "ps4rt_performance_probe.h"
 #include "ps4rt_fsr3_policy.h"
 #include "ps4rt_scene_preset.h"
+#include "ps4rt_hud_runtime.h"
+#include "ps4rt_presentation_trace.h"
 #include "ps4rt_toggles.h"
 #include "ffx_vk_portable.h"
 #include "video_core/host_shaders/upscale_merge_comp.h"
@@ -93,6 +97,8 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
     const auto device_key=Ps4RtUpscaler::Fsr3DeviceKey(properties.vendorID,properties.deviceID,identity.deviceUUID.data());
     const char* forced=std::getenv("SO5_FSR3_FORCE_GPU");
     auto& initial_settings=Ps4RtSettings::Get();
+    initial_settings.raster_max_width=instance.GetMaxFramebufferWidth();
+    initial_settings.raster_max_height=instance.GetMaxFramebufferHeight();
     const bool technical=instance.IsStorageImageWriteWithoutFormatEnabled() && properties.apiVersion>=VK_API_VERSION_1_3 &&
         properties.deviceType!=vk::PhysicalDeviceType::eCpu && properties.limits.maxComputeWorkGroupInvocations>=256;
     initial_settings.fsr3_available=Ps4RtUpscaler::Fsr3Allowed(technical,Ps4RtUpscaler::Fsr3Recommended(properties.vendorID,instance.GetModelName()),device_key,forced?forced:"");
@@ -155,6 +161,21 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
                     Ps4RtSettings::Get().upscaler != Ps4RtSettings::UpscalerOff ? "on" : "off",
                     static_cast<unsigned long long>(trigger_hash));
     }
+    const char* native_test = std::getenv("SO5_NATIVE_4K_TEST");
+    if (native_test && std::strcmp(native_test,"1")==0) {
+        auto& state=Ps4RtSettings::Get();
+        state.native_4k_test=state.native_scene && !scaled_session &&
+            !Ps4RtUltrawide::Enabled() && instance.GetMaxFramebufferWidth()>=3840 &&
+            instance.GetMaxFramebufferHeight()>=2160;
+        if(state.native_4k_test) {
+            enabled=true; // Keep composition routing, without a reconstruction provider.
+            state.upscaler=Ps4RtSettings::UpscalerOff;state.output_res=3;
+            state.native_render_height=2160;
+            state.spatial_aa=false;state.fsr1=false;state.rcas=false;state.sharpen=false;state.jitter=false;
+            target_width=3840;target_height=2160;
+            std::printf("Native 4K test: requested real 3840x2160 raster, no temporal/spatial upscaler, no sharpening; final color/depth proxy proof required\n");
+        } else std::printf("Native 4K test refused: requires native scene, 16:9, original guest allocations and 4K framebuffer limits\n");
+    }
 }
 
 TemporalUpscaler::~TemporalUpscaler() {
@@ -167,7 +188,7 @@ TemporalUpscaler::~TemporalUpscaler() {
 
 bool TemporalUpscaler::Active() const {
     // Toggle 1 << 24 switches it off at run time (A/B); history restarts after.
-    return enabled && !failed &&
+    return !NativeRasterTest() && enabled && !failed &&
            (Ps4RtSettings::Get().upscaler == Ps4RtSettings::UpscalerFsr3 ||
             Ps4RtSettings::IsFsr4(Ps4RtSettings::Get().upscaler) ||
             Ps4RtSettings::Get().upscaler == Ps4RtSettings::UpscalerTaa ||
@@ -201,23 +222,110 @@ bool TemporalUpscaler::ReducedScene(const VideoCore::Image& color) const {
 }
 
 bool TemporalUpscaler::RasterScaling() const {
-    if (Ps4RtSettings::Get().native_scene && (Ps4RtSettings::Get().scene_preset<0 || !Active())) return false;
+    if(ManualRaster()) return scene_targets.Reduced() && !done_this_frame;
+    if (!Ps4RtUltrawide::Enabled() && Ps4RtSettings::Get().native_scene && (Ps4RtSettings::Get().scene_preset<0 || !Active())) return false;
     return !scaled_session && scene_targets.Reduced() && !done_this_frame;
 }
 
+bool TemporalUpscaler::NativeRasterTest() const {
+    return Ps4RtSettings::Get().native_4k_test;
+}
+
+bool TemporalUpscaler::ManualRaster() const {
+    return enabled && !scaled_session && Ps4RtSettings::Get().native_scene &&
+        Ps4RtSettings::Get().upscaler==Ps4RtSettings::UpscalerOff;
+}
+
+void TemporalUpscaler::TracePresentation(Ps4RtPresentation::Stage stage, VideoCore::ImageId color,
+                                         VideoCore::ImageId depth, bool native_viewport,
+                                         u64 vertex,u64 pixel,u32 extra_flags,
+                                         u32 constant_bytes,int projection_aspect) {
+    if(!Ps4RtUltrawide::Enabled())return;
+    using namespace Ps4RtPresentation;
+    Sample sample{};sample.stage=stage;sample.vertex=vertex;sample.pixel=pixel;
+    sample.flags=extra_flags|(camera_motion.HasFrameCamera()?FrameCamera:0)|
+        (camera_motion.HasCurrentCamera()?CurrentCamera:0)|(camera_motion.Ready()?CameraHistory:0)|
+        (ldr_target?SceneTarget:0)|(ui_phase?UiPhase:0)|(done_this_frame?FrameDone:0)|
+        (depth?Depth:0)|(native_viewport?NativeViewport:0);
+    sample.output_width=target_width;sample.output_height=target_height;
+    sample.aspect_milli=Collector::Aspect(camera_motion.FrameAspect());
+    sample.constant_bytes=constant_bytes;sample.projection_aspect_milli=projection_aspect;
+    if(color) {
+        const auto& image=texture_cache.GetImage(color);
+        sample.width=image.info.size.width;sample.height=image.info.size.height;
+        sample.format=static_cast<std::int32_t>(image.info.pixel_format);
+        if(DisplayRegistry::IsDisplayBuffer(image.info.guest_address))sample.flags|=DisplayTarget;
+    }
+    capture.Note(sample,display_frame);
+}
+
+void TemporalUpscaler::ObserveProjection(u64 vertex,const float* data,u64 bytes,
+                                          VideoCore::ImageId color,VideoCore::ImageId depth) {
+    if(!Ps4RtUltrawide::Enabled()||!Ps4RtSettings::Get().native_scene||camera_motion.HasFrameCamera()||!color||!depth||
+       bytes<64||bytes>16*1024*1024||Ps4RtHud::VertexProgram(vertex)||
+       UiComposition::MovieShader(vertex)||vertex==0x12eb9af0)return;
+    const std::pair<u64,u64> key{vertex,bytes};
+    for(u32 i=0;i<projection_observation_count;++i)if(projection_observations[i]==key)return;
+    if(projection_observation_count==projection_observations.size())return;
+    projection_observations[projection_observation_count++]=key;
+    Ps4RtCamera::Camera candidate;
+    const bool valid=data&&bytes==1424&&Ps4RtCamera::Read({data,356},candidate);
+    const int aspect=valid?Ps4RtPresentation::Collector::Aspect(std::abs(candidate.projection[1]/candidate.projection[0])):0;
+    TracePresentation(Ps4RtPresentation::Stage::ProjectionBuffer,color,depth,false,vertex,0,
+        valid?Ps4RtPresentation::ProjectionValid:0,u32(bytes),aspect);
+}
+
 void TemporalUpscaler::BeforeDisplay() {
+    // This pass finishes the scene BEFORE OnFrameStart prepares the next one.
+    // Preserve a dispatch already recorded by OnDraw; publish the finished frame below.
+    pending_wide_display=false;
     if (Ps4RtSettings::Get().native_scene) {
         camera_motion.CommitFrameCamera();
+        pending_wide_display=Ps4RtUltrawide::Enabled()&&UiComposition::WideDisplayScene(
+            camera_motion.HasFrameCamera(),camera_motion.FrameAspect(),
+            Ps4RtUltrawide::Ratio(Ps4RtUltrawide::session_output));
+        TracePresentation(Ps4RtPresentation::Stage::BeforeDisplay,ldr_target,camera_motion.Depth(),false,0,0,
+            pending_wide_display?Ps4RtPresentation::SpatialDisplay:0);
+        if(ManualRaster() && scene_targets.Reduced() && !done_this_frame && ldr_target && camera_motion.Depth()) {
+            const auto& color=texture_cache.GetImage(ldr_target);
+            const auto& depth=texture_cache.GetImage(camera_motion.Depth());
+            if(scene_targets.Size()==SceneResolution::Size{render_width,render_height} &&
+               scene_targets.EligibleScene(color) && scene_targets.EligibleScene(depth) &&
+               scene_targets.ProvenRasterCurrent(color) && scene_targets.ProvenRasterCurrent(depth)) {
+                RunUiOnly(ldr_target,camera_motion.Depth());
+                auto& state=Ps4RtSettings::Get();state.active_render_width=render_width;state.active_render_height=render_height;
+                if(++native_4k_frames==1 || native_4k_frames%600==0)
+                    std::printf("Native raster proof: final color + depth have current real raster proxies; %ux%u -> %ux%u, no temporal reconstruction; verified frames=%llu, refused=%llu\n",
+                        render_width,render_height,target_width,target_height,(unsigned long long)native_4k_frames,(unsigned long long)native_4k_refused);
+            } else {
+                auto& state=Ps4RtSettings::Get();state.active_render_width=1920;state.active_render_height=1080;
+                if(++native_4k_refused==1 || native_4k_refused%600==0)
+                    std::printf("Native raster frame unverified: final color/depth raster proof missing; original dimensions reported (color=%d depth=%d)\n",
+                        int(scene_targets.ProvenRasterCurrent(color)),int(scene_targets.ProvenRasterCurrent(depth)));
+            }
+        }
         if (Active() && !done_this_frame && ldr_target && camera_motion.Ready() &&
             camera_motion.HasCurrentCamera()) RunScaled();
+        // A verified current-frame tonemap is enough for wide presentation.
+        // Camera history/depth may be absent while entering a new zone; those
+        // are reconstruction requirements, not reasons to pillarbox native 3D.
+        if(Ps4RtUltrawide::Enabled() && !done_this_frame && ldr_target)
+            RunUiOnly(ldr_target,camera_motion.Depth());
         if (Active() && !ui_phase)
             Ps4RtSettings::Get().temporal_problem = "FSR is waiting for a 3D scene; original rendering is active.";
+        Ps4RtSettings::Get().overlay_reconstruction = performance_reconstruction_state;
         return;
     }
+    Ps4RtSettings::Get().overlay_reconstruction = performance_reconstruction_state;
 }
 
 bool TemporalUpscaler::OnFrameStart() {
+    // OnFrameStart follows BeforeDisplay. Do not clear the completed frame's snapshot.
+    performance_reconstruction_state = 0;
     ++display_frame;
+    presentation_seen=0;
+    presentation_display_samples=0;
+    projection_observation_count=0;
     display_depth_source = {};
     // ps4rt: PS4RT_PRESET_FILE=<file> holding a preset number, read about once a second: switches
     // the preset like the menu does (scripted tests of live preset changes).
@@ -247,6 +355,11 @@ bool TemporalUpscaler::OnFrameStart() {
         }
     }
     const auto& settings = Ps4RtSettings::Get();
+    if(NativeRasterTest()) {
+        auto& state=Ps4RtSettings::Get();state.upscaler=Ps4RtSettings::UpscalerOff;state.output_res=3;
+        state.native_render_height=2160;
+        state.fsr1=false;state.rcas=false;state.sharpen=false;state.spatial_aa=false;state.jitter=false;
+    }
     // The guest's startup resolution patch remains in effect until restart. Keep the FSR
     // model at the applied preset while the menu saves the requested one for run.sh.
     const int preset = Ps4RtSettings::RenderPreset();
@@ -257,10 +370,10 @@ bool TemporalUpscaler::OnFrameStart() {
     const int output = settings.output_res.load();
     const bool output_changed = !scaled_session && applied_output != output;
     if (output_changed) {
-        const auto content=Ps4RtOutput::Content(output);
+        const auto content=Ps4RtUltrawide::Content(output);
         target_width = content.width;
         target_height = content.height;
-        std::printf("Output resolution: %dx%d (live); 16:9 presentation image: %ux%u\n",
+        std::printf("Output resolution: %dx%d (live); presentation image: %ux%u\n",
                     Ps4RtOutput::Widths[output],Ps4RtOutput::Heights[output],target_width,target_height);
         failed = false;
         fsr4_failed = false;
@@ -269,8 +382,9 @@ bool TemporalUpscaler::OnFrameStart() {
         auto& state=Ps4RtSettings::Get();state.scene_preset=Ps4RtScene::ForOutput(state.scene_preset,target_width,target_height);
     }
     const int scene_preset=settings.scene_preset;
+    const bool manual_changed=ManualRaster() && settings.native_render_height!=applied_native_height;
     const bool scene_changed=settings.native_scene && scene_preset!=applied_scene_preset;
-    const bool changed = output_changed || scene_changed || applied_preset != preset || active != last_active ||
+    const bool changed = output_changed || scene_changed || manual_changed || applied_preset != preset || active != last_active ||
                          jitter_on != last_jitter || applied_upscaler != upscaler;
     if (applied_upscaler != upscaler || (Ps4RtSettings::IsFsr4(upscaler) && (scene_changed || output_changed))) {
         // A failed provider keeps a fatal flag internally; a user retry gets a fresh context.
@@ -284,13 +398,28 @@ bool TemporalUpscaler::OnFrameStart() {
     // On GPUs without D32S8 blit support, UI depth is cleared instead of copied from scene.
     if (!scaled_session) {
         if (settings.CompactGraphicsMenu()) {
-            const auto wanted=Ps4RtScene::Input(active?scene_preset:-1,target_width,target_height);
+            const auto wanted=Ps4RtScene::RequestedInput(active,scene_preset,ManualRaster()?settings.native_render_height.load():1080,
+                target_width,target_height,Ps4RtUltrawide::Enabled());
             if(!scene_targets.TrySetSize({wanted.width,wanted.height})) {
-                RejectScenePreset("replacement allocation or dimensions refused");
-                const auto fallback=Ps4RtScene::Input(settings.upscaler==Ps4RtSettings::UpscalerOff?-1:settings.scene_preset.load(),target_width,target_height);
+                if(NativeRasterTest()) {
+                    Ps4RtSettings::Get().native_4k_test=false;
+                    std::printf("Native 4K test disabled: real target allocation refused; original rendering restored\n");
+                }
+                if(ManualRaster()) {
+                    auto& state=Ps4RtSettings::Get();state.native_render_height=1080;
+                    std::printf("Native raster resolution refused: %ux%u; original 1080p restored (GPU limits or allocation failure)\n",wanted.width,wanted.height);
+                    Ps4RtSettings::Save();
+                } else RejectScenePreset("replacement allocation or dimensions refused");
+                const auto fallback=Ps4RtScene::Input(settings.upscaler==Ps4RtSettings::UpscalerOff?-1:settings.scene_preset.load(),target_width,target_height,Ps4RtUltrawide::Enabled());
                 scene_targets.TrySetSize({fallback.width,fallback.height});
             }
             applied_scene_preset=settings.scene_preset;
+            if(ManualRaster() && (manual_changed || output_changed || applied_upscaler!=upscaler)) {
+                native_4k_frames=native_4k_refused=0;
+                std::printf("Native raster requested: %ux%u -> %ux%u; FSR/DLSS disabled, UI remains at output resolution\n",
+                    scene_targets.Size().width,scene_targets.Size().height,target_width,target_height);
+            }
+            applied_native_height=settings.native_render_height;
         } else {
             scene_targets.SetSize(SceneResolution::ForPreset(active ? preset : 0,
                                                             {target_width,target_height}));
@@ -301,7 +430,10 @@ bool TemporalUpscaler::OnFrameStart() {
     if(!settings.native_scene) {
         Ps4RtSettings::Get().active_render_width = Scaled() ? render_width : scene_targets.Size().width;
         Ps4RtSettings::Get().active_render_height = Scaled() ? render_height : scene_targets.Size().height;
-    } else if(!active) {
+    } else if(!active && !scene_targets.Reduced()) {
+        Ps4RtSettings::Get().active_render_width=render_width;Ps4RtSettings::Get().active_render_height=render_height;
+    } else if(ManualRaster() && changed) {
+        // A requested/allocated size is not yet proof that the final scene retained it.
         Ps4RtSettings::Get().active_render_width=1920;Ps4RtSettings::Get().active_render_height=1080;
     }
     if (changed || !dispatched_last_frame) reset = true;
@@ -314,7 +446,12 @@ bool TemporalUpscaler::OnFrameStart() {
     dispatched_last_frame = false;
 
     // The display pass of an upscaled frame reads the upscaled UI image.
-    display_redirect = ui_phase;
+    const auto route=UiComposition::RouteDisplay(ui_phase,pending_wide_display,
+        ui_width,ui_height,target_width,target_height);
+    display_redirect=route.redirect;
+    display_ui_snapshot=route.sample_composed;
+    display_width=route.width;display_height=route.height;
+    pending_wide_display=false;
     ui_phase = false;
     ui_read_barrier = false;
     done_this_frame = false;
@@ -1059,13 +1196,17 @@ void TemporalUpscaler::Run() {
     last_frame = now;
 
     bool dispatched = false;
+    int dispatched_provider = Ps4RtSettings::UpscalerFsr3;
     if (Ps4RtSettings::Get().upscaler == Ps4RtSettings::UpscalerTaa) {
+        dispatched_provider = Ps4RtSettings::UpscalerTaa;
         RecordTaa(cmdbuf, input_color_view, input_depth_view);
         dispatched = true;
     } else if (UseFsr4()) {
+        dispatched_provider = Ps4RtSettings::Get().upscaler;
         dispatched = RecordFsr4(cmdbuf, {input_color, input_color_view, w, h},
                                 {input_depth, input_depth_view, w, h}, w, h, ow, oh, frame_ms);
     } else if (UseDlss()) {
+        dispatched_provider = Ps4RtSettings::UpscalerDlss;
         dispatched = RecordDlss(
             cmdbuf,
             {input_color, input_color_view, color.info.pixel_format, vk::ImageAspectFlagBits::eColor, w, h},
@@ -1141,6 +1282,12 @@ void TemporalUpscaler::Run() {
         }
     }
     if (dispatched) {
+        const auto& settings = Ps4RtSettings::Get();
+        const int provider = dispatched_provider;
+        const int preset = provider == Ps4RtSettings::UpscalerDlss
+            ? ((w == ow && h == oh) ? 0 : std::max(1, Dlss::QualityForScale(float(ow) / w)))
+            : settings.preset.load();
+        performance_reconstruction_state = Ps4RtPerfStats::ReconstructionState(provider, preset);
         reset = false;
         dispatched_last_frame = true;
         if (Ps4RtSettings::Get().upscaler != Ps4RtSettings::UpscalerTaa) {
@@ -1244,7 +1391,7 @@ vk::ImageView TemporalUpscaler::CachedView(const VideoCore::Image& image, vk::Fo
 namespace Vulkan {
 
 std::array<u32, 2> TemporalUpscaler::SceneSize(u32 w, u32 h) const {
-    if(Ps4RtSettings::Get().native_scene && Ps4RtSettings::Get().scene_preset>=0 && Active())
+    if(Ps4RtUltrawide::Enabled() || (Ps4RtSettings::Get().native_scene && Ps4RtSettings::Get().scene_preset>=0 && Active()))
         return {scene_targets.Size().width,scene_targets.Size().height};
     if (!scaled_session && !Ps4RtSettings::Get().CompactGraphicsMenu()) return {render_width, render_height};
     // The game's own render size (scene constants); PS4RT_RENDER_RES until the first camera.
@@ -1285,13 +1432,64 @@ void TemporalUpscaler::OnColorTarget(VideoCore::ImageId color) {
 void TemporalUpscaler::OnDraw(u64 vs_hash, VideoCore::ImageId color,
                               VideoCore::ImageId depth, bool native_viewport, bool blended,u64 ps_hash) {
     if (Ps4RtSettings::Get().native_scene) {
+        if(Ps4RtUltrawide::Enabled()) {
+            if(color&&presentation_display_samples<4&&DisplayRegistry::IsDisplayBuffer(texture_cache.GetImage(color).info.guest_address)) {
+                ++presentation_display_samples;
+                TracePresentation(Ps4RtPresentation::Stage::DisplayDraw,color,depth,native_viewport,vs_hash,ps_hash);
+            }
+            if(!(presentation_seen&1)&&Ps4RtHud::VertexProgram(vs_hash)) {
+                presentation_seen|=1;
+                TracePresentation(Ps4RtPresentation::Stage::FirstGui,color,depth,native_viewport,vs_hash,ps_hash);
+            }
+            if(!(presentation_seen&4)&&UiComposition::MovieShader(vs_hash)) {
+                presentation_seen|=4;
+                TracePresentation(Ps4RtPresentation::Stage::FirstMovie,color,depth,native_viewport,vs_hash,ps_hash);
+            }
+            if(!(presentation_seen&8)&&color&&depth&&native_viewport&&
+               !Ps4RtCamera::SceneCopy(vs_hash,ps_hash)&&!Ps4RtHud::VertexProgram(vs_hash)) {
+                const auto& image=texture_cache.GetImage(color);
+                if(image.info.size.width==1920&&image.info.size.height==1080&&
+                   !DisplayRegistry::IsDisplayBuffer(image.info.guest_address)) {
+                    presentation_seen|=8;
+                    TracePresentation(Ps4RtPresentation::Stage::FirstDepthDraw,color,depth,true,vs_hash,ps_hash);
+                }
+            }
+        }
         if (color && native_viewport && Ps4RtCamera::Tonemap(vs_hash,ps_hash)) {
             const auto& image = texture_cache.GetImage(color);
             if (image.info.size.width == 1920 && image.info.size.height == 1080 &&
                 image.info.pixel_format == vk::Format::eR8G8B8A8Unorm &&
                 !DisplayRegistry::IsDisplayBuffer(image.info.guest_address)) ldr_target = color;
+            if(!(presentation_seen&2)) {
+                presentation_seen|=2;
+                TracePresentation(Ps4RtPresentation::Stage::Tonemap,color,depth,native_viewport,vs_hash,ps_hash);
+            }
         }
-        return;
+        if(!Ps4RtUltrawide::Enabled()) return;
+        if(!ui_phase && !done_this_frame && !ldr_target && color) {
+            const auto& image=texture_cache.GetImage(color);
+            const bool offscreen_rgba=image.info.size.width==1920 && image.info.size.height==1080 &&
+                image.info.pixel_format==vk::Format::eR8G8B8A8Unorm &&
+                !DisplayRegistry::IsDisplayBuffer(image.info.guest_address);
+            if(UiComposition::PerspectiveMenuBackground(Ps4RtHud::VertexProgram(vs_hash),offscreen_rgba,
+                native_viewport,camera_motion.FrameAspect(),Ps4RtUltrawide::Ratio(Ps4RtUltrawide::session_output))) {
+                // Forward-rendered 3D menus need no temporal reconstruction.
+                // Snapshot BEFORE the native logo/text draw. The camera already
+                // matches the output: presenting it full width does not stretch it.
+                ldr_target=color;
+                static bool reported=false;
+                if(!reported) {
+                    std::printf("Ultrawide 3D menu: current perspective %.6f; composing before native UI, original UI/movie proportions preserved\n",double(camera_motion.FrameAspect()));
+                    reported=true;
+                }
+                RunUiOnly(color,depth);
+                return;
+            }
+        }
+        // Native 3D composition belongs at the explicit final scene-copy
+        // boundary. An earlier Scaleform pass must not snapshot the wrong
+        // image as a 16:9 menu and mark the entire frame complete.
+        if(!UiComposition::NativeMenuBackground(camera_motion.HasFrameCamera(),bool(ldr_target))) return;
     }
     (void)blended; // Kept in the shared OnDraw API for downstream ports.
     if (!Scaled() && vs_hash == ui_trigger_vs) done_this_frame = true;
@@ -1466,8 +1664,13 @@ void TemporalUpscaler::RunUiOnly(VideoCore::ImageId color_id, VideoCore::ImageId
     vk::Image source = color.GetImage();
     auto source_layout = vk::ImageLayout::eTransferSrcOptimal;
     u32 source_width = color.info.size.width, source_height = color.info.size.height;
+    const bool wide_scene=Ps4RtUltrawide::Enabled() && UiComposition::WideSceneBackground(
+        camera_motion.HasFrameCamera(),ldr_target==color_id);
+    const bool scene_proxy=scene_targets.RasterCurrent(color);
+    TracePresentation(Ps4RtPresentation::Stage::ComposedBackground,color_id,depth_id,false,0,0,
+        (wide_scene?Ps4RtPresentation::WideBackground:0)|(scene_proxy?Ps4RtPresentation::SceneProxy:0));
     if (!scaled_session && camera_motion.Depth() && scene_targets.Reduced() &&
-        scene_targets.EligibleScene(color)) {
+        scene_targets.EligibleScene(color) && (!Ps4RtUltrawide::Enabled() || (wide_scene && scene_proxy))) {
         VideoCore::ImageViewInfo view;
         view.format = color.info.pixel_format;
         const auto proxy = scene_targets.Read(color_id, view,
@@ -1494,13 +1697,35 @@ void TemporalUpscaler::RunUiOnly(VideoCore::ImageId color_id, VideoCore::ImageId
         .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
     };
     cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
+    const bool fit_menu=Ps4RtUltrawide::Enabled() && !wide_scene;
+    if(Ps4RtUltrawide::Enabled()) {
+        static int previous=-1;
+        const int path=int(wide_scene)*2+int(wide_scene && scene_proxy);
+        if(path!=previous) {
+            std::printf("Ultrawide composition: %s, source %ux%u -> %ux%u, %s\n",
+                wide_scene?"3D scene":"menu/movie",source_width,source_height,ui_width,ui_height,
+                fit_menu?"original proportions":"full-width presentation");
+            previous=path;
+        }
+    }
+    const auto area=Ps4RtUltrawide::Background(ui_width,ui_height,!fit_menu);
+    if(fit_menu) {
+        // Unwritten side columns must never expose a previous frame's pixels.
+        cmd.clearColorImage(vk::Image(ui_image),vk::ImageLayout::eTransferDstOptimal,
+            vk::ClearColorValue(std::array{0.f,0.f,0.f,1.f}),barrier.subresourceRange);
+        auto clear_barrier=barrier;
+        clear_barrier.srcStageMask=clear_barrier.dstStageMask=vk::PipelineStageFlagBits2::eTransfer;
+        clear_barrier.srcAccessMask=clear_barrier.dstAccessMask=vk::AccessFlagBits2::eTransferWrite;
+        clear_barrier.oldLayout=clear_barrier.newLayout=vk::ImageLayout::eTransferDstOptimal;
+        cmd.pipelineBarrier2({.imageMemoryBarrierCount=1,.pImageMemoryBarriers=&clear_barrier});
+    }
     const vk::ImageBlit region{
         .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
         .srcOffsets = std::array{vk::Offset3D{0, 0, 0},
             vk::Offset3D{s32(source_width), s32(source_height), 1}},
         .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-        .dstOffsets = std::array{vk::Offset3D{0, 0, 0},
-            vk::Offset3D{s32(ui_width), s32(ui_height), 1}},
+        .dstOffsets = std::array{vk::Offset3D{area.left, area.top, 0},
+            vk::Offset3D{area.right, area.bottom, 1}},
     };
     cmd.blitImage(source, source_layout,
                   vk::Image(ui_image), vk::ImageLayout::eTransferDstOptimal, region,
@@ -1523,7 +1748,7 @@ void TemporalUpscaler::RejectScenePreset(const char* reason) {
     auto& state=Ps4RtSettings::Get();
     const int previous=last_good_scene_output==state.output_res && last_good_scene_preset!=state.scene_preset?last_good_scene_preset:-1;
     state.scene_preset=previous;
-    const auto input=Ps4RtScene::Input(previous,target_width,target_height);
+    const auto input=Ps4RtScene::Input(previous,target_width,target_height,Ps4RtUltrawide::Enabled());
     if(input.width>target_width || input.height>target_height)
         Ps4RtSettings::SetSceneUpscaler(Ps4RtSettings::UpscalerOff,false);
     // Force a fresh frame-boundary application. Never retry a failed selection
@@ -1538,6 +1763,10 @@ void TemporalUpscaler::AnnounceSceneDispatch(u32 w, u32 h, u32 ow, u32 oh, int p
     Ps4RtSettings::Get().temporal_problem = nullptr;
     auto& settings=Ps4RtSettings::Get();
     settings.active_render_width=w;settings.active_render_height=h;
+    const int preset = provider == Ps4RtSettings::UpscalerDlss
+        ? ((w == ow && h == oh) ? 0 : std::max(1, Dlss::QualityForScale(float(ow) / w)))
+        : applied_scene_preset;
+    performance_reconstruction_state = Ps4RtPerfStats::ReconstructionState(provider, preset);
     if(applied_scene_preset==settings.scene_preset) {
         last_good_scene_preset=applied_scene_preset;last_good_scene_output=settings.output_res;settings.scene_preset_applied=applied_scene_preset;
     }
@@ -1559,7 +1788,8 @@ void TemporalUpscaler::RunScaled() {
     const u32 iw = color.info.size.width, ih = color.info.size.height;
     const auto [w, h] = SceneSize(iw, ih);
     const u32 ow = target_width, oh = target_height;
-    const bool custom=Ps4RtSettings::Get().native_scene && Ps4RtSettings::Get().scene_preset>=0 && scene_targets.Reduced();
+    const bool custom=Ps4RtSettings::Get().native_scene &&
+        (Ps4RtSettings::Get().scene_preset>=0 || Ps4RtUltrawide::Enabled()) && scene_targets.Reduced();
     // Never label an upsampled native image as a real higher-resolution preset.
     // Both final scene color and matching depth must come from current raster proxies.
     if(custom && (!scene_targets.EligibleScene(color) || !scene_targets.EligibleScene(depth) ||
@@ -1844,23 +2074,23 @@ bool TemporalUpscaler::RedirectColor(VideoCore::ImageId color,
         return false;
     }
     if (!display.image || display.format != image.info.pixel_format ||
-        display.width != ui_width || display.height != ui_height) {
+        display.width != display_width || display.height != display_height) {
         const auto device = instance.GetDevice();
         scheduler.Finish();
         display.views.clear();
         display.sampled_views.clear();
         display.sampled_image = VideoCore::UniqueImage{};
         display.sampled_initialized = false;
-        std::printf("Display: host buffer %ux%u (live)\n", ui_width, ui_height);
+        std::printf("Display: host buffer %ux%u (live)\n", display_width, display_height);
         display.format = image.info.pixel_format;
-        display.width = ui_width;
-        display.height = ui_height;
+        display.width = display_width;
+        display.height = display_height;
         display.image = VideoCore::UniqueImage(device, instance.GetAllocator());
         display.image.Create(vk::ImageCreateInfo{
             .flags = vk::ImageCreateFlagBits::eMutableFormat,
             .imageType = vk::ImageType::e2D,
             .format = display.format,
-            .extent = {ui_width, ui_height, 1},
+            .extent = {display_width, display_height, 1},
             .mipLevels = 1,
             .arrayLayers = 1,
             .samples = vk::SampleCountFlagBits::e1,
@@ -1876,7 +2106,7 @@ bool TemporalUpscaler::RedirectColor(VideoCore::ImageId color,
         // HUD draws into the display buffer after its scene copy. Keep earlier
         // color writes in this frame instead of discarding the attachment again.
         target = {Mirror(vk::Image(display.image), display.views, view_info.format, {}),
-                  vk::ImageLayout::eGeneral, ui_width, ui_height};
+                  vk::ImageLayout::eGeneral, display_width, display_height};
         return true;
     }
     scheduler.EndRendering();
@@ -1896,7 +2126,7 @@ bool TemporalUpscaler::RedirectColor(VideoCore::ImageId color,
     display.valid = true;
     display.frame = display_frame;
     target = {Mirror(vk::Image(display.image), display.views, view_info.format, {}),
-              vk::ImageLayout::eGeneral, ui_width, ui_height};
+              vk::ImageLayout::eGeneral, display_width, display_height};
     return true;
 }
 
@@ -1912,13 +2142,13 @@ bool TemporalUpscaler::RedirectDepth(VideoCore::ImageId depth, Target& target, b
         const auto format = texture_cache.GetImage(depth).info.pixel_format;
         if (format != vk::Format::eD32SfloatS8Uint && format != vk::Format::eD32Sfloat)
             return false;
-        if (!display_depth_image || display_depth_width != ui_width ||
-            display_depth_height != ui_height || display_depth_format != format) {
+        if (!display_depth_image || display_depth_width != display_width ||
+            display_depth_height != display_height || display_depth_format != format) {
             scheduler.Finish();
             display_depth_view.reset();
             display_depth_image = VideoCore::UniqueImage(instance.GetDevice(), instance.GetAllocator());
             display_depth_image.Create({.imageType = vk::ImageType::e2D, .format = format,
-                .extent = {ui_width, ui_height, 1}, .mipLevels = 1, .arrayLayers = 1,
+                .extent = {display_width, display_height, 1}, .mipLevels = 1, .arrayLayers = 1,
                 .samples = vk::SampleCountFlagBits::e1, .tiling = vk::ImageTiling::eOptimal,
                 .usage = vk::ImageUsageFlagBits::eDepthStencilAttachment |
                          vk::ImageUsageFlagBits::eTransferDst});
@@ -1928,16 +2158,16 @@ bool TemporalUpscaler::RedirectDepth(VideoCore::ImageId depth, Target& target, b
             display_depth_view = Check(instance.GetDevice().createImageViewUnique({
                 .image = display_depth_image, .viewType = vk::ImageViewType::e2D,
                 .format = format, .subresourceRange = {aspect, 0, 1, 0, 1}}));
-            display_depth_width = ui_width;
-            display_depth_height = ui_height;
+            display_depth_width = display_width;
+            display_depth_height = display_height;
             display_depth_format = format;
-            std::printf("PS4RT: display depth redirected %ux%u\n", ui_width, ui_height);
+            std::printf("PS4RT: display depth redirected %ux%u\n", display_width, display_height);
         }
         if (!Ps4RtSettings::Get().native_scene || display_depth_source != depth) {
-            PrepareDepth(depth, vk::Image(display_depth_image), format, ui_width, ui_height);
+            PrepareDepth(depth, vk::Image(display_depth_image), format, display_width, display_height);
             display_depth_source = depth;
         }
-        target = {*display_depth_view, vk::ImageLayout::eGeneral, ui_width, ui_height};
+        target = {*display_depth_view, vk::ImageLayout::eGeneral, display_width, display_height};
         return true;
     }
     if (!ui_phase || depth != ui_depth) {
@@ -1948,7 +2178,7 @@ bool TemporalUpscaler::RedirectDepth(VideoCore::ImageId depth, Target& target, b
 }
 
 bool TemporalUpscaler::RedirectsSampled(VideoCore::ImageId image) const {
-    if (display_redirect && image == ui_color) return true;
+    if (display_redirect && display_ui_snapshot && image == ui_color) return true;
     if (!Ps4RtSettings::Get().native_scene || !image) return false;
     const auto address = texture_cache.GetImage(image).info.guest_address;
     std::scoped_lock lock{display_mutex};
@@ -1997,7 +2227,7 @@ bool TemporalUpscaler::RedirectSampled(VideoCore::ImageId image,
             }
         }
     }
-    if (!display_redirect || image != ui_color) {
+    if (!display_redirect || !display_ui_snapshot || image != ui_color) {
         return false;
     }
     if (!ui_read_barrier) {
@@ -2104,7 +2334,7 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
                                   const Dlss::Resource& depth, u32 w, u32 h, u32 ow, u32 oh,
                                   float frame_ms, bool hdr) {
     Dlss* dlss = Dlss::Get();
-    const Dlss::FeatureDesc desc{w, h, ow, oh, Dlss::QualityForScale(float(ow) / float(w)), hdr};
+    const Dlss::FeatureDesc desc{w, h, ow, oh, Dlss::QualityForScale(float(ow) / float(w)), hdr, camera_motion.DepthInverted()};
     bool ok = true;
     if (!dlss->HasFeature(desc)) {
         // The previous feature may still be in use by submitted work; `cmdbuf` stays open.
@@ -2132,8 +2362,9 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
         });
     }
     if (!ok) {
-        std::printf("Upscaler: DLSS failed; falling back to FSR 3.1\n");
-        Ps4RtSettings::Get().upscaler = Ps4RtSettings::UpscalerFsr3;
+        Ps4RtSettings::SetSceneUpscaler(Ps4RtSettings::UpscalerFsr3,false);
+        std::printf("Upscaler: DLSS failed (%s); selected %s\n",dlss->Problem().c_str(),
+            Ps4RtSettings::UpscalerName(Ps4RtSettings::Get().upscaler));
         dlss_failed = true; // EnsureResources creates the FSR 3 context next frame
         reset = true;
     }

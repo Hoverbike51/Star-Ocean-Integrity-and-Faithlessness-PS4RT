@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <functional>
 #include <string>
+#include "cheat_profiles.h"
 
 namespace ps4rt {
 
@@ -13,7 +14,8 @@ using PrepareLog = std::function<void(const std::wstring&)>;
 // Python prepare/link scripts; it does not decrypt PKG/SELF content.
 void prepare_title(const std::filesystem::path& game,
                    const std::filesystem::path& output,
-                   const PrepareLog& log);
+                   const PrepareLog& log,
+                   So5Cheats::Result* inspection=nullptr);
 
 std::string title_id_from_sfo(const std::filesystem::path& param_sfo);
 std::string string_from_sfo(const std::filesystem::path& param_sfo, const std::string& field);

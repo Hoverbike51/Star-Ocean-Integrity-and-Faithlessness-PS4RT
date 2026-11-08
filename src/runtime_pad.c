@@ -16,6 +16,7 @@
 #include <time.h>
 #include <SDL3/SDL.h>
 #include <sys/stat.h>
+#include <stdatomic.h>
 
 #define ERR_INVALID_ARG ((int32_t)0x80920001)
 #define ERR_INVALID_HANDLE ((int32_t)0x80920003)
@@ -65,7 +66,12 @@ static size_t reads;
 static size_t vibration_requests, vibration_sent, vibration_failed, vibration_without_pad;
 static uint8_t connected_count;
 static uint64_t next_gamepad_scan;
+static uint64_t next_gamepad_discovery;
+static _Atomic bool gamepad_topology_changed=true;
 static bool keyboard_only;
+void runtime_pad_devices_changed(void) {
+    atomic_store_explicit(&gamepad_topology_changed,true,memory_order_relaxed);
+}
 
 static uint64_t now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000u+(uint64_t)t.tv_nsec/1000u; }
 /* Center small resting-stick noise, then rescale the remaining travel continuously. The
@@ -132,8 +138,11 @@ static SDL_Gamepad *current_gamepad(void) {
     if (keyboard_only) return NULL;
     if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
     if (sdl_ready<0) return NULL;
-    if (gamepad && !SDL_GamepadConnected(gamepad)) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
-    if (!gamepad) {
+    const uint64_t now=now_us();
+    if(atomic_exchange_explicit(&gamepad_topology_changed,false,memory_order_relaxed))next_gamepad_discovery=next_gamepad_scan=0;
+    if (gamepad && !SDL_GamepadConnected(gamepad)) { SDL_CloseGamepad(gamepad); gamepad=NULL; next_gamepad_discovery=0; }
+    if (!gamepad && now>=next_gamepad_discovery) {
+        next_gamepad_discovery=now+200000;
         int count=0;
         SDL_JoystickID *ids=SDL_GetGamepads(&count);
         if (ids && count>0) {
@@ -142,7 +151,6 @@ static SDL_Gamepad *current_gamepad(void) {
         }
         SDL_free(ids);
     }
-    const uint64_t now=now_us();
     if (gamepad && now>=next_gamepad_scan) {
         next_gamepad_scan=now+200000;
         if (!gamepad_active(gamepad)) {
@@ -316,6 +324,7 @@ static void load_button_maps(void) {
     }
     printf("Runtime: input profile %s, %d gamepad buttons, %d keyboard buttons and %d keyboard axes remapped; stick dead zone 8%%\n",
            profile ? profile : "qwerty",pad,keys,axis_count);
+    printf("Runtime: input mode %s\n",keyboard_only?"keyboard only":"automatic keyboard + gamepad, hot-plug enabled");
 }
 
 /* SDL key-name/layout queries are not thread safe. Refresh on the window/event thread,
@@ -373,6 +382,7 @@ static void sample_host(PadData *d) {
     }
     /* The keyboard works with or without a gamepad: its buttons add to the pad's, and a stick
      * follows the keys only while one of them is held. */
+    if(ps4rtgpu_fast_forward_combo()){d->l2=d->r2=0;d->buttons&=~(BTN_L2|BTN_R2);}
     sample_keyboard(d,k);
 }
 
@@ -484,7 +494,9 @@ static void replay_sample(PadData *d) {
 static int hold_after_capture;
 static void sample(PadData *d) {
     sample_host(d);
-    if (ps4rtgpu_overlay_captures_input()) { hold_after_capture=1; click.side=-1; return; }
+    if (ps4rtgpu_overlay_captures_input()) {
+        ps4rtgpu_leader_input(0,1);hold_after_capture=1;click.side=-1;return;
+    }
     record_sample(d); /* the click sources as they are: a replay plays them again */
     read_inject();
     replay_sample(d);
@@ -498,6 +510,9 @@ static void sample(PadData *d) {
         if (d->buttons) d->buttons=0;
         else hold_after_capture=0;
     }
+    /* Observe the mapped D-pad once per sample. The native battle/menu input
+     * remains unchanged; exploration requests are validated on the game thread. */
+    ps4rtgpu_leader_input(d->buttons,0);
 }
 
 static ABI int32_t pad_init(void) { pthread_mutex_lock(&lock); initialized=1; pthread_mutex_unlock(&lock); return 0; }

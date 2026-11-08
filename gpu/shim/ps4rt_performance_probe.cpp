@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "ps4rt_performance_probe.h"
+#include "ps4rt_ui_layout_trace.h"
 
 #include <algorithm>
 #include <atomic>
@@ -377,6 +378,7 @@ void WriteReports(const std::vector<Frame>& captured) {
          << Ps4RtSettings::OutputHeights[output] << "\",\n"
          << "  \"vsync\": " << (settings.vsync.load() ? "true" : "false") << ",\n"
          << "  \"fps_limit\": " << settings.fps_limit.load() << ",\n"
+         << "  \"camera_follow_mode_at_finish\": " << settings.camera_follow.load() << ",\n"
          << "  \"async_shaders\": " << (settings.async_shaders.load() ? "true" : "false") << ",\n"
          << "  \"frames_queued\": " << settings.frames_queued.load() << ",\n"
          << "  \"frames\": " << captured.size() << ",\n"
@@ -447,8 +449,9 @@ void WriteReports(const std::vector<Frame>& captured) {
         wrote_phase = true;
     }
     if (wrote_phase) json << '\n';
-    json << "    ]\n  },\n"
-         << "  \"busiest_threads\": [";
+    json << "    ]\n  },\n  \"ultrawide_ui_layout\": ";
+    Ps4RtUiLayout::capture.Write(json);
+    json << ",\n  \"busiest_threads\": [";
     std::vector<std::pair<std::string, ThreadAggregate>> ranked_threads(busiest_threads.begin(),
                                                                         busiest_threads.end());
     std::sort(ranked_threads.begin(), ranked_threads.end(), [](const auto& left, const auto& right) {
@@ -493,6 +496,7 @@ void Start(const Vulkan::Instance& instance, const Vulkan::Rasterizer& rasterize
     frames.clear();
     frames.reserve(60 * 30 * 20); // up to about 20 minutes without reallocating at 60 FPS
     finished = false;
+    Ps4RtUiLayout::capture.Reset();
     active = true;
     Ps4RtPerfStats::Start(instance);
     std::printf("Performance capture started: %s\n", stem.c_str());

@@ -3,6 +3,7 @@
 
 #include "gnm_error.h"
 #include "gnmdriver.h"
+#include "ps4rt_hud_runtime.h"
 
 #include "common/assert.h"
 #include "common/debug.h"
@@ -2364,6 +2365,9 @@ s32 PS4_SYSV_ABI sceGnmSubmitDone() {
     send_init_packet = true;
     ++frames_submitted;
     DebugState.IncGnmFrameNum();
+    // The guest finished building/submitting this frame's UI. Publish a whole
+    // validated HUD snapshot for subsequent native GUI rendering. No IPC or IO.
+    Ps4RtHud::FrameBoundary();
     return ORBIS_OK;
 }
 

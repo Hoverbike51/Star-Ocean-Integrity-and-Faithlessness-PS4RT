@@ -11,11 +11,17 @@
 #include <winhttp.h>
 #include <dwmapi.h>
 #include <commctrl.h>
+#include <uxtheme.h>
 #include <SDL3/SDL.h>
 #include <vulkan/vulkan.h>
 
 #include "resource.h"
 #include "native_preparer.h"
+#include "game_languages.h"
+#include "cheat_catalog.h"
+#include "native_tweaks.h"
+#include "../tools/hud/hud_preset_library.h"
+#include "dlss_probe.h"
 #include "localization.h"
 #include "save_backup_guard.h"
 #include "save_preview.h"
@@ -27,6 +33,7 @@
 #include "../gpu/shim/ps4rt_scene_preset.h"
 #include "../gpu/shim/ps4rt_graphics.h"
 #include "../gpu/shim/ps4rt_output.h"
+#include "../gpu/shim/ps4rt_ultrawide.h"
 #include "../gpu/shim/ps4rt_display.h"
 
 #include <algorithm>
@@ -37,6 +44,7 @@
 #include <cstdint>
 #include <cstring>
 #include <ctime>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -57,6 +65,7 @@ constexpr UINT WM_AUTOPLAY = WM_APP + 2;
 constexpr UINT WM_GAME_STARTED = WM_APP + 3;
 constexpr UINT WM_GAME_ENDED = WM_APP + 4;
 constexpr UINT WM_UPDATE_DONE = WM_APP + 5;
+constexpr UINT WM_CHEATS_READY = WM_APP + 6;
 constexpr wchar_t kClassName[] = L"PS4RTStarOceanLauncher";
 constexpr wchar_t kVersion[] = PS4RT_VERSION_WSTRING;
 constexpr int kHeaderHeight = 104;
@@ -65,21 +74,23 @@ constexpr int kMinimizeButton = 500;
 constexpr int kCloseButton = 501;
 constexpr int kBindingHitBase = 3000;
 
-enum class Page { Home, Game, Video, Controls, Advanced, Logs };
+enum class Page { Home, Game, Cheats, Video, Controls, Advanced, Logs, Tweaks };
 enum class GameIdentity { None, Tested, Untested, Rejected };
 enum class Indicator { Red, Orange, Green };
 enum Hit {
     HitNone, HitClose, HitMinimize,
-    HitHome, HitGame, HitVideo, HitControls, HitAdvanced, HitLogs,
+    HitTweaks, HitLeaderEnabled, HitCameraFollow, HitHudPreset, HitHudRefresh, HitHudOpenPresets,
+    HitHome, HitGame, HitCheats, HitCheatsToggle, HitFastForward, HitFastForwardPad, HitVideo, HitControls, HitAdvanced, HitLogs,
     HitFolder, HitPkg, HitPrepare, HitPlay, HitStop,
     HitSaveFolder, HitDefaultSaveFolder, HitOpenSaves, HitBackupToggle,
     HitOpenBackups, HitImportSave, HitShortcut, HitGameLanguage,
-    HitGpu, HitMonitor, HitOutputAspect, HitDisplayMode, HitAspectRatio, HitVsync, HitFpsLimit, HitFsr, HitResolution,
+    HitGpu, HitMonitor, HitOutputAspect, HitDisplayMode, HitAspectRatio, HitVsync, HitFpsLimit, HitFsr, HitResolution, HitNativeRender,
     HitAnisotropy, HitAsyncShaders, HitForceFsr3,
     HitController, HitKeyboardProfile, HitResetControls,
     HitLauncherLanguage, HitUpdateToggle, HitCheckUpdate,
     HitPerformanceOverlay, HitOverlayFps, HitOverlayFrameTime, HitOverlayUpscaler,
     HitOverlayGpu, HitOverlayCpu, HitOverlayRam, HitOverlayVram, HitOverlayVersion,
+    HitOverlayGpuModel, HitOverlayCpuModel,
     HitOverlayScale, HitOverlayCorner, HitOverlayOpacity, HitOverlayLayout,
     HitOpenCache, HitClearCache, HitOpenRoot, HitRefresh,
     HitExportLogs, HitClearLogs, HitPerformanceTools, HitPerformanceCapture, HitOpenPerformanceCaptures,
@@ -96,6 +107,10 @@ struct UpdateEvent {
     std::optional<So5Update::Prepared> prepared;
     So5Update::Code code = So5Update::Code::Current;
     std::string detail;
+};
+
+struct CheatInspection {
+    So5Cheats::Result result; std::string error; unsigned generation=0;
 };
 
 struct AppState {
@@ -125,11 +140,13 @@ struct AppState {
     std::vector<Ps4RtDisplay::Target> displays;
     std::wstring selected_display_id;
     int scene_preset=-1;
+    int native_render_height=1080;
     int output_aspect=Ps4RtOutput::All;
     bool shader_cache_present=false, runtime_present=false;
     std::wstring display_mode = L"borderless";
     bool window_stretch = false;
     std::wstring game_language = L"Français";
+    std::vector<std::wstring> game_languages;
     std::wstring launcher_language = L"Français";
     std::wstring keyboard_profile = L"AZERTY";
     std::wstring controller = L"Automatique · SDL3";
@@ -138,7 +155,7 @@ struct AppState {
         std::wstring label;
         bool fsr4_supported{}, discrete{}, cpu{};
         uint64_t local_memory{};
-        bool fsr3_technical{},fsr3_recommended{};
+        bool fsr3_technical{},fsr3_recommended{},dlss_supported{};
         std::string device_key;
     };
     std::vector<GraphicsAdapter> graphics_adapters;
@@ -202,6 +219,8 @@ struct AppState {
     bool overlay_upscaler = true;
     bool overlay_gpu = false;
     bool overlay_cpu = false;
+    bool overlay_gpu_model = true;
+    bool overlay_cpu_model = false;
     bool overlay_ram = false;
     bool overlay_vram = false;
     bool overlay_version = false;
@@ -217,7 +236,17 @@ struct AppState {
     int popup_hit = HitNone;
     int popup_scroll = 0;
     std::vector<std::wstring> popup_values;
-    std::array<int, 6> scroll{};
+    std::vector<bool> popup_enabled;
+    bool cheats_enabled=false,fast_forward=true,fast_forward_pad=false;
+    std::vector<So5Cheats::Entry> cheat_entries;
+    std::thread cheat_thread; std::mutex cheat_mutex; std::unique_ptr<CheatInspection> cheat_result;
+    unsigned cheat_generation=0; bool cheat_loading=false,cheat_refresh_pending=false;
+    std::array<int, 8> scroll{};
+    So5Tweaks::Settings tweaks;
+    std::unique_ptr<So5Hud::PresetLibrary> hud_library;
+    So5Hud::LibrarySnapshot hud_snapshot;
+    So5Hud::Aspect hud_aspect=So5Hud::Aspect::Standard;
+    std::wstring hud_selection;
     bool clipping_content_hits = false;
     int content_bottom = 0;
     std::thread update_thread;
@@ -236,6 +265,7 @@ struct AppState {
 AppState app;
 bool selected_gpu_supports_fsr3();
 bool selected_gpu_supports_fsr4();
+bool selected_gpu_supports_dlss();
 
 // GDI+ objects must be released before GdiplusShutdown, on the UI thread.
 struct DrawingCache {
@@ -316,7 +346,7 @@ std::wstring display_mode_label() {
 }
 
 std::wstring fsr_label() {
-    return app.fsr == L"Désactivé" || app.fsr == L"Disabled" ? loc(L"Désactivé",L"Disabled") : app.fsr;
+    return app.fsr == L"off" || app.fsr == L"Désactivé" || app.fsr == L"Disabled" ? loc(L"Désactivé",L"Disabled") : app.fsr;
 }
 
 std::wstring overlay_corner_label() {
@@ -324,6 +354,8 @@ std::wstring overlay_corner_label() {
     case 0: return loc(L"En haut à gauche",L"Top left");
     case 2: return loc(L"En bas à gauche",L"Bottom left");
     case 3: return loc(L"En bas à droite",L"Bottom right");
+    case 4: return loc(L"En haut au milieu",L"Top center");
+    case 5: return loc(L"En bas au milieu",L"Bottom center");
     default: return loc(L"En haut à droite",L"Top right");
     }
 }
@@ -467,10 +499,13 @@ fs::path executable_directory() {
 }
 
 fs::path find_root() {
-    fs::path directory = executable_directory();
-    if (fs::exists(directory / "launcher" / "assets")) return directory;
-    if (fs::exists(directory.parent_path() / "launcher" / "assets")) return directory.parent_path();
-    return directory;
+    const fs::path executable = executable_directory();
+    // Installed root/bin and local out/gpu builds share the same assets.
+    // Resolve from the executable only; never depend on the working directory.
+    auto directory=executable;
+    for(int level=0;level<3;++level,directory=directory.parent_path())
+        if(fs::is_directory(directory/L"launcher/assets"))return directory;
+    return executable;
 }
 
 fs::path program_path(const fs::path& root, const wchar_t* name) {
@@ -552,6 +587,7 @@ void detect_environment() {
                 VkPhysicalDeviceProperties2 physical{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,&identity};
                 vkGetPhysicalDeviceProperties2(devices[i],&physical);
                 auto& adapter=app.graphics_adapters.back();
+                adapter.dlss_supported=So5ProbeDlss(instance,devices[i],program_path(app.root,L"Star Ocean 5.exe").parent_path());
                 adapter.fsr3_technical=Ps4RtUpscaler::ProbeFsr3(devices[i]);
                 adapter.fsr3_recommended=Ps4RtUpscaler::Fsr3Recommended(properties.vendorID,properties.deviceName);
                 adapter.device_key=Ps4RtUpscaler::Fsr3DeviceKey(properties.vendorID,properties.deviceID,identity.deviceUUID);
@@ -593,6 +629,7 @@ const AppState::GraphicsAdapter* selected_adapter() {
         });
     return &*selected;
 }
+bool selected_gpu_supports_dlss() {const auto* gpu=selected_adapter();return gpu && gpu->dlss_supported;}
 bool selected_gpu_supports_fsr4() {const auto* gpu=selected_adapter();return gpu && gpu->fsr4_supported;}
 bool fsr3_forced() {
     const auto* gpu=selected_adapter();
@@ -653,7 +690,9 @@ void write_bool(const wchar_t* key, bool value) {
 
 void save_settings() {
     fs::create_directories(app.config.parent_path());
+    write_bool(L"CheatsEnabled",app.cheats_enabled);write_bool(L"FastForward",app.fast_forward);write_bool(L"FastForwardPad",app.fast_forward_pad);
     WritePrivateProfileStringW(L"Launcher",L"ScenePreset",std::to_wstring(app.scene_preset).c_str(),app.config.c_str());
+    WritePrivateProfileStringW(L"Launcher",L"NativeRenderHeight",std::to_wstring(app.native_render_height).c_str(),app.config.c_str());
     WritePrivateProfileStringW(L"Launcher",L"ForceFsr3Adapter",app.force_fsr3_gpu.c_str(),app.config.c_str());
     WritePrivateProfileStringW(L"Launcher", L"GamePath", app.game_path.c_str(), app.config.c_str());
     WritePrivateProfileStringW(L"Launcher", L"SaveRoot", app.save_root.c_str(), app.config.c_str());
@@ -686,6 +725,8 @@ void save_settings() {
     write_bool(L"OverlayUpscaler", app.overlay_upscaler);
     write_bool(L"OverlayGpu", app.overlay_gpu);
     write_bool(L"OverlayCpu", app.overlay_cpu);
+    write_bool(L"OverlayGpuModel", app.overlay_gpu_model);
+    write_bool(L"OverlayCpuModel", app.overlay_cpu_model);
     write_bool(L"OverlayRam", app.overlay_ram);
     write_bool(L"OverlayVram", app.overlay_vram);
     write_bool(L"OverlayVersion", app.overlay_version);
@@ -697,11 +738,14 @@ void save_settings() {
 
 void load_settings() {
     app.scene_preset=std::clamp(_wtoi(ini_value(L"Launcher",L"ScenePreset",L"-1").c_str()),-1,4);
+    app.native_render_height=Ps4RtScene::NativeHeight(_wtoi(ini_value(L"Launcher",L"NativeRenderHeight",L"1080").c_str()));
+    app.cheats_enabled=ini_bool(L"CheatsEnabled",false);app.fast_forward=ini_bool(L"FastForward",true);app.fast_forward_pad=ini_bool(L"FastForwardPad",false);
     app.force_fsr3_gpu=ini_value(L"Launcher",L"ForceFsr3Adapter",L"");
     app.game_path = ini_value(L"Launcher", L"GamePath", L"");
     app.save_root = ini_value(L"Launcher", L"SaveRoot", L"");
     app.pkg_extract_root = ini_value(L"Launcher", L"PkgExtractRoot", L"");
     app.fsr = ini_value(L"Launcher", L"FSR", L"FSR 3.1");
+    if(app.fsr!=L"FSR 3.1" && app.fsr!=L"FSR 4" && app.fsr!=L"DLSS") app.fsr=L"off";
     app.resolution = ini_value(L"Launcher", L"Resolution", L"1920 × 1080");
     app.resolution = Ps4RtOutput::Labels[Ps4RtOutput::Parse(app.resolution)];
     app.selected_display_id=ini_value(L"Launcher",L"TargetDisplay",L"");
@@ -748,11 +792,13 @@ void load_settings() {
     app.overlay_upscaler = ini_bool(L"OverlayUpscaler", true);
     app.overlay_gpu = ini_bool(L"OverlayGpu", false);
     app.overlay_cpu = ini_bool(L"OverlayCpu", false);
+    app.overlay_gpu_model = ini_bool(L"OverlayGpuModel", true);
+    app.overlay_cpu_model = ini_bool(L"OverlayCpuModel", false);
     app.overlay_ram = ini_bool(L"OverlayRam", false);
     app.overlay_vram = ini_bool(L"OverlayVram", false);
     app.overlay_version = ini_bool(L"OverlayVersion", false);
     app.overlay_scale = std::clamp(int(GetPrivateProfileIntW(L"Launcher", L"OverlayScale", 100, app.config.c_str())), 50, 300);
-    app.overlay_corner = std::clamp(int(GetPrivateProfileIntW(L"Launcher", L"OverlayCorner", 1, app.config.c_str())), 0, 3);
+    app.overlay_corner = std::clamp(int(GetPrivateProfileIntW(L"Launcher", L"OverlayCorner", 1, app.config.c_str())), 0, 5);
     app.overlay_opacity = std::clamp(int(GetPrivateProfileIntW(L"Launcher", L"OverlayOpacity", 50, app.config.c_str())), 0, 100);
     app.overlay_layout = GetPrivateProfileIntW(L"Launcher", L"OverlayLayout", 0, app.config.c_str()) == 1 ? 1 : 0;
 }
@@ -795,6 +841,8 @@ bool supported_game_folder(const fs::path& path) {
 }
 
 void update_game_status() {
+    app.game_languages.clear();
+    ++app.cheat_generation;app.cheat_entries.clear();
     app.detected_game_title.clear();app.detected_game_version.clear();
     app.game_verified = false;
     app.game_identity = GameIdentity::None;
@@ -835,6 +883,10 @@ void update_game_status() {
             app.prepared = false;
             return;
         }
+        app.game_languages = So5Languages::Detect(selected);
+        if (!app.game_languages.empty() &&
+            std::find(app.game_languages.begin(), app.game_languages.end(), app.game_language) == app.game_languages.end())
+            app.game_language = app.game_languages.front();
         const fs::path output = app.root / "out" / "CUSA03219";
         std::string prepared_id;
         std::ifstream marker(output / "prepared-title-id.txt");
@@ -876,7 +928,7 @@ std::wstring pick_path(bool folder, const wchar_t* custom_title = nullptr) {
     dialog->SetTitle(custom_title ? custom_title :
         (folder ? loc(L"Choisir le dossier du jeu PS4",L"Choose the PS4 game directory") : loc(L"Choisir un fichier PKG",L"Choose a PKG file")));
     COMDLG_FILTERSPEC filter[] = {{L"Paquets PlayStation 4 (*.pkg)", L"*.pkg"}, {L"Tous les fichiers", L"*.*"}};
-    if (!folder) dialog->SetFileTypes(2, filter);
+    if (!folder) dialog->SetFileTypes(2,filter);
     std::wstring result;
     if (SUCCEEDED(dialog->Show(app.window))) {
         IShellItem* item = nullptr;
@@ -1073,6 +1125,7 @@ void import_save() {
 std::wstring fsr_argument() {
     if (app.fsr == L"FSR 3.1") return L"fsr3";
     if (app.fsr == L"FSR 4") return L"fsr4";
+    if (app.fsr == L"DLSS") return L"dlss";
     return L"off";
 }
 
@@ -1082,7 +1135,16 @@ std::wstring resolution_argument() {
 }
 
 std::uint64_t available_outputs() {
-    return app.display_mode==L"fullscreen"?app.target_display.fullscreen_modes:app.target_display.window_modes;
+    return app.display_mode==L"windowed"?app.target_display.window_modes:app.target_display.fullscreen_modes;
+}
+
+bool requested_ultrawide() {
+    return app.game_verified && app.detected_title_id==L"CUSA03219" &&
+        app.detected_game_version==L"01.00" && Ps4RtUltrawide::Wide(Ps4RtOutput::Parse(app.resolution));
+}
+Ps4RtOutput::Size requested_scene_output() {
+    const int output=Ps4RtOutput::Parse(app.resolution);
+    return requested_ultrawide()?Ps4RtOutput::Size{Ps4RtOutput::Widths[output],Ps4RtOutput::Heights[output]}:Ps4RtOutput::Content(output);
 }
 
 std::wstring output_aspect_label(int aspect) {
@@ -1161,11 +1223,7 @@ std::string display_mode_key() {
 }
 
 int language_code() {
-    if (app.game_language == L"Français") return 2;
-    if (app.game_language == L"Español") return 3;
-    if (app.game_language == L"Deutsch") return 4;
-    if (app.game_language == L"Italiano") return 5;
-    return 1;
+    return So5Languages::SystemCode(app.game_languages.empty() ? L"English" : app.game_language);
 }
 
 void write_runtime_settings() {
@@ -1178,10 +1236,11 @@ void write_runtime_settings() {
         std::string line;
         while (std::getline(input, line)) lines.push_back(line);
     }
-    const auto scene_output=Ps4RtOutput::Content(Ps4RtOutput::Parse(app.resolution));
+    const auto scene_output=requested_scene_output();
     if(app.fsr!=L"off") app.scene_preset=Ps4RtScene::ForOutput(app.scene_preset,scene_output.width,scene_output.height);
     const std::vector<std::pair<std::string, std::string>> settings = {
         {"scene_preset",std::to_string(app.scene_preset)},
+        {"native_render_height",std::to_string(app.native_render_height)},
         {"upscaler", narrow_ascii(fsr_argument())},
         {"output_res", Ps4RtOutput::Arguments[Ps4RtOutput::Parse(app.resolution)]},
         {"output_aspect", std::to_string(app.output_aspect)},
@@ -1196,6 +1255,8 @@ void write_runtime_settings() {
         {"overlay_upscaler", app.overlay_upscaler ? "1" : "0"},
         {"overlay_gpu", app.overlay_gpu ? "1" : "0"},
         {"overlay_cpu", app.overlay_cpu ? "1" : "0"},
+        {"overlay_gpu_model", app.overlay_gpu_model ? "1" : "0"},
+        {"overlay_cpu_model", app.overlay_cpu_model ? "1" : "0"},
         {"overlay_ram", app.overlay_ram ? "1" : "0"},
         {"overlay_vram", app.overlay_vram ? "1" : "0"},
         {"overlay_version", app.overlay_version ? "1" : "0"},
@@ -1248,6 +1309,7 @@ void read_live_runtime_settings() {
         if(found->second=="off") app.fsr=L"off";
         else if(found->second=="fsr3") app.fsr=L"FSR 3.1";
         else if(found->second=="fsr4") app.fsr=L"FSR 4";
+        else if(found->second=="dlss") app.fsr=L"DLSS";
     }
     if(auto found=values.find("display_mode");found!=values.end() &&
         (found->second=="windowed" || found->second=="borderless" || found->second=="fullscreen"))
@@ -1255,6 +1317,7 @@ void read_live_runtime_settings() {
     if(auto found=values.find("output_res");found!=values.end())
         for(int i=0;i<Ps4RtOutput::Count;++i) if(found->second==Ps4RtOutput::Arguments[i]) app.resolution=Ps4RtOutput::Labels[i];
     app.scene_preset=integer("scene_preset",app.scene_preset,-1,4);
+    app.native_render_height=Ps4RtScene::NativeHeight(integer("native_render_height",app.native_render_height,0,2160));
     app.output_aspect=integer("output_aspect",app.output_aspect,0,Ps4RtOutput::AspectCount-1);
     app.vsync=integer("vsync",app.vsync,0,1)!=0;
     app.window_stretch=integer("window_stretch",app.window_stretch,0,1)!=0;
@@ -1266,10 +1329,11 @@ void read_live_runtime_settings() {
     const std::pair<const char*,bool*> items[]={
         {"overlay_fps",&app.overlay_fps},{"overlay_frametime",&app.overlay_frametime},{"overlay_upscaler",&app.overlay_upscaler},
         {"overlay_gpu",&app.overlay_gpu},{"overlay_cpu",&app.overlay_cpu},{"overlay_ram",&app.overlay_ram},
-        {"overlay_vram",&app.overlay_vram},{"overlay_version",&app.overlay_version}};
+        {"overlay_vram",&app.overlay_vram},{"overlay_version",&app.overlay_version},
+        {"overlay_gpu_model",&app.overlay_gpu_model},{"overlay_cpu_model",&app.overlay_cpu_model}};
     for(const auto& [key,value]:items) *value=integer(key,*value,0,1)!=0;
     app.overlay_scale=integer("overlay_scale",app.overlay_scale,50,300);
-    app.overlay_corner=integer("overlay_corner",app.overlay_corner,0,3);
+    app.overlay_corner=integer("overlay_corner",app.overlay_corner,0,5);
     app.overlay_opacity=integer("overlay_opacity",app.overlay_opacity,0,100);
     app.overlay_layout=integer("overlay_layout",app.overlay_layout,0,1);
     refresh_target_display(true);save_settings();
@@ -1422,6 +1486,10 @@ void extract_pkg(const fs::path& pkg) {
                 app.detected_title_id = extracted_title_id;
                 app.detected_region = extracted_region;
                 app.game_verified = extracted_identity == GameIdentity::Tested || extracted_identity == GameIdentity::Untested;
+                app.game_languages = app.game_verified ? So5Languages::Detect(game) : std::vector<std::wstring>{};
+                if (!app.game_languages.empty() &&
+                    std::find(app.game_languages.begin(), app.game_languages.end(), app.game_language) == app.game_languages.end())
+                    app.game_language = app.game_languages.front();
                 if (extracted_identity == GameIdentity::Tested)
                     app.status = loc(L"PKG extrait · jeu détecté · préparation requise",L"PKG extracted · game detected · preparation required");
                 else if (extracted_identity == GameIdentity::Untested)
@@ -1490,6 +1558,7 @@ void extract_pkg(const fs::path& pkg) {
 }
 
 void run_game(bool prepare_only) {
+    if(app.hud_library&&app.hud_library->Snapshot().busy)return;
     refresh_target_display(true);
     if (app.busy || app.update_transfer) return;
     update_game_status();
@@ -1507,6 +1576,7 @@ void run_game(bool prepare_only) {
     if(!prepare_only && app.fsr==L"FSR 4" && !selected_gpu_supports_fsr4()) {
         reject_incompatible_fsr4(); save_settings(); write_runtime_settings(); return;
     }
+    if(!prepare_only && app.fsr==L"DLSS" && !selected_gpu_supports_dlss()) {app.fsr=L"off";append_log(L"DLSS: selected GPU or optional components unavailable; original rendering selected.");}
     if(!prepare_only && app.fsr==L"FSR 3.1" && !selected_gpu_supports_fsr3()) {
         app.fsr=L"off";save_settings();
         append_log(L"Upscaler: FSR 3.1 is unavailable under the selected GPU policy; original rendering selected.");
@@ -1520,6 +1590,11 @@ void run_game(bool prepare_only) {
     app.busy = true;
     app.status = prepare_only ? loc(L"Préparation en cours…",L"Preparing…") : loc(L"Démarrage du jeu…",L"Starting game…");
     append_log(prepare_only ? L"Preparing " + app.detected_title_id + L"…" : L"Starting STAR OCEAN 5 (" + app.detected_title_id + L")…");
+    if (!prepare_only) {
+        if (app.game_languages.empty()) append_log(L"Game language: no verified text-language metadata; using system language code 1 (English).");
+        else append_log(L"Game language: system code " + std::to_wstring(language_code()) + L" (verified installed text language).");
+        save_settings();
+    }
     InvalidateRect(app.window, nullptr, FALSE);
 
     std::wstring game = app.game_path;
@@ -1533,17 +1608,19 @@ void run_game(bool prepare_only) {
     std::wstring keyboard_buttons = keyboard_button_map();
     std::wstring keyboard_axes = keyboard_axis_map();
     std::wstring controller_profile = app.controller;
-    const bool keyboard_only = !app.detected_controllers.empty() &&
-                              app.controller == app.detected_controllers.back();
+    // The Keyboard entry selects the keyboard mapping view. Keep SDL hot-plug active:
+    // a pad connected after launch must work alongside the keyboard without a restart.
+    const bool keyboard_only = false;
     std::wstring title_id = app.detected_title_id;
     const int gpu_index = app.gpu_index;
     const auto* adapter=selected_adapter();
     const std::wstring fsr3_force=fsr3_forced() && adapter?std::wstring(adapter->device_key.begin(),adapter->device_key.end()):L"";
     const bool performance_capture = app.performance_tools && app.performance_capture;
     const bool automatic_save_backups = app.automatic_save_backups;
+    const bool cheats_enabled=app.cheats_enabled,fast_forward=app.fast_forward,fast_forward_pad=app.fast_forward_pad;
     const auto display_device=std::wstring(app.target_display.info.szDevice);
     const auto aspect=std::to_wstring(app.output_aspect);
-    std::thread([prepare_only, game, fsr, resolution, save_root, language, ui_language, keyboard_profile, keyboard_buttons, keyboard_axes, controller_profile, keyboard_only, title_id, root, gpu_index, fsr3_force, performance_capture, automatic_save_backups,display_device,aspect] {
+    std::thread([prepare_only, game, fsr, resolution, save_root, language, ui_language, keyboard_profile, keyboard_buttons, keyboard_axes, controller_profile, keyboard_only, title_id, root, gpu_index, fsr3_force, performance_capture, automatic_save_backups,display_device,aspect,cheats_enabled,fast_forward,fast_forward_pad] {
         DWORD code = 1;
         const fs::path output = root / "out" / "CUSA03219";
         try {
@@ -1591,6 +1668,7 @@ void run_game(bool prepare_only) {
         std::wstring command = quote(runtime.wstring()) + L" " + quote((output / "boot-linked.bin").wstring()) +
             L" --app0 " + quote(game) + L" --user " + quote(user.wstring()) + L" --content-profile " +
             quote((output / "content.bin").wstring()) + L" --timeout 0";
+        if(cheats_enabled && fs::is_regular_file(output/L"cheats.txt")) command+=L" --cheats "+quote((output/L"cheats.txt").wstring());
         struct SavedEnv { std::wstring key, old; bool existed{}; };
         std::vector<SavedEnv> saved;
         auto set_env = [&](const wchar_t* key, const std::wstring& value) {
@@ -1599,6 +1677,7 @@ void run_game(bool prepare_only) {
             saved.push_back(std::move(item)); SetEnvironmentVariableW(key, value.c_str());
         };
         set_env(L"PS4RT_BC6_FLOAT", L"unsigned"); set_env(L"PS4RT_TRANSITION_SNAPSHOT", L"1");
+        set_env(L"SO5_NATIVE_4K_TEST",L"0");
         set_env(L"PS4RT_OBJECT_MOTION", L"0"); set_env(L"PS4RT_FSR1", L"0");
         // Keep cached pipelines on demand. The experimental bulk warm-up can crash inside
         // AMD's Vulkan driver while several pipelines are created concurrently, preventing
@@ -1614,6 +1693,8 @@ void run_game(bool prepare_only) {
         set_env(L"PS4RT_GPU_USER_DIR", (user / "gpu").wstring());
         set_env(L"PS4RT_GPU_ID", std::to_wstring(gpu_index));
         set_env(L"SO5_FSR3_FORCE_GPU",fsr3_force);
+        set_env(L"PS4RT_FAST_FORWARD",fast_forward?L"3":L"1");
+        set_env(L"SO5_FAST_FORWARD_PAD",fast_forward_pad?L"1":L"0");
         set_env(L"PS4RT_BUILD_VERSION", kVersion);
         set_env(L"PS4RT_PERF_CAPTURE_DIR", performance_capture ? capture_directory.wstring() : L"");
         set_env(L"PS4RT_CONFIG", (output / "ps4rt.ini").wstring());
@@ -1631,8 +1712,8 @@ void run_game(bool prepare_only) {
         set_env(L"PS4RT_SAVEDATA_ROOT", L"");
         const fs::path overlay = root / "gpu" / "assets" / "star_ocean_overlay.png";
         if (fs::is_regular_file(overlay)) set_env(L"PS4RT_OVERLAY_BACKGROUND", overlay.wstring());
-        const fs::path sounds = root / "gpu" / "assets" / "sounds";
-        if (fs::is_directory(sounds)) set_env(L"PS4RT_MENU_SOUND_DIR", sounds.wstring());
+        // Use the integrated synthesized cues validated in the native 4K test.
+        set_env(L"PS4RT_MENU_SOUND_DIR",L"");
         STARTUPINFOW startup{sizeof(startup)};
         startup.dwFlags = STARTF_USESTDHANDLES;
         startup.hStdOutput = write_pipe;
@@ -1847,13 +1928,15 @@ void setting_row(Graphics& g, int id, const std::wstring& label, const std::wstr
 }
 
 void open_selector(int setting, std::initializer_list<const wchar_t*> values) {
+    app.popup_enabled.clear();
     app.popup_hit = setting;
     app.popup_scroll=0;
-    app.popup_values.clear();
+    app.popup_values.clear();app.popup_enabled.clear();
     for (const auto* value : values) app.popup_values.emplace_back(value);
 }
 
 void open_selector(int setting, const std::vector<std::wstring>& values) {
+    app.popup_enabled.clear();
     app.popup_hit = setting;
     app.popup_scroll=0;
     app.popup_values = values;
@@ -1883,13 +1966,14 @@ void draw_selector(Graphics& g, REAL width, REAL height) {
     for (int row = 0; row < visible; ++row) {
         const size_t i=app.popup_scroll+row;
         const REAL row_y = y + 62 + row * row_height;
-        const bool hot = app.hover == 2000 + static_cast<int>(i);
+        const bool enabled=app.popup_enabled.empty() || (i<app.popup_enabled.size() && app.popup_enabled[i]);
+        const bool hot = enabled && app.hover == 2000 + static_cast<int>(i);
         if (hot) { SolidBrush selected(Color(160, 24, 78, 105)); rounded(g, RectF(x + 12, row_y, panel_width - 24, row_height - 3), 9, selected); }
-        text(g, app.popup_values[i], x + 25, row_y, panel_width - 70, row_height - 3, 15,
-             Color(255, 232, 242, 247), hot ? FontStyleBold : FontStyleRegular);
+        text(g, app.popup_values[i]+(enabled?L"":L" · "+std::wstring(loc(L"Indisponible",L"Unavailable"))), x + 25, row_y, panel_width - 70, row_height - 3, 15,
+             enabled?Color(255, 232, 242, 247):Color(255,100,119,130), hot ? FontStyleBold : FontStyleRegular);
         text(g, L"›", x + panel_width - 48, row_y, 22, row_height - 3, 18, Color(255, 82, 207, 244), FontStyleBold, StringAlignmentCenter);
         g.FillRectangle(&divider, RectF(x + 22, row_y + row_height - 2, panel_width - 44, 1));
-        hit(2000 + static_cast<int>(i), x + 12, row_y, panel_width - 24, row_height - 3);
+        if(enabled) hit(2000 + static_cast<int>(i), x + 12, row_y, panel_width - 24, row_height - 3);
     }
 }
 
@@ -2002,12 +2086,14 @@ void draw_header(Graphics& g, REAL width) {
     const UiWords w = words();
     struct Nav { Page page; int id; const wchar_t* label; } nav[] = {
         {Page::Home, HitHome, w.home}, {Page::Game, HitGame, w.game},
+        {Page::Cheats,HitCheats,loc(L"Triches",L"Cheats")},
+        {Page::Tweaks,HitTweaks,ps4rt_localize(app.launcher_language,L"Tweaks")},
         {Page::Video, HitVideo, w.video}, {Page::Controls, HitControls, w.controls},
         {Page::Advanced, HitAdvanced, w.advanced}, {Page::Logs, HitLogs, w.logs}
     };
     const REAL nav_x = 245, nav_width = width - nav_x - 18;
-    const REAL tab_width = nav_width / 6.0f;
-    for (int i = 0; i < 6; ++i) {
+    const REAL tab_width = nav_width / REAL(std::size(nav));
+    for (int i = 0; i < int(std::size(nav)); ++i) {
         const REAL x = nav_x + i * tab_width;
         const bool selected = app.page == nav[i].page;
         if (selected || app.hover == nav[i].id) {
@@ -2109,8 +2195,141 @@ void draw_game(Graphics& g, REAL x, REAL y, REAL width, REAL height) {
            right_width - 32, 34, false, app.game_verified && !app.pkg_selected);
 
     card(g, right_x, top + 514, right_width, std::max<REAL>(176, height - 584));
-    setting_row(g, HitGameLanguage, loc(L"Langue du jeu",L"Game language"), app.game_language, right_x + 12, top + 527, right_width - 24);
+    setting_row(g, HitGameLanguage, loc(L"Langue du jeu",L"Game language"), app.game_languages.empty() ? L"—" : app.game_language,
+                right_x + 12, top + 527, right_width - 24, !app.game_languages.empty() && !app.busy && !app.pkg_selected);
     button(g, HitShortcut, loc(L"Créer un raccourci Bureau",L"Create desktop shortcut"), right_x + 12, top + 587, right_width - 24, 42);
+}
+
+
+void refresh_native_cheats() {
+    if(app.cheat_loading){app.cheat_refresh_pending=true;return;}
+    if(app.cheat_thread.joinable())app.cheat_thread.join();
+    if(!app.game_verified||app.pkg_selected){app.cheat_entries.clear();return;}
+    app.cheat_loading=true;
+    const auto game=fs::path(app.game_path),output=app.root/L"out/CUSA03219";
+    const auto expected_title=app.detected_title_id,expected_version=app.detected_game_version;
+    const unsigned generation=++app.cheat_generation;const HWND window=app.window;
+    app.cheat_thread=std::thread([game,output,expected_title,expected_version,generation,window] {
+        auto event=std::make_unique<CheatInspection>();event->generation=generation;
+        try {
+            ps4rt::prepare_title(game,output,{},&event->result);
+            const auto title=ps4rt::title_id_from_sfo(game/L"sce_sys/param.sfo"),version=ps4rt::string_from_sfo(game/L"sce_sys/param.sfo","APP_VER");
+            if(from_utf8(title.data(),int(title.size()))!=expected_title||from_utf8(version.data(),int(version.size()))!=expected_version)throw std::runtime_error("game identity changed during inspection");
+        }catch(const std::exception& e){event->error=e.what();}
+        {std::lock_guard lock(app.cheat_mutex);app.cheat_result=std::move(event);}
+        PostMessageW(window,WM_CHEATS_READY,0,0);
+    });
+}
+void receive_native_cheats() {
+    if(app.cheat_thread.joinable())app.cheat_thread.join();
+    std::unique_ptr<CheatInspection> event;{std::lock_guard lock(app.cheat_mutex);event=std::move(app.cheat_result);}
+    app.cheat_loading=false;
+    if(event&&event->generation==app.cheat_generation) {
+        if(event->error.empty()) {
+            app.cheat_entries=std::move(event->result.entries);
+        } else {
+            append_log(L"Cheats: "+from_utf8(event->error.data(),int(event->error.size())));
+        }
+        for(const auto& problem:event->result.problems)append_log(L"Cheats: "+from_utf8(problem.data(),int(problem.size())));
+    }
+    if(app.cheat_refresh_pending){app.cheat_refresh_pending=false;if(app.page==Page::Cheats)refresh_native_cheats();}
+    InvalidateRect(app.window,nullptr,FALSE);
+}
+int cheats_content_height(){
+    int height=286;bool any=false;
+    for(const auto& entry:app.cheat_entries)if(entry.builtin){any=true;height+=entry.id==8?140:108;}
+    return height+(any?0:54);
+}
+void draw_cheats(Graphics& g,REAL x,REAL y,REAL width,REAL) {
+    auto tr=[](const wchar_t* value){return ps4rt_localize(app.launcher_language,value);};
+    page_title(g,tr(L"Built-in cheats"),tr(L"Cheats"),x,y,width);
+    if(app.game_verified)text(g,app.detected_title_id+L" / APP_VER "+app.detected_game_version,x+width*.5f,y+34,width*.5f,30,14,Color(255,168,206,224),FontStyleRegular,StringAlignmentFar);
+    card(g,x,y+76,width,122);
+    toggle_row(g,HitCheatsToggle,tr(L"Allow cheats"),app.cheats_enabled,x+12,y+84,width-24,!app.game_running);
+    paragraph(g,tr(L"All cheats start off. Activate them in the in-game menu."),x+26,y+146,width-52,46,15,Color(255,174,200,214));
+    REAL row=y+216;
+    {
+        text(g,tr(L"Built-in cheats"),x+4,row,width-8,32,17,Color(255,82,207,244),FontStyleBold);row+=42;
+        bool any=false;
+        for(const auto& entry:app.cheat_entries)if(entry.builtin) {
+            any=true;
+            const REAL row_height=entry.builtin&&entry.id==8?132:100;
+            if(g.IsVisible(RectF(x,row,width,row_height))) {
+                card(g,x,row,width,row_height);
+                const auto* definition=entry.builtin?So5Cheats::Catalog(entry.id):nullptr;
+                const auto title=definition?std::wstring(tr(definition->title)):from_utf8(entry.name.data(),int(entry.name.size()));
+                std::wstring detail=definition?std::wstring(tr(definition->detail)):entry.description.empty()?std::wstring(tr(L"No description supplied by the profile.")):from_utf8(entry.description.data(),int(entry.description.size()));
+                if(definition&&definition->warning)detail+=L"\n"+std::wstring(tr(definition->warning));
+                text(g,title,x+20,row+10,width-230,30,17,Color(255,235,244,248),FontStyleBold);
+                paragraph(g,detail,x+20,row+43,width-230,row_height-47,15,Color(255,175,201,215));
+                const auto state=tr(entry.available?L"Ready":L"Unavailable for this executable");
+                paragraph(g,state,x+width-196,row+14,176,44,14,entry.available?Color(255,88,220,178):Color(255,244,184,101));
+            }
+            row+=row_height+8;
+        }
+        if(!any){paragraph(g,tr(app.cheat_loading?L"Checking cheat compatibility...":L"No compatible built-in cheats."),x+20,row,width-40,42,15,Color(255,174,200,214));row+=54;}
+        row+=12;
+    }
+}
+
+bool tweaks_supported() {
+    return app.game_verified&&!app.pkg_selected&&app.detected_title_id==L"CUSA03219"&&app.detected_game_version==L"01.00";
+}
+fs::path tweaks_config(){return app.root/L"out/CUSA03219/ps4rt.ini";}
+void refresh_tweaks() {
+    app.tweaks=So5Tweaks::Read(tweaks_config());
+    if(!tweaks_supported()||app.game_running||app.busy)return;
+    const auto aspect=requested_ultrawide()?(Ps4RtOutput::Group(Ps4RtOutput::Parse(app.resolution))==Ps4RtOutput::Ratio32_9?So5Hud::Aspect::Superwide:So5Hud::Aspect::Wide):So5Hud::Aspect::Standard;
+    if(app.hud_library&&app.hud_library->Snapshot().busy)return;
+    if(!app.hud_library||app.hud_aspect!=aspect) {
+        app.hud_aspect=aspect;app.hud_selection.clear();
+        app.hud_library=std::make_unique<So5Hud::PresetLibrary>(tweaks_config().parent_path(),aspect,true);
+    }
+    app.hud_library->Refresh();app.hud_snapshot=app.hud_library->Snapshot();
+    SetTimer(app.window,5,100,nullptr);
+}
+void save_tweak(const char* key,int value) {
+    if(app.game_running||app.busy||!tweaks_supported())return;
+    try {So5Tweaks::Write(tweaks_config(),key,value);}
+    catch(const std::exception& error) {append_log(L"Tweaks: "+from_utf8(error.what(),int(std::strlen(error.what()))));}
+    app.tweaks=So5Tweaks::Read(tweaks_config());
+}
+constexpr int tweaks_content_height=920;
+void draw_tweaks(Graphics& g,REAL x,REAL y,REAL width,REAL) {
+    auto tr=[](const wchar_t* value){return ps4rt_localize(app.launcher_language,value);};
+    page_title(g,tr(L"Tweaks"),tr(L"Tweaks"),x,y,width);
+    paragraph(g,tr(L"Configure before launch. During play, use Tweaks in the in-game menu."),x+8,y+76,width-16,62,15,Color(255,174,200,214));
+    const bool enabled=tweaks_supported()&&!app.game_running&&!app.busy;
+    REAL row=y+150;
+    card(g,x,row,width,190);
+    text(g,std::wstring(loc(L"Changer de leader",L"Change leader"))+L" (Let Me Lead! Fidel!)",x+20,row+12,width-40,32,17,Color(255,235,244,248),FontStyleBold);
+    paragraph(g,tr(L"During exploration, use D-pad left/right or O/P to change leader. Your choice is saved."),x+20,row+50,width-40,60,15,Color(255,175,201,215));
+    toggle_row(g,HitLeaderEnabled,tr(L"Change leader during exploration"),app.tweaks.leader,x+12,row+124,width-24,enabled);
+    row+=206;
+    card(g,x,row,width,190);
+    text(g,tr(L"Camera fixes"),x+20,row+12,width-40,32,17,Color(255,235,244,248),FontStyleBold);
+    paragraph(g,tr(L"Softens positional camera follow. Original restores the game setting."),x+20,row+50,width-40,60,15,Color(255,175,201,215));
+    const wchar_t* modes[]={L"Original",L"Light damping",L"Damped follow"};
+    setting_row(g,HitCameraFollow,tr(L"Camera follow"),tr(modes[std::clamp(app.tweaks.camera,0,2)]),x+12,row+124,width-24,enabled);
+    row+=206;
+    card(g,x,row,width,250);
+    text(g,tr(L"HUD adjust"),x+20,row+12,width-40,32,17,Color(255,235,244,248),FontStyleBold);
+    paragraph(g,tr(L"Place exported JSON presets in the game’s hud-presets folder. Incompatible presets are disabled."),x+20,row+50,width-40,62,15,Color(255,175,201,215));
+    const bool hud_enabled=enabled&&app.hud_library&&!app.hud_snapshot.busy;
+    setting_row(g,HitHudPreset,tr(L"HUD layout"),app.hud_selection.empty()?tr(L"Select a HUD preset"):app.hud_selection,x+12,row+120,width-24,hud_enabled&&!app.hud_snapshot.entries.empty());
+    button(g,HitHudRefresh,tr(L"Refresh presets"),x+12,row+184,(width-36)/2,48,false,enabled&&!app.hud_snapshot.busy);
+    button(g,HitHudOpenPresets,tr(L"Open HUD presets folder"),x+24+(width-36)/2,row+184,(width-36)/2,48,false,tweaks_supported());
+    row+=260;
+    const wchar_t* status=nullptr;
+    switch(app.hud_snapshot.status) {
+    case So5Hud::LibraryStatus::Scanning:status=L"Scanning HUD presets…";break;
+    case So5Hud::LibraryStatus::Applying:status=L"Applying HUD layout…";break;
+    case So5Hud::LibraryStatus::Saved:status=L"HUD layout saved for the next launch.";break;
+    case So5Hud::LibraryStatus::Failed:status=L"HUD layout could not be changed. See Logs and diagnostics.";break;
+    default:break;
+    }
+    if(!tweaks_supported())status=L"This patch is unavailable for the prepared game version.";
+    if(status)paragraph(g,tr(status),x+20,row,width-40,76,15,Color(255,174,200,214));
 }
 
 void draw_video(Graphics& g, REAL x, REAL y, REAL width, REAL) {
@@ -2134,22 +2353,28 @@ void draw_video(Graphics& g, REAL x, REAL y, REAL width, REAL) {
     setting_row(g, HitAspectRatio, loc(L"Ajustement de l’image",L"Image fitting"),
                 app.window_stretch ? loc(L"Étirer à la fenêtre",L"Stretch to window") : loc(L"Original",L"Original"),
                 x + 12, top + 337, column - 24, app.display_mode == L"windowed");
-    paragraph(g, loc(L"Le jeu s’ouvre sur l’écran sélectionné. La scène et le HUD restent en 16:9.",
-                     L"The game opens on the selected monitor. The scene and HUD remain 16:9."), x + 18, top + 402, column - 36, 58, 12, Color(255, 128, 154, 168));
+    paragraph(g, requested_ultrawide()?
+        loc(L"Ultralarge expérimental : redémarrez le jeu pour changer de format. Le HUD et les vidéos conservent leurs proportions d’origine.",
+            L"Experimental ultrawide: restart the game to change aspect ratio. HUD and movies keep their original proportions."):
+        loc(L"Le jeu s’ouvre sur l’écran sélectionné. La scène et le HUD restent en 16:9.",
+            L"The game opens on the selected monitor. The scene and HUD remain 16:9."), x + 18, top + 402, column - 36, 58, 12, Color(255, 128, 154, 168));
 
     const REAL middle = x + column + gap;
     text(g, loc(L"RENDU",L"RENDERING"), middle + 16, top + 12, column - 32, 24, 10, Color(255, 82, 207, 244), FontStyleBold);
     setting_row(g, HitFsr, loc(L"Reconstruction",L"Upscaling"), fsr_label(), middle + 12, top + 47, column - 24,
                 Ps4RtOutput::TemporalAllowed(Ps4RtOutput::Parse(app.resolution)));
-    setting_row(g, HitNone, loc(L"Résolution de rendu",L"Render resolution"),
-                ([&] { const auto output=Ps4RtOutput::Content(Ps4RtOutput::Parse(app.resolution)); const auto input=Ps4RtScene::Input(app.fsr==L"off"?-1:Ps4RtScene::ForOutput(app.scene_preset,output.width,output.height),output.width,output.height); return std::to_wstring(input.width)+L" × "+std::to_wstring(input.height); })(), middle + 12, top + 105, column - 24, false);
+    setting_row(g, HitNativeRender, loc(L"Résolution de rendu",L"Render resolution"),
+                ([&] { const auto output=requested_scene_output(); const auto input=Ps4RtScene::RequestedInput(app.fsr!=L"off",app.scene_preset,app.native_render_height,output.width,output.height,requested_ultrawide()); return std::to_wstring(input.width)+L" × "+std::to_wstring(input.height); })(), middle + 12, top + 105, column - 24, app.fsr==L"off");
     setting_row(g, HitAnisotropy, loc(L"Filtrage anisotrope",L"Anisotropic filtering"), app.anisotropy ? L"×" + std::to_wstring(app.anisotropy) : loc(L"Réglage du jeu",L"Game setting"), middle + 12, top + 163, column - 24);
     toggle_row(g, HitAsyncShaders, loc(L"Shaders asynchrones",L"Asynchronous shaders"), app.async_shaders, middle + 12, top + 221, column - 24);
+    paragraph(g,loc(L"Sans reconstruction, choisissez manuellement la résolution interne. L’UI conserve la résolution de sortie. Avec FSR ou DLSS, les presets gèrent la résolution interne.",
+        L"Without reconstruction, choose the internal resolution manually. The UI keeps the output resolution. With FSR or DLSS, quality presets control the internal resolution."),
+        middle+16,top+280,column-32,82,12,Color(255,147,174,188));
     paragraph(g, app.async_shaders ? loc(L"Gameplay plus fluide et moins de saccades de compilation. De brefs scintillements visuels peuvent apparaître.",
                                          L"Smoother gameplay with fewer shader compilation stutters. Brief visual flicker may occasionally appear.")
                                    : loc(L"Compilation synchrone : moins d’artefacts temporaires, mais des saccades peuvent survenir lors du premier passage.",
                                          L"Synchronous compilation: fewer temporary artifacts, but first-time shader compilation may stutter."),
-              middle + 16, top + 294, column - 32, 85, 10, Color(255, 128, 154, 168));
+              middle + 16, top + 370, column - 32, 82, 10, Color(255, 128, 154, 168));
 
     const REAL lower = top + 488;
     card(g, x, lower, width, 225);
@@ -2256,7 +2481,7 @@ void draw_advanced(Graphics& g, REAL x, REAL y, REAL width, REAL) {
     paragraph(g,!gpu || !gpu->fsr3_technical?loc(L"Les fonctions Vulkan requises sont indisponibles. Le forçage est désactivé.",L"Required Vulkan capabilities are unavailable. The override is disabled."):gpu->fsr3_recommended?loc(L"FSR 3.1 est disponible automatiquement sur ce GPU.",L"FSR 3.1 is automatically available on this GPU."):
         loc(L"Déverrouillage pour une carte sous le seuil recommandé ou non reconnue. Appliqué au prochain lancement du jeu.",L"Unlock for a below-threshold or unrecognized GPU. Applies on the next game launch."),x+18,top+582,width-36,56,12,Color(255,147,174,188));
     const REAL overlay_top = top + 666;
-    card(g, x, overlay_top, width, 350);
+    card(g, x, overlay_top, width, 408);
     text(g, loc(L"AFFICHAGE DES PERFORMANCES",L"PERFORMANCE OVERLAY"), x + 18, overlay_top + 12,
          width - 36, 24, 10, Color(255, 82, 207, 244), FontStyleBold);
     toggle_row(g, HitPerformanceOverlay, loc(L"Afficher en jeu",L"Show in game"),
@@ -2280,8 +2505,12 @@ void draw_advanced(Graphics& g, REAL x, REAL y, REAL width, REAL) {
                app.overlay_vram, item_right, item_top + 116, item_width);
     toggle_row(g, HitOverlayVersion, loc(L"Version de l’application",L"Application version"),
                app.overlay_version, item_right, item_top + 174, item_width);
+    toggle_row(g, HitOverlayGpuModel, loc(L"Afficher le modèle du GPU",L"Show GPU model"),
+               app.overlay_gpu_model, x + 12, item_top + 232, item_width, app.overlay_gpu);
+    toggle_row(g, HitOverlayCpuModel, loc(L"Afficher le modèle du CPU",L"Show CPU model"),
+               app.overlay_cpu_model, item_right, item_top + 232, item_width, app.overlay_cpu);
 
-    const REAL appearance_top = overlay_top + 368;
+    const REAL appearance_top = overlay_top + 426;
     card(g, x, appearance_top, width, 180);
     text(g, loc(L"APPARENCE DE L’AFFICHAGE",L"OVERLAY APPEARANCE"), x + 18, appearance_top + 12,
          width - 36, 24, 10, Color(255, 82, 207, 244), FontStyleBold);
@@ -2300,6 +2529,12 @@ void draw_advanced(Graphics& g, REAL x, REAL y, REAL width, REAL) {
     paragraph(g,loc(L"Affiche les boutons de capture dans Journal et diagnostic. Ne démarre aucun enregistrement.",
                    L"Shows capture buttons in Logs and diagnostics. Does not start recording."),
               x+18,tools_top+72,width-36,48,12,Color(255,147,174,188));
+
+    const REAL shortcuts_y=y+1718;
+    card(g,x,shortcuts_y,width,184);
+    toggle_row(g,HitFastForward,loc(L"Mode accéléré (maintenir F2)",L"Fast-forward (hold F2)"),app.fast_forward,x+16,shortcuts_y+16,width-32);
+    toggle_row(g,HitFastForwardPad,loc(L"Raccourci manette R2 + L2",L"Controller shortcut R2 + L2"),app.fast_forward_pad,x+16,shortcuts_y+76,width-32,app.fast_forward);
+    paragraph(g,loc(L"Le raccourci est refusé si une touche a été réaffectée. L’audio est coupé pendant l’accélération.",L"The shortcut is refused when its inputs are remapped. Audio is muted during fast-forward."),x+22,shortcuts_y+134,width-44,46,12,Color(255,174,200,214));
 
 }
 
@@ -2448,6 +2683,8 @@ void render_launcher(Graphics& g, int width, int height) {
     switch (app.page) {
     case Page::Home: draw_home(g, static_cast<REAL>(width), static_cast<REAL>(height)); break;
     case Page::Game: draw_game(g, x, page_y, content_width, content_height + scroll); break;
+    case Page::Cheats: draw_cheats(g,x,page_y,content_width,content_height+scroll);break;
+    case Page::Tweaks: draw_tweaks(g,x,page_y,content_width,content_height+scroll);break;
     case Page::Video: draw_video(g, x, page_y, content_width, content_height + scroll); break;
     case Page::Controls: draw_controls(g, x, page_y, content_width, content_height + scroll); break;
     case Page::Advanced: draw_advanced(g, x, page_y, content_width, content_height + scroll); break;
@@ -2457,7 +2694,8 @@ void render_launcher(Graphics& g, int width, int height) {
     app.clipping_content_hits = false;
     g.Restore(content_state);
     const int required = app.page == Page::Controls ? 1200 : app.page == Page::Game ? 900 :
-                         app.page == Page::Advanced ? 1640 : app.page == Page::Video ? 1040 : 0;
+                         app.page == Page::Advanced ? 1998 : app.page == Page::Video ? 1040 :
+                         app.page == Page::Tweaks ? tweaks_content_height : app.page == Page::Cheats ? cheats_content_height() : 0;
     const int viewport = height - kHeaderHeight - 28;
     if (required > viewport && app.page != Page::Home) {
         const REAL track_x = width - 15.0f, track_y = kHeaderHeight + 16.0f, track_height = height - kHeaderHeight - 54.0f;
@@ -2483,10 +2721,14 @@ void paint(HWND window) {
     RECT client{}; GetClientRect(window, &client);
     if (client.right > 0 && client.bottom > 0) {
         auto& canvas = drawing_cache.canvas;
-        if (!canvas || canvas->GetWidth()!=UINT(client.right) || canvas->GetHeight()!=UINT(client.bottom))
+        const bool resized=!canvas || canvas->GetWidth()!=UINT(client.right) || canvas->GetHeight()!=UINT(client.bottom);
+        if (resized)
             canvas=std::make_unique<Bitmap>(client.right,client.bottom,PixelFormat32bppPARGB);
         { Graphics g(canvas.get());
-          if(region_type!=ERROR) { Region region(dirty); g.SetClip(&region); }
+          // A new backing bitmap has no retained pixels. Fully initialize it
+          // before presenting, even when Windows invalidated only a thin edge.
+          if(resized)g.SetClip(Rect(0,0,client.right,client.bottom));
+          else if(region_type!=ERROR) { Region region(dirty); g.SetClip(&region); }
           else g.SetClip(Rect(ps.rcPaint.left,ps.rcPaint.top,ps.rcPaint.right-ps.rcPaint.left,ps.rcPaint.bottom-ps.rcPaint.top));
           render_launcher(g,client.right,client.bottom); }
         Graphics target(dc); target.DrawImage(canvas.get(),Rect(0,0,client.right,client.bottom),
@@ -2505,13 +2747,18 @@ int render_benchmark(const fs::path& output) {
     std::ofstream report(output); report<<"{\n  \"samples\": [\n";
     bool first=true, all_matches=true;
     LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency);
+    for(const auto& d:So5Cheats::Definitions)app.cheat_entries.push_back({d.id,true,true,d.name,{},{},{},{}});
+    // Synthetic, read-only UI fixture. No game preparation or owner settings.
+    app.game_verified=true;app.detected_title_id=L"CUSA03219";app.detected_game_version=L"01.00";
+    app.hud_library=std::make_unique<So5Hud::PresetLibrary>(output.parent_path()/L"unused-benchmark-fixture",So5Hud::Aspect::Standard,true);
+    app.hud_snapshot.entries={{"Example 16:9",true},{"Example 32:9",false}};
     struct BenchmarkLanguage { const wchar_t* name; const char* code; };
     for(const auto language: {BenchmarkLanguage{L"English","en"}, {L"Français","fr"}, {L"Español","es"},
             {L"Português","pt"}, {L"Português (Brasil)","pt-BR"}, {L"Italiano","it"}, {L"Deutsch","de"},
             {L"Русский","ru"}, {L"简体中文","zh-CN"}, {L"繁體中文","zh-TW"}, {L"한국어","ko"}, {L"日本語","ja"}}) {
     app.launcher_language=language.name;
     for(auto size: {std::pair{1360,760},std::pair{1720,1040}}) {
-        for(auto page: {Page::Home,Page::Game,Page::Video,Page::Controls,Page::Advanced,Page::Logs}) {
+        for(auto page: {Page::Home,Page::Game,Page::Cheats,Page::Tweaks,Page::Video,Page::Controls,Page::Advanced,Page::Logs}) {
             app.page=page;
             if(page==Page::Logs && app.logs.empty()) for(int i=0;i<1200;++i)
                 app.logs.push_back(L"Benchmark log · Runtime: shader and texture diagnostic line with a deliberately long payload; no game or personal data. Line "+std::to_wstring(i));
@@ -2530,8 +2777,8 @@ int render_benchmark(const fs::path& output) {
             std::sort(times.begin(),times.end());
             // A hover-only repaint must produce exactly the same pixels as a full
             // repaint, including transparent artwork, rounded edges and text.
-            const int before=page==Page::Home?HitPlay:page==Page::Game?HitFolder:page==Page::Video?HitOutputAspect:page==Page::Controls?HitResetControls:page==Page::Advanced?HitUpdateToggle:HitExportLogs;
-            const int after=page==Page::Home?HitVideo:page==Page::Game?HitPkg:page==Page::Video?HitResolution:page==Page::Controls?HitController:page==Page::Advanced?HitOverlayGpu:HitClearLogs;
+            const int before=page==Page::Home?HitPlay:page==Page::Game?HitFolder:page==Page::Tweaks?HitTweaks:page==Page::Cheats?HitCheatsToggle:page==Page::Video?HitOutputAspect:page==Page::Controls?HitResetControls:page==Page::Advanced?HitUpdateToggle:HitExportLogs;
+            const int after=page==Page::Home?HitVideo:page==Page::Game?HitPkg:page==Page::Tweaks?HitHome:page==Page::Cheats?HitHome:page==Page::Video?HitResolution:page==Page::Controls?HitController:page==Page::Advanced?HitOverlayGpu:HitClearLogs;
             Bitmap retained(size.first,size.second,PixelFormat32bppPARGB), expected(size.first,size.second,PixelFormat32bppPARGB);
             app.hover=before;
             { Graphics g(&retained); render_launcher(g,size.first,size.second); }
@@ -2568,6 +2815,22 @@ int render_benchmark(const fs::path& output) {
                 retained.UnlockBits(&a);
             }
             all_matches &= matches;
+            if(page==Page::Cheats && std::string(language.code)=="fr" && size.first==1360) {
+                const CLSID bmp={0x557cf400,0x1a04,0x11d3,{0x9a,0x73,0,0,0xf8,0x1e,0xf3,0x2e}};
+                expected.Save((output.parent_path()/L"cheats-launcher-fr-top.bmp").c_str(),&bmp,nullptr);
+                app.scroll[int(Page::Cheats)]=std::max(0,cheats_content_height()-(size.second-kHeaderHeight-28));
+                {Graphics g(&expected);render_launcher(g,size.first,size.second);}
+                expected.Save((output.parent_path()/L"cheats-launcher-fr-bottom.bmp").c_str(),&bmp,nullptr);
+                app.scroll[int(Page::Cheats)]=0;
+            }
+            if(page==Page::Tweaks && size.first==1360) {
+                const CLSID bmp={0x557cf400,0x1a04,0x11d3,{0x9a,0x73,0,0,0xf8,0x1e,0xf3,0x2e}};
+                expected.Save((output.parent_path()/(L"tweaks-launcher-"+std::wstring(language.code,language.code+std::strlen(language.code))+L".bmp")).c_str(),&bmp,nullptr);
+            }
+            if(page==Page::Video && size.first==1360) {
+                const CLSID bmp={0x557cf400,0x1a04,0x11d3,{0x9a,0x73,0,0,0xf8,0x1e,0xf3,0x2e}};
+                expected.Save((output.parent_path()/(L"video-launcher-"+std::wstring(language.code,language.code+std::strlen(language.code))+L".bmp")).c_str(),&bmp,nullptr);
+            }
             if(!first) report<<",\n"; first=false;
             report<<"    {\"language\":\""<<language.code<<"\",\"width\":"<<size.first<<",\"height\":"<<size.second
                   <<",\"page\":"<<int(page)<<",\"median_ms\":"<<times[times.size()/2]
@@ -2795,8 +3058,16 @@ void receive_update_event() {
 
 void apply_selector(int index) {
     if (index < 0 || index >= static_cast<int>(app.popup_values.size())) return;
+    if(!app.popup_enabled.empty() && (size_t(index)>=app.popup_enabled.size() || !app.popup_enabled[index])) return;
     const std::wstring value = app.popup_values[index];
     switch (app.popup_hit) {
+    case HitCameraFollow: save_tweak("camera_follow",index);break;
+    case HitHudPreset:
+        if(app.hud_library&&!app.game_running&&!app.busy&&tweaks_supported()&&size_t(index)<app.hud_snapshot.entries.size()&&app.hud_snapshot.entries[index].compatible) {
+            app.hud_selection=value;app.hud_library->Apply(size_t(index));
+            app.hud_snapshot=app.hud_library->Snapshot();SetTimer(app.window,5,100,nullptr);
+        }
+        break;
     case HitGpu:
         app.gpu_index = -1;
         for (const auto& adapter : app.graphics_adapters)
@@ -2819,9 +3090,16 @@ void apply_selector(int index) {
         refresh_target_display(); write_runtime_settings(); break;
     case HitFpsLimit: app.fps_limit = (value == L"Illimitée" || value == L"Unlimited") ? 0 : _wtoi(value.c_str()); write_runtime_settings(); break;
     case HitFsr:
-        if(value==L"FSR 4" && !selected_gpu_supports_fsr4()) reject_incompatible_fsr4();
+        if(index==0) app.fsr=L"off";
+        else if(value==L"FSR 4" && !selected_gpu_supports_fsr4()) reject_incompatible_fsr4();
+        else if(value==L"DLSS") app.fsr=selected_gpu_supports_dlss()?L"DLSS":L"off";
         else app.fsr=value==L"FSR 3.1" && !selected_gpu_supports_fsr3()?L"off":value;
         write_runtime_settings(); break;
+    case HitNativeRender:
+        if(app.fsr==L"off" && index<int(Ps4RtScene::NativeHeights.size())) {
+            app.native_render_height=Ps4RtScene::NativeHeights[size_t(index)];write_runtime_settings();
+        }
+        break;
     case HitResolution:
         app.resolution = value;
         if (!Ps4RtOutput::TemporalAllowed(Ps4RtOutput::Parse(value))) app.fsr=L"off";
@@ -2831,15 +3109,14 @@ void apply_selector(int index) {
     case HitOverlayScale: app.overlay_scale = std::clamp(_wtoi(value.c_str()), 50, 300); write_runtime_settings(); break;
     case HitOverlayOpacity: app.overlay_opacity = std::clamp(_wtoi(value.c_str()), 0, 100); write_runtime_settings(); break;
     case HitOverlayCorner:
-        if (value == loc(L"En haut à gauche",L"Top left")) app.overlay_corner = 0;
-        else if (value == loc(L"En bas à gauche",L"Bottom left")) app.overlay_corner = 2;
-        else if (value == loc(L"En bas à droite",L"Bottom right")) app.overlay_corner = 3;
-        else app.overlay_corner = 1;
+        app.overlay_corner = std::clamp(index, 0, 5);
         write_runtime_settings(); break;
     case HitOverlayLayout:
         app.overlay_layout = value == loc(L"Une donnée par ligne",L"One item per line") ? 1 : 0;
         write_runtime_settings(); break;
-    case HitGameLanguage: app.game_language = value; break;
+    case HitGameLanguage:
+        if (std::find(app.game_languages.begin(), app.game_languages.end(), value) != app.game_languages.end()) app.game_language = value;
+        break;
     case HitController: app.controller = value; break;
     case HitKeyboardProfile:
         app.keyboard_profile = (value == L"Personnalisé" || value == L"Custom") ? L"Custom" : value;
@@ -2848,7 +3125,7 @@ void apply_selector(int index) {
     case HitLauncherLanguage: app.launcher_language = value; update_game_status(); refresh_saves(); refresh_controllers(); break;
     default: break;
     }
-    app.popup_hit = HitNone; app.popup_values.clear(); save_settings(); sync_chrome();
+    app.popup_hit = HitNone; app.popup_values.clear();app.popup_enabled.clear(); save_settings(); sync_chrome();
 }
 
 void activate(int id) {
@@ -2950,7 +3227,7 @@ void activate(int id) {
         app.hover=HitNone; return;
     }
     if (id >= 2000) { apply_selector(id - 2000); return; }
-    if (id == 1999) { app.popup_hit = HitNone; app.popup_values.clear(); return; }
+    if (id == 1999) { app.popup_hit = HitNone; app.popup_values.clear();app.popup_enabled.clear(); return; }
     if (id >= 1000) {
         int selected = id - 1000;
         if (selected < static_cast<int>(app.saves.size())) {
@@ -2963,6 +3240,35 @@ void activate(int id) {
     case HitClose: SendMessageW(app.window, WM_CLOSE, 0, 0); break;
     case HitMinimize: ShowWindow(app.window, SW_MINIMIZE); break;
     case HitHome: app.page = Page::Home; break;
+    case HitTweaks: app.page=Page::Tweaks;refresh_tweaks();break;
+    case HitLeaderEnabled: save_tweak("exploration_leader_enabled",!app.tweaks.leader);break;
+    case HitCameraFollow:
+        if(!app.game_running&&!app.busy&&tweaks_supported())open_selector(id,{ps4rt_localize(app.launcher_language,L"Original"),ps4rt_localize(app.launcher_language,L"Light damping"),ps4rt_localize(app.launcher_language,L"Damped follow")});
+        break;
+    case HitHudRefresh: refresh_tweaks();break;
+    case HitHudOpenPresets:
+        if(tweaks_supported()) {
+            const auto directory=tweaks_config().parent_path()/L"hud-presets";
+            std::error_code error;fs::create_directories(directory,error);
+            if(error||reinterpret_cast<INT_PTR>(ShellExecuteW(app.window,L"open",directory.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32) {
+                append_log(L"Tweaks: could not open the HUD presets folder.");
+                show_modal(ps4rt_localize(app.launcher_language,L"HUD layout"),
+                    ps4rt_localize(app.launcher_language,L"Could not open the HUD presets folder."),L"OK");
+            }
+        }
+        break;
+    case HitHudPreset:
+        if(app.hud_library&&!app.game_running&&!app.busy&&tweaks_supported()&&!app.hud_snapshot.busy) {
+            std::vector<std::wstring> names;
+            for(const auto& entry:app.hud_snapshot.entries)names.push_back(from_utf8(entry.name.data(),int(entry.name.size())));
+            open_selector(id,names);app.popup_enabled.clear();
+            for(const auto& entry:app.hud_snapshot.entries)app.popup_enabled.push_back(entry.compatible);
+        }
+        break;
+    case HitCheats: app.page=Page::Cheats;refresh_native_cheats();break;
+    case HitCheatsToggle: app.cheats_enabled=!app.cheats_enabled;save_settings();break;
+    case HitFastForward: app.fast_forward=!app.fast_forward;save_settings();break;
+    case HitFastForwardPad: app.fast_forward_pad=!app.fast_forward_pad;save_settings();break;
     case HitGame: app.page = Page::Game; update_game_status(); refresh_saves(); break;
     case HitVideo:
         refresh_target_display(); app.shader_cache_present=fs::is_directory(cache_directory());
@@ -3042,16 +3348,23 @@ void activate(int id) {
         // limits that the original 60 FPS game loop can honour without changing game speed.
         open_selector(HitFpsLimit, {L"30 FPS",L"60 FPS",loc(L"Illimitée",L"Unlimited")}); break;
     case HitFsr: {
-        std::vector<std::wstring> choices{loc(L"Désactivé",L"Disabled")};
-        if(Ps4RtOutput::TemporalAllowed(Ps4RtOutput::Parse(app.resolution))) {
-            if(selected_gpu_supports_fsr3()) choices.push_back(L"FSR 3.1");
-            if(selected_gpu_supports_fsr4()) choices.push_back(L"FSR 4");
+        open_selector(HitFsr,{loc(L"Désactivé",L"Disabled"),L"FSR 3.1",L"FSR 4",L"DLSS"});
+        const bool temporal=Ps4RtOutput::TemporalAllowed(Ps4RtOutput::Parse(app.resolution));
+        app.popup_enabled={true,temporal&&selected_gpu_supports_fsr3(),temporal&&selected_gpu_supports_fsr4(),temporal&&selected_gpu_supports_dlss()};break;
+    }
+    case HitNativeRender: {
+        if(app.fsr!=L"off") break;
+        std::vector<std::wstring> choices;
+        const auto output=requested_scene_output();
+        for(int height:Ps4RtScene::NativeHeights) {
+            const auto size=Ps4RtScene::NativeInput(height,output.width,output.height,requested_ultrawide());
+            choices.push_back(std::to_wstring(size.width)+L" × "+std::to_wstring(size.height));
         }
-        open_selector(HitFsr,choices);break;
+        open_selector(HitNativeRender,choices);break;
     }
     case HitResolution:
         refresh_target_display();
-        app.popup_hit=HitResolution; app.popup_values.clear(); app.popup_scroll=0;
+        app.popup_hit=HitResolution; app.popup_values.clear();app.popup_enabled.clear(); app.popup_scroll=0;
         for(int output:Ps4RtOutput::Order)
             if(Ps4RtOutput::Filter(available_outputs(),app.output_aspect)&(1ull<<output))
                 app.popup_values.emplace_back(Ps4RtOutput::Labels[output]);
@@ -3065,6 +3378,8 @@ void activate(int id) {
     case HitOverlayUpscaler: app.overlay_upscaler = !app.overlay_upscaler; save_settings(); write_runtime_settings(); break;
     case HitOverlayGpu: app.overlay_gpu = !app.overlay_gpu; save_settings(); write_runtime_settings(); break;
     case HitOverlayCpu: app.overlay_cpu = !app.overlay_cpu; save_settings(); write_runtime_settings(); break;
+    case HitOverlayGpuModel: app.overlay_gpu_model = !app.overlay_gpu_model; save_settings(); write_runtime_settings(); break;
+    case HitOverlayCpuModel: app.overlay_cpu_model = !app.overlay_cpu_model; save_settings(); write_runtime_settings(); break;
     case HitOverlayRam: app.overlay_ram = !app.overlay_ram; save_settings(); write_runtime_settings(); break;
     case HitOverlayVram: app.overlay_vram = !app.overlay_vram; save_settings(); write_runtime_settings(); break;
     case HitOverlayVersion: app.overlay_version = !app.overlay_version; save_settings(); write_runtime_settings(); break;
@@ -3074,7 +3389,8 @@ void activate(int id) {
         open_selector(HitOverlayOpacity, {L"0 %",L"25 %",L"50 %",L"75 %",L"100 %"}); break;
     case HitOverlayCorner:
         open_selector(HitOverlayCorner, {loc(L"En haut à gauche",L"Top left"),loc(L"En haut à droite",L"Top right"),
-                                           loc(L"En bas à gauche",L"Bottom left"),loc(L"En bas à droite",L"Bottom right")}); break;
+                                           loc(L"En bas à gauche",L"Bottom left"),loc(L"En bas à droite",L"Bottom right"),
+                                           loc(L"En haut au milieu",L"Top center"),loc(L"En bas au milieu",L"Bottom center")}); break;
     case HitOverlayLayout:
         open_selector(HitOverlayLayout, {loc(L"Une seule ligne",L"One line"),
                                          loc(L"Une donnée par ligne",L"One item per line")}); break;
@@ -3084,7 +3400,13 @@ void activate(int id) {
     case HitImportSave: import_save(); break;
     case HitShortcut: create_shortcut(); break;
     case HitGameLanguage:
-        open_selector(HitGameLanguage, {L"English",L"Français",L"Deutsch",L"Italiano",L"Español"}); break;
+        if (!app.game_languages.empty() && !app.busy && !app.pkg_selected) {
+            open_selector(HitGameLanguage, {L"English",L"Français",L"Deutsch",L"Italiano",L"Español"});
+            // Keep unavailable translations visible; only installed, routed text languages are selectable.
+            for (const auto& value : app.popup_values)
+                app.popup_enabled.push_back(std::find(app.game_languages.begin(), app.game_languages.end(), value) != app.game_languages.end());
+        }
+        break;
     case HitController:
         refresh_controllers(); open_selector(HitController, app.detected_controllers); break;
     case HitKeyboardProfile:
@@ -3179,8 +3501,17 @@ std::wstring sdl_key_name(WPARAM key, LPARAM details) {
     }
 }
 
+HBRUSH chrome_background() {
+    static const HBRUSH brush=CreateSolidBrush(RGB(8,27,42));
+    return brush;
+}
 LRESULT CALLBACK chrome_button_proc(HWND button, UINT message, WPARAM wparam, LPARAM lparam,
                                     UINT_PTR subclass, DWORD_PTR) {
+    if(message==WM_ERASEBKGND) {
+        RECT area{};GetClientRect(button,&area);
+        FillRect(reinterpret_cast<HDC>(wparam),&area,chrome_background());
+        return 1;
+    }
     if (message == WM_GETDLGCODE && wparam == VK_RETURN) return DLGC_WANTMESSAGE;
     if (message == WM_KEYDOWN && wparam == VK_RETURN) {
         SendMessageW(GetParent(button), WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(button), BN_CLICKED),
@@ -3218,7 +3549,31 @@ void draw_chrome_button(const DRAWITEMSTRUCT& item) {
         MoveToEx(item.hDC, cx + 5, cy - 5, nullptr); LineTo(item.hDC, cx - 6, cy + 6);
     } else { MoveToEx(item.hDC, cx - 6, cy + 2, nullptr); LineTo(item.hDC, cx + 7, cy + 2); }
     SelectObject(item.hDC, old); DeleteObject(stroke);
-    if (item.itemState & ODS_FOCUS) { InflateRect(&area, -3, -3); DrawFocusRect(item.hDC, &area); }
+    if (item.itemState & ODS_FOCUS) {
+        InflateRect(&area,-3,-3);
+        HPEN focus=CreatePen(PS_SOLID,1,RGB(82,207,244));
+        const auto previous_pen=SelectObject(item.hDC,focus);
+        const auto previous_brush=SelectObject(item.hDC,GetStockObject(NULL_BRUSH));
+        Rectangle(item.hDC,area.left,area.top,area.right,area.bottom);
+        SelectObject(item.hDC,previous_brush);SelectObject(item.hDC,previous_pen);DeleteObject(focus);
+    }
+}
+
+void position_chrome(HWND window,int width) {
+    if(!app.minimize_button||!app.close_button)return;
+    static int previous_width=-1;
+    if(width==previous_width)return; // Height-only resize needs no child move.
+    previous_width=width;
+    constexpr UINT flags=SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOREDRAW|SWP_NOCOPYBITS;
+    HDWP batch=BeginDeferWindowPos(2);
+    if(batch)batch=DeferWindowPos(batch,app.minimize_button,nullptr,width-104,0,52,kDragHeight,flags);
+    if(batch)batch=DeferWindowPos(batch,app.close_button,nullptr,width-52,0,52,kDragHeight,flags);
+    if(!batch||!EndDeferWindowPos(batch)) {
+        SetWindowPos(app.minimize_button,nullptr,width-104,0,52,kDragHeight,flags);
+        SetWindowPos(app.close_button,nullptr,width-52,0,52,kDragHeight,flags);
+    }
+    // One coalesced repaint, without synchronous intermediate child erasure.
+    RedrawWindow(window,nullptr,nullptr,RDW_INVALIDATE|RDW_ALLCHILDREN|RDW_NOERASE);
 }
 
 void confirm_close() {
@@ -3257,6 +3612,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window, nullptr, instance, nullptr);
         for (HWND button : {app.minimize_button, app.close_button}) {
             SetWindowSubclass(button, chrome_button_proc, 1, 0);
+            SetWindowTheme(button,L"",L"");
             TOOLINFOW tool{sizeof(tool)};
             tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS; tool.hwnd = window;
             tool.uId = reinterpret_cast<UINT_PTR>(button); tool.lpszText = const_cast<wchar_t*>(L"");
@@ -3274,6 +3630,12 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     case WM_DRAWITEM:
         if (wparam == kMinimizeButton || wparam == kCloseButton) {
             draw_chrome_button(*reinterpret_cast<DRAWITEMSTRUCT*>(lparam)); return TRUE;
+        }
+        break;
+    case WM_CTLCOLORBTN:
+        if(reinterpret_cast<HWND>(lparam)==app.minimize_button||reinterpret_cast<HWND>(lparam)==app.close_button) {
+            SetBkColor(reinterpret_cast<HDC>(wparam),RGB(8,27,42));
+            return reinterpret_cast<LRESULT>(chrome_background());
         }
         break;
     case WM_NCCALCSIZE:
@@ -3316,11 +3678,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         }
         break;
     case WM_SIZE:
-        if (wparam != SIZE_MINIMIZED) {
-            const int width = LOWORD(lparam);
-            MoveWindow(app.minimize_button, width - 104, 0, 52, kDragHeight, TRUE);
-            MoveWindow(app.close_button, width - 52, 0, 52, kDragHeight, TRUE);
-        }
+        if(wparam==SIZE_MINIMIZED)return 0;
+        position_chrome(window,LOWORD(lparam));
         InvalidateRect(window, nullptr, FALSE); return 0;
     case WM_MOUSEWHEEL: {
         if (app.modal_visible) return 0;
@@ -3343,7 +3702,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         }
         RECT client{}; GetClientRect(window, &client);
         const int required = app.page == Page::Controls ? 1200 : app.page == Page::Game ? 900 :
-                             app.page == Page::Advanced ? 1640 : app.page == Page::Video ? 1040 : 0;
+                             app.page == Page::Advanced ? 1998 : app.page == Page::Video ? 1040 :
+                             app.page == Page::Tweaks ? tweaks_content_height : app.page == Page::Cheats ? cheats_content_height() : 0;
         const int maximum = std::max(0, required - (static_cast<int>(client.bottom) - kHeaderHeight - 28));
         int& offset = app.scroll[static_cast<int>(app.page)];
         offset = std::clamp(offset - GET_WHEEL_DELTA_WPARAM(wparam) / WHEEL_DELTA * 72, 0, maximum);
@@ -3361,7 +3721,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         refresh_target_display();
         InvalidateRect(window,nullptr,FALSE); return 0;
     case WM_DISPLAYCHANGE:
-        app.popup_hit=HitNone; app.popup_values.clear();
+        app.popup_hit=HitNone; app.popup_values.clear();app.popup_enabled.clear();
         refresh_target_display(true);
         InvalidateRect(window,nullptr,FALSE); return 0;
     case WM_MOUSEMOVE: {
@@ -3427,6 +3787,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         if (!IsIconic(window)) InvalidateRect(window, nullptr, FALSE);
         return 0;
     case WM_UPDATE_DONE: receive_update_event(); return 0;
+    case WM_CHEATS_READY: receive_native_cheats(); return 0;
     case WM_GAME_STARTED:
         app.game_pid = static_cast<DWORD>(wparam); app.game_running = true;
         app.waiting_for_game_window = true; app.auto_minimized = false;
@@ -3434,7 +3795,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         return 0;
     case WM_GAME_ENDED:
         KillTimer(window, 2); app.game_running = false; app.waiting_for_game_window = false;
-        read_live_runtime_settings();refresh_saves();
+        read_live_runtime_settings();app.tweaks=So5Tweaks::Read(tweaks_config());refresh_saves();
         app.shader_cache_present=fs::is_directory(cache_directory());
         app.game_pid = 0;
         if (app.close_when_idle) {
@@ -3450,6 +3811,20 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         }
         InvalidateRect(window, nullptr, FALSE); return 0;
     case WM_TIMER:
+        if(wparam==5) {
+            if(app.hud_library) {
+                app.hud_snapshot=app.hud_library->Snapshot();
+                if(!app.hud_snapshot.busy) {
+                    KillTimer(window,5);
+                    app.hud_selection=from_utf8(app.hud_snapshot.active_name.data(),int(app.hud_snapshot.active_name.size()));
+                    if(app.hud_snapshot.status==So5Hud::LibraryStatus::Failed) {
+                        app.hud_selection.clear();append_log(L"Tweaks: startup HUD layout could not be changed.");
+                    }
+                }
+                if(!IsIconic(window)&&app.page==Page::Tweaks)InvalidateRect(window,nullptr,FALSE);
+            }else KillTimer(window,5);
+            return 0;
+        }
         if (wparam == 4) {
             KillTimer(window, 4);
             if (app.update_cleanup) {
@@ -3497,6 +3872,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     case WM_CLOSE:
         confirm_close(); return 0;
     case WM_DESTROY:
+        if(app.cheat_thread.joinable())app.cheat_thread.join();
         app.update_cancel = true;
         if (app.update_thread.joinable()) app.update_thread.join();
         if (app.job) { TerminateJobObject(app.job, 0); CloseHandle(app.job); app.job = nullptr; }
@@ -3511,6 +3887,32 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     app.root = find_root();
     int argument_count = 0;
     LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argument_count);
+    if(arguments && argument_count==3 && std::wstring(arguments[1])==L"--native-resolution-self-test") {
+        const fs::path fixture=fs::absolute(arguments[2]);LocalFree(arguments);
+        // Never reuse an existing folder or touch owner settings during this test.
+        if(fs::exists(fixture) || !fs::create_directory(fixture)) return 3;
+        app.root=fixture;app.config=fixture/L"out/launcher.ini";
+        const wchar_t* languages[]={L"English",L"Français",L"Español",L"Português",L"Português (Brasil)",L"Italiano",L"Deutsch",L"Русский",L"简体中文",L"繁體中文",L"한국어",L"日本語"};
+        for(const auto language:languages) {
+            app.launcher_language=language;app.fsr=L"FSR 3.1";
+            app.popup_hit=HitFsr;app.popup_values={loc(L"Désactivé",L"Disabled"),L"FSR 3.1",L"FSR 4",L"DLSS"};
+            apply_selector(0);if(app.fsr!=L"off") return 4;
+            for(size_t i=0;i<Ps4RtScene::NativeHeights.size();++i) {
+                app.popup_hit=HitNativeRender;app.popup_values={L"720p",L"1080p",L"1440p",L"2160p"};
+                apply_selector(int(i));
+                const int height=Ps4RtScene::NativeHeights[i];
+                if(app.native_render_height!=height || GetPrivateProfileIntW(L"Launcher",L"NativeRenderHeight",0,app.config.c_str())!=UINT(height)) return 5;
+                std::ifstream file(fixture/L"out/CUSA03219/ps4rt.ini");
+                const std::string text((std::istreambuf_iterator<char>(file)),{});
+                if(text.find("native_render_height="+std::to_string(height)+"\n")==std::string::npos || text.find("upscaler=off\n")==std::string::npos) return 6;
+                app.fsr=L"FSR 3.1";app.popup_hit=HitNativeRender;app.popup_values={L"720p"};apply_selector(0);
+                if(app.native_render_height!=height) return 7;
+                app.fsr=L"off";
+            }
+        }
+        std::ofstream(fixture/L"result.json")<<"{\"passed\":true,\"languages\":12,\"manual_choices\":48,\"temporal_override_blocked\":48}\n";
+        return 0;
+    }
     if(arguments && argument_count==3 && std::wstring(arguments[1])==L"--ui-benchmark") {
         const fs::path report=arguments[2]; LocalFree(arguments);
         return render_benchmark(report);

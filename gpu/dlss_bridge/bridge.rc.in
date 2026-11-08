@@ -1,0 +1,24 @@
+#include <winver.h>
+1 VERSIONINFO
+FILEVERSION @SO5_MAJOR@,@SO5_MINOR@,@SO5_PATCH@,0
+PRODUCTVERSION @SO5_MAJOR@,@SO5_MINOR@,@SO5_PATCH@,0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_DLL
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904B0"
+  BEGIN
+   VALUE "CompanyName", "HoverMods Vault\0"
+   VALUE "FileDescription", "DLSS Super Resolution bridge\0"
+   VALUE "FileVersion", "@SO5_DLSS_VERSION@\0"
+   VALUE "ProductName", "Star Ocean 5 Windows\0"
+   VALUE "ProductVersion", "@SO5_DLSS_VERSION@\0"
+   VALUE "OriginalFilename", "ps4rt_dlss.dll\0"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x0409, 1200
+ END
+END

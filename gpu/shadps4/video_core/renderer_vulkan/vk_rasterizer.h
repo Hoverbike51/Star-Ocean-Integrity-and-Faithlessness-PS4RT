@@ -202,6 +202,7 @@ private:
         RenderState state;
         u32 scene_size = 0;
         std::array<float, 2> target_scale{};
+        std::array<float, 2> target_offset{};
     } begin_memo;
     u64 begin_memo_hits = 0, begin_memo_misses = 0;
     void Resolve();
@@ -209,7 +210,7 @@ private:
     void EliminateFastClear();
 
     void UpdateDynamicState(const GraphicsPipeline* pipeline, bool is_indexed) const;
-    void UpdateViewportScissorState() const;
+    void UpdateViewportScissorState(const GraphicsPipeline* pipeline) const;
     void UpdateDepthStencilState() const;
     /// ps4rt: the squaring pipeline of a scaled MIN/MAX blend when this draw can use it.
     vk::Pipeline SquarePass(const GraphicsPipeline& pipeline) const;
@@ -348,6 +349,7 @@ private:
     std::unique_ptr<TemporalUpscaler> upscaler; // ps4rt: FSR (docs/upscaler.md)
     std::array<float, 2> draw_jitter{};         ///< viewport offset of the current draw, pixels
     std::array<float, 2> target_scale{1.0f, 1.0f}; ///< pass drawn into the upscaler's output-size images
+    std::array<float, 2> target_offset{}; ///< centered, undistorted 16:9 HUD inside a wide scene
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
 

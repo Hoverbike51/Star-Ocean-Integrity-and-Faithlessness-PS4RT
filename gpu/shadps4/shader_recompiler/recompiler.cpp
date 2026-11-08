@@ -103,7 +103,8 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
         Shader::Optimization::LowerFp64ToFp32(program);
     }
     Shader::Optimization::SsaRewritePass(program);
-    Shader::Optimization::ConstantPropagationPass(program.post_order_blocks);
+    Shader::Optimization::ConstantPropagationPass(
+        program.post_order_blocks, (profile.fp_legacy & FpLegacyHalfSaturate) != 0);
     if (info.sw_stage == SwStage::TessellationControl) {
         Shader::Optimization::TessellationPreprocess(program, runtime_info);
         Shader::Optimization::HullShaderTransform(program, runtime_info);
@@ -146,7 +147,8 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     Shader::Optimization::SharedMemoryBarrierPass(program, runtime_info, profile);
     Shader::Optimization::DeadCodeEliminationPass(program);
     Shader::Optimization::LowerWave64BallotPass(program, runtime_info, profile);
-    Shader::Optimization::ConstantPropagationPass(program.post_order_blocks);
+    Shader::Optimization::ConstantPropagationPass(
+        program.post_order_blocks, (profile.fp_legacy & FpLegacyHalfSaturate) != 0);
     Shader::Optimization::DeadCodeEliminationPass(program);
     if (info.sw_stage == SwStage::Fragment && profile.needs_integer_interpolation_fix) {
         Shader::Optimization::InterpolatedIntegerPass(program);

@@ -1,3 +1,5 @@
+#include "ps4rt_speed.h"
+#include "../../../../ps4rtgpu.h"
 #include "video_core/renderer_vulkan/vk_display_registry.h"
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
@@ -431,6 +433,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     // and the uncapped presets keep their fixed limit.
     const bool fixed_limit = std::getenv("PS4RT_FPS_LIMIT") || EmulatorSettings.GetVblankFrequency() == 480;
     const auto current_limit = [&] {
+        if(ps4rtgpu_speed()>1)return u32(0);
         const auto& s = Ps4RtSettings::Get();
         return fixed_limit ? EmulatorSettings.GetFrameLimit()
                            : u32(Ps4RtGraphics::PresentLimit(s.fps_limit, s.applied_engine_fps));
@@ -465,11 +468,11 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             std::printf("VideoOut: frame limit %u FPS\n", limit);
         }
         timer.Start();
-        const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;
+        const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period / ps4rtgpu_speed();
 
         if (DebugState.IsGuestThreadsPaused()) {
             DrawLastFrame();
-            timer.End();
+            if(ps4rtgpu_speed()>1)std::this_thread::sleep_until(tick_deadline);else timer.End();
             continue;
         }
 
@@ -521,7 +524,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         }
 
         if (!immediate_flips || main_port.flip_rate != 0) {
-            timer.End();
+            if(ps4rtgpu_speed()>1)std::this_thread::sleep_until(tick_deadline);else timer.End();
             continue;
         }
         while (!token.stop_requested()) {

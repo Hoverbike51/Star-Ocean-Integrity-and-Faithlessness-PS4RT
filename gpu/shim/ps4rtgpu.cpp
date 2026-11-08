@@ -7,6 +7,12 @@
 #include "ps4rt_gpu_workarounds.h"
 #include "ps4rt_copy.h"
 #include "ps4rt_toggles.h"
+#include "ps4rt_ultrawide.h"
+#include "ps4rt_hud_runtime.h"
+#include "ps4rt_camera_probe.h"
+#include "ps4rt_camera_comfort.h"
+#include "ps4rt_exploration_leader.h"
+#include "ps4rt_presentation_trace.h"
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -251,6 +257,7 @@ extern "C" int ps4rtgpu_init(const Ps4RtGpuConfig* config) {
         }
         g_window_cv.notify_all();
         while (window->PollEvents()) {
+            Ps4RtLeader::FlushPreference();
             SDL_Delay(2);
         }
         LOG_INFO(Frontend, "Window closed by user");
@@ -264,6 +271,33 @@ extern "C" int ps4rtgpu_init(const Ps4RtGpuConfig* config) {
         g_window_cv.wait(lock, [] { return g_window_ready; });
     }
     Core::Loader::SymbolsResolver resolver;
+    const int output=Ps4RtSettings::Get().output_res;
+    const bool compatible_path=Ps4RtSettings::Get().native_scene && !std::getenv("PS4RT_RENDER_RES");
+    const bool wide=compatible_path && Ps4RtUltrawide::Patch({config->game_image,std::size_t(config->game_image_size)},
+        config->serial?config->serial:"",config->app_version?config->app_version:"",output);
+    Ps4RtUltrawide::session_output=wide?output:Ps4RtSettings::OutputDefault;
+    Ps4RtPresentation::capture.Reset();
+    Ps4RtPresentation::report_path.clear();
+    if(wide) {
+        const char* configuration=std::getenv("PS4RT_CONFIG");
+        const auto path=configuration&&*configuration?
+            std::filesystem::path(std::u8string_view(reinterpret_cast<const char8_t*>(configuration))):
+            std::filesystem::path("ps4rt.ini");
+        Ps4RtPresentation::report_path=path.parent_path()/L"presentation-last-census.json";
+    }
+    Ps4RtHud::Initialize({config->game_image,std::size_t(config->game_image_size)},
+        config->serial?config->serial:"",config->app_version?config->app_version:"",output);
+    Ps4RtCameraComfort::Initialize({config->game_image,std::size_t(config->game_image_size)},
+        config->serial?config->serial:"",config->app_version?config->app_version:"",
+        Ps4RtSettings::Get().camera_follow.load());
+    Ps4RtLeader::Initialize({config->game_image,std::size_t(config->game_image_size)},
+        config->serial?config->serial:"",config->app_version?config->app_version:"");
+    Ps4RtCameraProbe::Initialize({config->game_image,std::size_t(config->game_image_size)},
+        config->serial?config->serial:"",config->app_version?config->app_version:"");
+    if(Ps4RtUltrawide::Wide(output))
+        std::printf("Ultrawide: %s; requested %s; original guest allocations retained\n",
+            wide?"guarded engine aspect applied (projection validation pending)":"executable profile refused; 16:9 fallback",
+            Ps4RtOutput::Arguments[output]);
     // GnmDriver creates the presenter that the VideoOut present thread uses.
     Libraries::GnmDriver::RegisterLib(&resolver);
     Libraries::VideoOut::RegisterLib(&resolver);
@@ -271,6 +305,10 @@ extern "C" int ps4rtgpu_init(const Ps4RtGpuConfig* config) {
 }
 
 extern "C" void ps4rtgpu_performance_finish(void) {
+    Ps4RtLeader::Report();
+    Ps4RtCameraProbe::Report();
+    Ps4RtHud::Report();
+    Ps4RtPresentation::capture.Report(Ps4RtPresentation::report_path);
     Ps4RtPerformanceProbe::Finish();
     // The custom Exit Game action ends the process after this report. Make every cache and live
     // shader-context write already queued at that point durable before the process exits.
@@ -344,6 +382,10 @@ int* PS4_SYSV_ABI __Error() {
 
 extern "C" int ps4rtgpu_vibration_percent(void) {
     return Ps4RtSettings::Get().vibration.load(std::memory_order_relaxed);
+}
+
+extern "C" void ps4rtgpu_leader_input(std::uint32_t buttons,int captured) {
+    Ps4RtLeader::Input(buttons,captured!=0);
 }
 
 extern "C" int ps4rtgpu_overlay_captures_input(void) {

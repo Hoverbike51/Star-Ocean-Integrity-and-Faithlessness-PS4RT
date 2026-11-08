@@ -328,6 +328,25 @@ secrets*
 /templates/
 /references/
 
+# Local-only authoring application, reference catalog and private research.
+/tools/hud/hud_editor.cpp
+/tools/hud/hud_editor.rc
+/tools/hud/hud_atlas_view.h
+/tools/hud/hud_editor_*.h
+/tools/hud/hud-private*.json
+/tools/hud/README.md
+/tools/hud/*.md
+/tools/hud/*.txt
+/tools/hud/*.m
+/tools/hud/hud-map*.json
+/tools/hud/hud-preset.schema.json
+/tools/hud/presets/
+/docs/HUD_*.md
+/docs/HUD_*.txt
+/docs/HUD_*.m
+/docs/*HUD*Studio*
+/docs/*HUD*Layout*
+
 # Game-specific overlay media. The files themselves must be added locally.
 !/gpu/assets/
 !/gpu/assets/star_ocean_overlay.png

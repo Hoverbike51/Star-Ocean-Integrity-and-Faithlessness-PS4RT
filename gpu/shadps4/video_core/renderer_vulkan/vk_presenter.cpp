@@ -16,6 +16,7 @@
 #include "ps4rt_overlay.h"
 #include "ps4rt_performance_probe.h"
 #include "ps4rt_settings.h"
+#include "ps4rt_ultrawide.h"
 #include "ps4rt_graphics.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
@@ -386,8 +387,13 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         texture_cache.UpdateImage(image_id);
     }
 
-    Frame* frame = GetRenderFrame();
+    // Guest-only title/movie frames have no wide scene override. Preserve their
+    // raster aspect before the final fit instead of stretching them to 32:9.
+    Frame* frame = GetRenderFrame(Ps4RtUltrawide::Enabled() && !upscaled);
+    frame->original_aspect=Ps4RtUltrawide::Enabled() && !upscaled;
     frame->title_screen=Ps4RtTitle::ConsumeFrame();
+    frame->reconstruction_state = !Ps4RtSettings::Get().native_scene || upscaled
+        ? Ps4RtSettings::Get().overlay_reconstruction.load() : 0;
 
 
     const auto frame_subresources = vk::ImageSubresourceRange{
@@ -540,6 +546,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 Frame* Presenter::PrepareBlankFrame(bool present_thread) {
     // Request a free presentation frame.
     Frame* frame = GetRenderFrame();
+    frame->original_aspect=false;
+    frame->reconstruction_state=0;
     frame->title_screen=Ps4RtTitle::ConsumeFrame();
 
     auto& scheduler = present_thread ? present_scheduler : draw_scheduler;
@@ -770,7 +778,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                vk::DependencyFlagBits::eByRegion, clear_done, {}, {});
         
         const auto& graphics = Ps4RtSettings::Get();
-        const auto blit = Ps4RtGraphics::StretchWindow(graphics.display_mode, graphics.window_stretch)
+        const auto blit = !frame->original_aspect && Ps4RtGraphics::StretchWindow(graphics.display_mode, graphics.window_stretch)
             ? MakeImageBlitStretch(frame->width, frame->height, extent.width, extent.height)
             : MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height);
         cmdbuf.blitImage(frame->image, vk::ImageLayout::eTransferSrcOptimal, swapchain_image,
@@ -810,7 +818,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                vk::PipelineStageFlagBits::eAllCommands,
                                vk::DependencyFlagBits::eByRegion, {}, {}, post_barriers);
         if (overlay) {
-            Ps4RtOverlay::Render(cmdbuf, swapchain.ImageView(), extent, frame->title_screen);
+            Ps4RtOverlay::Render(cmdbuf, swapchain.ImageView(), extent, frame->title_screen,
+                                 frame->reconstruction_state);
             const vk::ImageMemoryBarrier to_present{
                 .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
                 .dstAccessMask = vk::AccessFlagBits::eNone,
@@ -858,7 +867,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     }
 }
 
-Frame* Presenter::GetRenderFrame() {
+Frame* Presenter::GetRenderFrame(bool original_aspect) {
     // Wait for free presentation frames
     Frame* frame;
     {
@@ -897,9 +906,12 @@ Frame* Presenter::GetRenderFrame() {
         }
     }
 
-    if (frame->width != expected_frame_width || frame->height != expected_frame_height ||
+    const auto menu=Ps4RtOutput::Content(Ps4RtSettings::Get().output_res);
+    const int wanted_width=original_aspect?menu.width:expected_frame_width;
+    const int wanted_height=original_aspect?menu.height:expected_frame_height;
+    if (frame->width != wanted_width || frame->height != wanted_height ||
         frame->is_hdr != swapchain.GetHDR()) {
-        RecreateFrame(frame, expected_frame_width, expected_frame_height);
+        RecreateFrame(frame, wanted_width, wanted_height);
     }
 
     return frame;
@@ -909,7 +921,7 @@ void Presenter::SetExpectedGameSize(s32 width, s32 height) {
     const auto& graphics = Ps4RtSettings::Get();
     if (graphics.CompactGraphicsMenu()) {
         const int output = std::clamp(graphics.output_res.load(),0,Ps4RtSettings::OutputCount-1);
-        const auto content=Ps4RtOutput::Content(output);
+        const auto content=Ps4RtUltrawide::Content(output);
         expected_frame_width = content.width;
         expected_frame_height = content.height;
         return;
