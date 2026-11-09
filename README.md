@@ -117,6 +117,12 @@ The explicit form remains available:
 .\build-windows.cmd -PlayerFolder
 ```
 
+When you see
+```powershell
+OK: the native runtime, launcher, extractor and updater are complete without MSYS2 or Python.
+```
+Job is done!
+
 The folder is created under `dist/ps4rt-star-ocean-5-windows-x64-v1.0.1-latest/`.
 The name is read from `VERSION`; no user-specific absolute path is stored in the build scripts.
 Keep that entire folder for playing; source files and build intermediates stay in the checkout.
