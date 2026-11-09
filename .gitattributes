@@ -1,8 +1,71 @@
-* text=auto
-*.sh text eol=lf
-*.py text eol=lf
+# Use stable LF endings for detected text, regardless of core.autocrlf.
+# Binary files remain untouched by text=auto.
+* text=auto eol=lf
+
+# Repository metadata and source manifests must be consistent in clones and ZIPs.
+.gitattributes text eol=lf
+.gitignore text eol=lf
+VERSION text eol=lf
+LICENSE text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Windows entry points retain CRLF, including after a normal checkout.
+# Git stores normalized text as LF; source archives may therefore contain LF.
+*.bat text eol=crlf
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.psd1 text eol=crlf
+
+# Keep interpreter scripts portable.
+*.sh text eol=lf
+*.py text eol=lf
+
+# FSR text assets use LF: generate the SHA-256 inventory from these exact bytes.
+# Regenerate packaging/fsr4-v07-assets.json after normalizing existing assets.
+/fsr4_shaders/*_shader_manifest.json text eol=lf
+/fsr4_shaders/LICENSE-FSR4-v07.txt text eol=lf
+
+# Compiled shaders, model weights and native build artifacts are byte-exact.
 *.spv binary
 *.bin binary
+*.exe binary
+*.dll binary
+*.lib binary
+*.a binary
+*.obj binary
+*.o binary
+*.pdb binary
+
+# Images, fonts and audio must never undergo newline conversion.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.bmp binary
+*.ico binary
+*.webp binary
+*.dds binary
+*.ktx binary
+*.ktx2 binary
+*.tga binary
 *.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.wav binary
+*.ogg binary
+*.mp3 binary
+*.flac binary
+
+# Preserve archive and document bytes.
+*.zip binary
+*.7z binary
+*.tar binary
+*.gz binary
+*.xz binary
+*.pdf binary
