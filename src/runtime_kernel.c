@@ -83,7 +83,8 @@ static _Atomic uint32_t warp_factor=1;
 static pthread_mutex_t warp_lock=PTHREAD_MUTEX_INITIALIZER;
 static uint64_t host_elapsed_ns(void) {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
-    return (uint64_t)((int64_t)(t.tv_sec-process_start.tv_sec)*1000000000+(t.tv_nsec-process_start.tv_nsec));
+    /* Paused time from Crowbar's Guide does not count (runtime_crowbar_pause.c). */
+    return (uint64_t)((int64_t)(t.tv_sec-process_start.tv_sec)*1000000000+(t.tv_nsec-process_start.tv_nsec))-runtime_pause_offset_ns();
 }
 static uint64_t warp(uint64_t host,uint64_t base_host,uint64_t base_guest,uint32_t factor) {
     return base_guest+(host>base_host ? host-base_host : 0)*factor;
