@@ -84,7 +84,10 @@ static std::optional<std::filesystem::path> GetBundleParentDirectory() {
 }
 #endif
 
-static auto UserPaths = [] {
+// Diagnostic entry points (--cpu-features, updater probes) must not create user
+// data before main. Initialize once, only when gameplay first requests a path.
+static auto& UserPaths() {
+    static auto paths = [] {
     // ps4rt: the port keeps GPU caches where PS4RT_GPU_USER_DIR points.
     const char* port_dir = std::getenv("PS4RT_GPU_USER_DIR");
     auto user_dir = port_dir ? std::filesystem::path(port_dir) : std::filesystem::current_path() / PORTABLE_DIR;
@@ -135,7 +138,9 @@ static auto UserPaths = [] {
     }
 
     return paths;
-}();
+    }();
+    return paths;
+}
 
 bool ValidatePath(const fs::path& path) {
     if (path.empty()) {
@@ -164,7 +169,7 @@ std::string PathToUTF8String(const std::filesystem::path& path) {
 }
 
 const fs::path& GetUserPath(PathType shad_path) {
-    return UserPaths.at(shad_path);
+    return UserPaths().at(shad_path);
 }
 
 std::string GetUserPathString(PathType shad_path) {
@@ -178,7 +183,7 @@ void SetUserPath(PathType shad_path, const fs::path& new_path) {
         return;
     }
 
-    UserPaths.insert_or_assign(shad_path, new_path);
+    UserPaths().insert_or_assign(shad_path, new_path);
 }
 
 std::optional<fs::path> FindGameByID(const fs::path& dir, const std::string& game_id,

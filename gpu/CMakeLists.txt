@@ -628,3 +628,11 @@ foreach(so5_target IN LISTS so5_directory_targets)
         target_link_libraries(${so5_target} PRIVATE so5-diagnostic-trace)
     endif()
 endforeach()
+
+# CPU-only probes must not initialize the renderer's user-data tree before main.
+add_executable(user-paths-test EXCLUDE_FROM_ALL ../tests/test_user_paths.cpp shim/common/logging/log.cpp)
+target_include_directories(user-paths-test PRIVATE shim shadps4)
+target_compile_definitions(user-paths-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(user-paths-test PRIVATE -UNDEBUG)
+target_link_libraries(user-paths-test PRIVATE fmt::fmt)
+add_test(NAME user-paths COMMAND user-paths-test)

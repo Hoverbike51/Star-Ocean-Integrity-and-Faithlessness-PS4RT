@@ -18,6 +18,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
             const auto package=So5Update::ValidatePackage(So5Update::fs::absolute(arguments[2]),*version);
             So5Update::RequireLegacy101Compatibility(package);
             So5Update::ProbePackage(package);
+            So5Update::RequireLegacy101Compatibility(So5Update::ValidatePackage(package.root,*version));
             std::fprintf(stdout,"PASS: player payload, v1.0.1 path compatibility and clean-PATH self-tests.\n");
             result=0;
         } else if (count == 5 && std::wstring(arguments[1]) == L"--validate-archive") {
@@ -29,6 +30,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                 So5Update::fs::absolute(arguments[4]),*version,cancel,{});
             So5Update::RequireLegacy101Compatibility(package);
             So5Update::ProbePackage(package);
+            So5Update::RequireLegacy101Compatibility(So5Update::ValidatePackage(package.root,*version));
             std::fprintf(stdout,"PASS: final ZIP, v1.0.1 path compatibility and clean-PATH self-tests.\n");
             result=0;
         } else result=So5Update::InstallerMain(count,arguments);

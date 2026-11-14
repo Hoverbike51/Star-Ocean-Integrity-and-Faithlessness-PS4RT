@@ -236,6 +236,7 @@ void Handoff(const fs::path& root, const fs::path& binaries) {
     Zip(root / "player-fixture.zip", entries);
     auto extracted = U::Extract(root / "player-fixture.zip", root / "extracted", Current, cancel, {});
     U::ProbePackage(extracted);
+    assert(!fs::exists(extracted.root/"user")); // Probe-generated data stays outside the package.
     assert(Read(extracted.root / L"launcher/assets/背景.png") == "non-ASCII asset");
     auto wrong_version = Current; ++wrong_version.parts[2];
     Reject([&] { U::ValidatePackage(extracted.root, wrong_version); });
@@ -292,7 +293,14 @@ int main() {
     std::cout << std::unitbuf;
     int argc = 0; wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     struct FreeArgs { wchar_t** args; ~FreeArgs() { LocalFree(args); } } free_args{argv};
-    if (argc == 2 && (std::wstring(argv[1]) == L"--self-test" || std::wstring(argv[1]) == L"--cpu-features")) return 0;
+    if (argc == 2 && std::wstring(argv[1]) == L"--self-test") return 0;
+    if (argc == 2 && std::wstring(argv[1]) == L"--cpu-features") {
+        const wchar_t* user=_wgetenv(L"PS4RT_GPU_USER_DIR"); assert(user && *user);
+        const fs::path data=user;
+        assert(data.is_absolute() && data.parent_path().filename().wstring().starts_with(L"so5-package-probe-"));
+        Write(data/"custom_trophy/Notice.txt","self-test generated data");
+        return 0;
+    }
     if (argc == 2 && std::wstring(argv[1]) == L"--update-result") { Write(fs::current_path() / "relaunched.marker", "restarted"); return 0; }
     if (argc == 4 && std::wstring(argv[1]) == L"--handoff-parent") {
         const fs::path workspace = argv[2], target = argv[3];

@@ -64,18 +64,19 @@ cp LICENSE README.md CHANGELOG.md VERSION "$stage/"
 cp packaging/windows/README-Windows.txt "$stage/"
 cp docs/UPSTREAM_CREDITS.md docs/MINIZ_LICENSE.txt docs/LIBCXX_LICENSE.txt "$stage/docs/"
 cp docs/LAUNCHER_GUIDE.md docs/IN_GAME_MENU_GUIDE.md "$stage/docs/"
-mkdir -p "$stage/docs/third-party"
-cp docs/AMD_FSR_SDK.md "$stage/docs/third-party/AMD_FSR_SDK.md"
 # Keep local documentation links valid after the compatibility-preserving relocation.
 sed -i 's|(docs/AMD_FSR_SDK.md)|(docs/third-party/AMD_FSR_SDK.md)|g' "$stage/README.md"
 sed -i "s/Experimental version [0-9.]*/Experimental version ${version}/" "$stage/README-Windows.txt"
 mkdir -p "$stage/launcher/assets/guides"
 cp docs/images/readme/AMD/So5_FSR_SDK.png "$stage/launcher/assets/guides/AMD_FSR_SDK.png"
-sed -i 's|(images/readme/AMD/So5_FSR_SDK.png)|(../../launcher/assets/guides/AMD_FSR_SDK.png)|g' "$stage/docs/third-party/AMD_FSR_SDK.md"
 mkdir -p "$stage/docs/images/readme"
 cp -r docs/images/readme/launcher docs/images/readme/custom_menu "$stage/docs/images/readme/"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$PWD/packaging/windows/copy-notices.ps1")" \
     -Destination "$(cygpath -w "$PWD/$stage")" -Msys2Root "$(cygpath -w "${MSYS2_ROOT:-/c/msys64}")"
+# The notice collector requires a fresh output directory. Add the SDK integration
+# guide only after that directory has been created successfully.
+cp docs/AMD_FSR_SDK.md "$stage/docs/third-party/AMD_FSR_SDK.md"
+sed -i 's|(images/readme/AMD/So5_FSR_SDK.png)|(../../launcher/assets/guides/AMD_FSR_SDK.png)|g' "$stage/docs/third-party/AMD_FSR_SDK.md"
 find "$stage" -name __pycache__ -prune -exec rm -rf {} +
 
 # Game data, settings, captures and developer tracing tools must never enter a player release.

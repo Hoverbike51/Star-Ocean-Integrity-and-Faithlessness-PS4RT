@@ -568,7 +568,7 @@ void WriteResult(const fs::path& target, const InstallResult& result) {
     WriteTree(target / "out/update-result.json", tree);
 }
 void StartProcess(const fs::path& executable, const std::wstring& arguments, const fs::path& cwd,
-                  PROCESS_INFORMATION& process, bool clean_path) {
+                  PROCESS_INFORMATION& process, bool clean_path, const fs::path& probe_user = {}) {
     std::wstring command = Quote(executable) + L" " + arguments;
     STARTUPINFOW startup{sizeof(startup)}; startup.dwFlags = STARTF_USESHOWWINDOW;
     startup.wShowWindow = clean_path ? SW_HIDE : SW_SHOWNORMAL;
@@ -577,13 +577,19 @@ void StartProcess(const fs::path& executable, const std::wstring& arguments, con
         LPWCH current = GetEnvironmentStringsW();
         if (!current) throw Error(Code::Install, WinError("Could not read environment"));
         for (const wchar_t* entry = current; *entry; entry += std::wcslen(entry) + 1) {
-            if (_wcsnicmp(entry, L"PATH=", 5) == 0) continue;
+            if (_wcsnicmp(entry, L"PATH=", 5) == 0 ||
+                (!probe_user.empty() && _wcsnicmp(entry,L"PS4RT_GPU_USER_DIR=",19)==0)) continue;
             environment.insert(environment.end(), entry, entry + std::wcslen(entry) + 1);
         }
         FreeEnvironmentStringsW(current);
         wchar_t windows[MAX_PATH]{}; GetWindowsDirectoryW(windows, MAX_PATH);
         const std::wstring path = std::wstring(L"PATH=") + windows + L"\\System32;" + windows;
-        environment.insert(environment.end(), path.begin(), path.end()); environment.push_back(0); environment.push_back(0);
+        environment.insert(environment.end(), path.begin(), path.end()); environment.push_back(0);
+        if (!probe_user.empty()) {
+            const std::wstring gpu_user=L"PS4RT_GPU_USER_DIR="+probe_user.wstring();
+            environment.insert(environment.end(),gpu_user.begin(),gpu_user.end()); environment.push_back(0);
+        }
+        environment.push_back(0);
     }
     const DWORD old_error_mode = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     const BOOL created = CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE,
@@ -595,9 +601,27 @@ void StartProcess(const fs::path& executable, const std::wstring& arguments, con
 } // namespace
 
 void ProbePackage(const Package& package) {
+    struct ProbeData {
+        fs::path path;
+        ProbeData() {
+            GUID guid{}; wchar_t token[40]{};
+            if (FAILED(CoCreateGuid(&guid)) || !StringFromGUID2(guid,token,40))
+                throw Error(Code::InvalidPackage,"Could not create an isolated self-test directory.");
+            path=fs::temp_directory_path()/(std::wstring(L"so5-package-probe-")+token);
+            if (!fs::create_directory(path)) throw Error(Code::InvalidPackage,"Self-test directory already exists.");
+            Plain(path);
+        }
+        ~ProbeData() {
+            try {
+                Plain(path);
+                for (const auto& entry : fs::recursive_directory_iterator(path)) Plain(entry.path());
+                fs::remove_all(path);
+            } catch (...) {} // A temporary file lock must not invalidate a successful probe.
+        }
+    } data;
     const auto probe = [&](const fs::path& executable, const wchar_t* arguments) {
         PROCESS_INFORMATION process{};
-        StartProcess(package.root / executable, arguments, package.root, process, true);
+        StartProcess(package.root / executable, arguments, package.root, process, true, data.path / "gpu");
         Handle thread(process.hThread), child(process.hProcess);
         if (WaitForSingleObject(child.value, 10000) != WAIT_OBJECT_0) {
             TerminateProcess(child.value, 2); WaitForSingleObject(child.value, 3000);
