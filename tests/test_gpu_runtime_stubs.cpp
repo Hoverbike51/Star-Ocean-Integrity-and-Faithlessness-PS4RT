@@ -17,6 +17,7 @@ int ps4rt_setjmp(unsigned long long buffer[32]) {
 }
 #endif
 uint32_t runtime_disabled_optimizations = 0;
+int runtime_pause_gate() { return 0; } // runtime_crowbar_pause.c: never paused in renderer tests
 void runtime_report() {}
 uint64_t runtime_tsc_frequency() { return 1000000000; }
 int runtime_file_translate(const char*, char*, size_t) { std::abort(); }
