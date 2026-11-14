@@ -315,6 +315,16 @@ extern "C" void ps4rtgpu_performance_finish(void) {
     Storage::DataBase::Instance().Flush();
 }
 
+// Crowbar's quit request (runtime_crowbar_pause.c): the same path as the menu's Exit to desktop.
+extern "C" int ps4rtgpu_request_exit(void) {
+    Ps4RtSettings::Save();
+    SDL_Event quit{};
+    quit.type = SDL_EVENT_QUIT;
+    if (SDL_PushEvent(&quit)) return 0;
+    std::fprintf(stderr, "PS4RT: could not queue exit event: %s\n", SDL_GetError());
+    return -1;
+}
+
 namespace Libraries::Kernel { void StartKernelService(); }
 extern "C" void ps4rtgpu_register_kernel(void) {
     Libraries::Kernel::StartKernelService();

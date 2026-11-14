@@ -29,6 +29,11 @@ static SDL_Scancode test_scancode_from_key(SDL_Keycode key, SDL_Keymod *mods) {
 #undef SDL_GetScancodeFromKey
 #undef SDL_GetGamepads
 
+static int crowbar_paused;
+static uint64_t crowbar_input_epoch;
+int runtime_pause_active(void) { return crowbar_paused; }
+uint64_t runtime_pause_input_epoch(void) { return crowbar_input_epoch; }
+static void crowbar_pause(int on) { if(crowbar_paused&&!on)++crowbar_input_epoch;crowbar_paused=on; }
 static bool overlay_capture;
 int ps4rtgpu_overlay_captures_input(void) { return overlay_capture; }
 static uint32_t observed_leader_buttons;
@@ -135,7 +140,37 @@ static void hotplug_test(void) {
     SDL_CloseGamepad(gamepad);gamepad=NULL;assert(SDL_DetachVirtualJoystick(id));visible_gamepad=0;isolate_gamepads=false;
     puts("Controller hot-plug: late connection, input, unplug, keyboard fallback and reconnect PASS");
 }
+static void crowbar_resume_test(void) {
+    isolate_gamepads=true;visible_gamepad=0;keyboard_only=false;sdl_ready=1;next_gamepad_discovery=0;
+    SDL_VirtualJoystickDesc desc;SDL_INIT_INTERFACE(&desc);
+    desc.type=SDL_JOYSTICK_TYPE_GAMEPAD;desc.naxes=6;desc.nbuttons=15;desc.name="Crowbar resume regression";
+    SDL_JoystickID id=SDL_AttachVirtualJoystick(&desc);assert(id);visible_gamepad=id;
+    runtime_pad_devices_changed();PadData d;sample_host(&d);assert(gamepad);
+    SDL_Joystick *joystick=SDL_GetGamepadJoystick(gamepad);
+    assert(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,32767));
+    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,true));
+    SDL_UpdateJoysticks();SDL_UpdateGamepads();
+    crowbar_pause(1);sample(&d);assert(d.buttons==0&&d.r2==0);
+    crowbar_pause(0);sample(&d);
+    int trigger_failed=d.buttons!=0||d.r2!=0;
+    printf("Crowbar resume held trigger: buttons=%u r2=%u (expected 0/0)\n",d.buttons,d.r2);
+    assert(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,-32768));
+    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,false));
+    SDL_UpdateJoysticks();SDL_UpdateGamepads();sample(&d);
+    crowbar_pause(1); // No pad poll: the rendering thread may be parked at its pause gate.
+    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,true));
+    SDL_UpdateJoysticks();SDL_UpdateGamepads();crowbar_pause(0);sample(&d);
+    int missed_failed=d.buttons!=0;
+    printf("Crowbar resume without paused pad poll: buttons=%u (expected 0)\n",d.buttons);
+    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,false));
+    SDL_UpdateJoysticks();SDL_UpdateGamepads();sample(&d);
+    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_SOUTH,true));
+    SDL_UpdateJoysticks();SDL_UpdateGamepads();sample(&d);assert(d.buttons&BTN_CROSS);
+    SDL_CloseGamepad(gamepad);gamepad=NULL;assert(SDL_DetachVirtualJoystick(id));visible_gamepad=0;
+    assert(!trigger_failed&&!missed_failed);
+}
 int main(void) {
+    setvbuf(stdout,NULL,_IONBF,0);
     assert(SDL_Init(0));
     environment("PS4RT_KEY_PROFILE","azerty");
     environment("PS4RT_KEY_MAP","");
@@ -195,6 +230,7 @@ int main(void) {
     key_axis(&merged,false,true); assert(merged==255);
     vibration_test();
     hotplug_test();
+    crowbar_resume_test();
     SDL_Quit();
     puts("Pad input: AZERTY/QWERTY, custom overrides, layout refresh, keyboard-only and stick dead zone PASS");
 }

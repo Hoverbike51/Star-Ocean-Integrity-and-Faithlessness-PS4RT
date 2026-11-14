@@ -45,6 +45,9 @@ int ps4rtgpu_overlay_captures_input(void);
 int ps4rtgpu_vibration_percent(void);
 /* Flushes an active gameplay performance capture to its CSV and JSON reports. Safe when idle. */
 void ps4rtgpu_performance_finish(void);
+/* Closes the game the way the menu's Exit to desktop does (settings saved, window-close path,
+ * reports and caches flushed, exit code 0). 0 when queued. */
+int ps4rtgpu_request_exit(void);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned ps4rtgpu_symbol_count(void);
 #ifdef __cplusplus
