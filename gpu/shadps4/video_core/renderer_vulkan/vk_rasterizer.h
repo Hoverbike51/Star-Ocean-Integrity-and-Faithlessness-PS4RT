@@ -172,6 +172,9 @@ public:
 
 private:
     void PrepareRenderState(const GraphicsPipeline* pipeline);
+    void PrepareTitleComposition(const GraphicsPipeline* pipeline);
+    bool FullScreenBlackMask(const GraphicsPipeline* pipeline,bool indexed,u32 index_offset);
+    void TraceScenePass(const GraphicsPipeline* pipeline,const RenderState& state);
 
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
     RenderState BeginRenderingFull(const GraphicsPipeline* pipeline);

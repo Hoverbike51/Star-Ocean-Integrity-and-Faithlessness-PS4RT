@@ -27,6 +27,8 @@ try {
         if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required file is missing: $required" }
     }
     $expectedVersion = (Get-Content -LiteralPath $versionFile -Raw).Trim()
+    & (Join-Path $PSScriptRoot 'verify-update-package.ps1') -Package $tree -ExpectedVersion $expectedVersion
+    if($LASTEXITCODE -ne 0){throw 'Native update compatibility validation failed.'}
     $bridge = Test-Path -LiteralPath (Join-Path $tree 'bin\ps4rt_dlss.dll')
     $nvidia = Test-Path -LiteralPath (Join-Path $tree 'bin\nvngx_dlss.dll')
     if ($bridge -ne $nvidia -or ($RequireDlss -and -not $bridge)) { throw 'Incomplete DLSS runtime pair in player package.' }

@@ -8,6 +8,38 @@ the original game's complete source code.
 
 [README](README.md) · [Launcher guide](docs/LAUNCHER_GUIDE.md) · [In-game menu guide](docs/IN_GAME_MENU_GUIDE.md)
 
+## 1.1.2 — Aspect-ratio composition and update maintenance
+
+### Rendering and black fades
+
+- Improve scene/UI composition at **4:3**, **16:10**, **21:9** and **32:9** while
+  preserving the standard **16:9** path. Restrict title-menu scene composition to
+  verified title-screen draws instead of treating generic perspective UI as a menu.
+- Extend verified full-screen solid-black GUI fades across **both width and height**,
+  including the rest sequence. Handle the native **QuadList** drawing path and keep
+  partial panels, gradients, textured UI and movies outside this override.
+- Preserve the higher-resolution depth surface across native read-only depth tests;
+  retain invalidation for writes and clears. This avoids unnecessary depth resampling
+  before later depth-tested passes at custom aspect ratios.
+- Add bounded scene-pass details and black-mask rejection counters to exported diagnostics
+  to investigate remaining visual defects without claiming that they are resolved.
+
+### Updates and packaging
+
+- Retain compatibility handling for updates started from **1.0.1**, with package-layout
+  checks and a dedicated ZIP/SHA-256 verification tool before distribution.
+- Correct third-party notice staging when packaging is repeated, and isolate updater
+  self-tests from the player's installation and user data.
+- Set the source/player version to **1.1.2** and Windows resource version to **1.1.2.0**.
+  Preserve the illustrated guides, screenshots and existing PDF editions.
+
+> [!WARNING]
+> **Residual rendering artifacts remain a known issue.** Local gameplay validation
+> accepted the update, including the black fade, but camera-dependent shader/texture
+> patterns remain visible in some locations, including with reconstruction disabled.
+> A definitive correction for these residual artifacts is **not included** in 1.1.2.
+> Existing issue #11 and location-dependent Fidel follower limitations remain open.
+
 ## 1.1.1 — Performance diagnostic tools
 
 ### Sampling and overlay

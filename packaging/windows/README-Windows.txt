@@ -1,8 +1,9 @@
-Star Ocean 5 - Windows 10/11 x64 - Experimental version 1.0.2
+Star Ocean 5 - Windows 10/11 x64 - Experimental version 1.1.2
 ==========================================================
 
 Start Star Ocean 5 Launcher.exe at the root of the extracted player folder.
-The real launcher, game runtime, updater, extractor and DLLs are in bin.
+The real launcher, game runtime, updater, extractor and core DLLs are in bin.
+The optional AMD provider and its dependencies are in gpu/assets/amd-fsr-sdk24/.
 Keep the complete folder together and use a writable location.
 
 No PS4 game data or firmware is included. Supply your own supported decrypted
@@ -33,6 +34,10 @@ Console output remains English and can be selected/copied or exported. Performan
 capture is optional and disabled by default. Enable its tools in Advanced, then arm
 Capture next session in Logs and diagnostics. Enabling tools alone does not record.
 
+Version 1.1.2 improves custom-aspect scene/UI composition and full-window black
+fades. Residual camera-dependent shader/texture patterns remain visible in some
+locations, including with reconstruction disabled; a definitive fix is not included.
+
 Known issue: FSR 4 v07 may show an outdoor/zone-transition bottom-edge line and reduced
 smoothing. No correction is included in this source update. Reconstruction off avoids
 the reported line but provides less temporal smoothing. Subtitle layout, title-screen
@@ -40,3 +45,6 @@ globe and brief 16:9 transition composition still have limitations. Frame genera
 is not implemented. Full-playthrough and broader hardware validation remain necessary.
 
 See README.md, CHANGELOG.md, docs/LAUNCHER_GUIDE.md and docs/IN_GAME_MENU_GUIDE.md.
+
+PDF manuals, when included, are in launcher/assets/guides/. The illustrated Markdown
+manuals remain in docs/. Keep the complete folder structure when installing or updating.

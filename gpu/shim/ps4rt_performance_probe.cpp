@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "ps4rt_performance_probe.h"
+#include "ps4rt_version.h"
 #include "ps4rt_ui_layout_trace.h"
 #include "ps4rt_stall_windows.h"
 #include "../../src/diagnostic_trace.h"
@@ -405,7 +406,7 @@ void WriteReports(const std::vector<Frame>& captured) {
     json << std::fixed << std::setprecision(3)
          << "{\n"
          << "  \"format\": \"PS4RT performance capture 7\",\n"
-         << "  \"runtime_revision\": \"diagnostics-1.1.1\",\n"
+         << "  \"runtime_revision\": \"diagnostics-" << PS4RT_VERSION_STRING << "\",\n"
          << "  \"version\": \"" << JsonEscape(version ? version : "unknown") << "\",\n"
          << "  \"gpu\": \"" << JsonEscape(gpu_name) << "\",\n"
          << "  \"upscaler\": \"" << Ps4RtSettings::UpscalerName(settings.upscaler.load()) << "\",\n"

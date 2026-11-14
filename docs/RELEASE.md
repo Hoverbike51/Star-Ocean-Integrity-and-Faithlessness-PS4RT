@@ -1,4 +1,4 @@
-# Star Ocean 5 for Windows - v1.1.1
+# Star Ocean 5 for Windows - v1.1.2
 
 **Windows 10/11 x64 player build**
 
@@ -8,6 +8,25 @@
 This Windows adaptation combines a native Cockpit launcher, C++ game preparation and a
 game-specific compatibility runtime. It requires your own supported PS4 game files;
 the original game's complete source code has not been reconstructed.
+
+## Changes in v1.1.2
+
+- Improve scene/UI composition for **4:3, 16:10, 21:9 and 32:9**, preserving the
+  standard **16:9** rendering path.
+- Extend verified black rest/loading fades across the complete output in both axes,
+  including the native QuadList path; keep partial panels and textured content separate.
+- Preserve raster-depth samples across native read-only depth tests and enrich the
+  bounded scene-pass/mask diagnostics for further investigation.
+- Retain 1.0.1 updater compatibility handling, validate player ZIP/SHA-256 packages and
+  fix repeated third-party notice staging during packaging.
+- Update version metadata and the illustrated Markdown guides without replacing their
+  screenshots or the existing PDF documentation editions.
+
+> [!WARNING]
+> **Residual shader/texture artifacts are not fully fixed.** The update and black fade
+> have been accepted in local gameplay testing, but camera-dependent patterns remain
+> visible in some locations, including with reconstruction disabled. This release does
+> not claim to resolve those residual artifacts, issue #11 or Fidel's follower issue.
 
 ## Changes in v1.1.1
 
@@ -48,7 +67,7 @@ the original game's complete source code has not been reconstructed.
 - More robust update installation handoff and temporary file-lock handling.
 - Separate launcher/quick-play desktop shortcuts and timestamped console records.
 
-These changes are available in the source checkout. Build the 1.1.1 player package locally; this documentation update does not publish or replace any GitHub release asset.
+These changes are available in the source checkout. Build the 1.1.2 player package locally; this documentation update does not publish or replace any GitHub release asset.
 
 ## Highlights since v0.4.0
 
@@ -97,7 +116,7 @@ passcodes cannot be imported by the native extractor.
 ## Clean player folder
 
 The expected distribution folder is
-`ps4rt-star-ocean-5-windows-x64-v1.1.1-latest`.
+`ps4rt-star-ocean-5-windows-x64-v1.1.2-latest`.
 
 | Entry | Purpose |
 | --- | --- |
@@ -112,11 +131,15 @@ game data, personal settings, saves, caches or diagnostic captures. The optional
 probe is disabled by default; its session controls appear when enabled in Advanced.
 For source builds, **build-windows.cmd** creates the player folder under **dist**.
 
-Executable version resources follow **1.1.1 / 1.1.1.0**, with **HoverMods Vault** as the
+Executable version resources follow **1.1.2 / 1.1.2.0**, with **HoverMods Vault** as the
 application company. Third-party code, shader models and game artwork retain their own
 authors, licenses and notices. Preserve corresponding-source obligations when redistributing.
 
 ## Known limitations
+
+- Residual camera-dependent shader/texture patterns remain visible in some locations
+  at custom aspect ratios. They can persist with reconstruction off; a definitive fix
+  is not included in 1.1.2.
 
 - FSR 4 v07 can lose smoothing and display a bottom-edge line outdoors or after a zone
   transition. No validated fix is included. Disabling reconstruction avoids the reported
@@ -138,7 +161,8 @@ The ending-crash correction was validated in gameplay: credits and subsequent vi
 play without crashing. All 18 loader regression tests and the two targeted trophy/time
 checks passed before that gameplay validation.
 
-The source version is now **1.1.1**. Isolated compilation and regression checks do not
+The source version is now **1.1.2**. Local gameplay testing accepted the update
+including the full-output black fade; residual shader/texture artifacts remain open. Isolated compilation and regression checks do not
 replace the installed test build or generate a player ZIP. Build and validate the final player package
 before publishing it; broader hardware and rendering issues remain separate.
 

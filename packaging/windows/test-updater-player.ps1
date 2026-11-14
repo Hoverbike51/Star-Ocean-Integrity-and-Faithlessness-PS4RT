@@ -34,13 +34,25 @@ try {
     }
     Copy-Item -LiteralPath (Join-Path $root 'launcher\assets') -Destination (Join-Path $stage 'launcher') -Recurse
     Copy-Item -LiteralPath (Join-Path $root 'gpu\assets') -Destination (Join-Path $stage 'gpu') -Recurse
+    $amdFolder=Join-Path $stage 'gpu\assets\amd-fsr-sdk24'
+    New-Item -ItemType Directory -Path $amdFolder -Force | Out-Null
+    Get-ChildItem -LiteralPath (Join-Path $root 'gpu\third_party\amd-fsr-sdk24\bin') -Filter '*.dll' -File |
+        Copy-Item -Destination $amdFolder
     Copy-Item -LiteralPath (Join-Path $root 'fsr4_shaders') -Destination $stage -Recurse
     & (Join-Path $PSScriptRoot 'copy-notices.ps1') -Destination $stage
+    # Keep the collector's fresh-directory guard intact, as in package.sh.
+    $sdkGuide=Join-Path $stage 'docs\third-party\AMD_FSR_SDK.md'
+    $guideText=(Get-Content -LiteralPath (Join-Path $root 'docs\AMD_FSR_SDK.md') -Raw -Encoding UTF8).Replace(
+        '(images/readme/AMD/So5_FSR_SDK.png)','(../../launcher/assets/guides/AMD_FSR_SDK.png)')
+    [IO.File]::WriteAllText($sdkGuide,$guideText,[Text.UTF8Encoding]::new($false))
+    Copy-Item -LiteralPath (Join-Path $root 'docs\images\readme\AMD\So5_FSR_SDK.png') `
+        -Destination (Join-Path $stage 'launcher\assets\guides\AMD_FSR_SDK.png')
     $privateFiles = @(Get-ChildItem -LiteralPath $stage -Recurse -File | Where-Object {
         $_.Name -match '(?i)\.(etl|wpaprofile|csv|ps1|cmd|py|log)$|^performance.*\.json$|settings.*\.ini$|HUD.*Studio|^HUD_.*\.(md|txt|m)$|^hud-map.*\.json$|^hud-preset\.schema\.json$|^hud-private.*\.json$'
     })
     if ($privateFiles.Count) { throw 'Player payload contains personal diagnostics, settings or developer tracing tools.' }
     $env:PATH = "$build;$env:SystemRoot\System32;$env:SystemRoot"
+    & (Join-Path $PSScriptRoot 'verify-update-package.ps1') -Package $stage
     & $validator --validate-package $stage
     if ($LASTEXITCODE -ne 0) { throw "Native updater validation failed ($LASTEXITCODE)." }
     & (Join-Path $PSScriptRoot 'smoke-test.ps1') -Package $stage

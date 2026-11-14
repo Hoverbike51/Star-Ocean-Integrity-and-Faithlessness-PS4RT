@@ -18,7 +18,7 @@ struct RetainedDiagnostics {
     std::vector<std::wstring> lines;
     void Keep(const std::wstring& line) {
         constexpr std::wstring_view markers[]={L"Upscaler:",L"Scene preset",L"Scene resolution:",
-            L"Output resolution:",L"PS4RT: FSR",L"PS4RT: DLSS",L"PS4RT: scene camera",L"Camera motion:",L"Ultrawide:",L"GPU: using"};
+            L"Screen mask:",L"Scene pass:",L"Output resolution:",L"PS4RT: FSR",L"PS4RT: DLSS",L"PS4RT: scene camera",L"Camera motion:",L"Ultrawide:",L"GPU: using"};
         if(std::none_of(std::begin(markers),std::end(markers),[&](auto marker){return line.find(marker)!=std::wstring::npos;})) return;
         if(lines.size()==Capacity) lines.erase(lines.begin()+Initial);
         lines.push_back(line);

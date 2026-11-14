@@ -51,12 +51,13 @@ if(Test-Path -LiteralPath (Join-Path $bin 'nvngx_dlss.dll')) {
   $inventory.Add($file+' | version '+[Diagnostics.FileVersionInfo]::GetVersionInfo($dll).FileVersion+' | SHA256 '+(Get-So5FileSha256 $dll))
  }
 }
-$amdFolder=Join-Path $bin 'amd-fsr-sdk24'
+$amdFolder=Join-Path $stage 'gpu\assets\amd-fsr-sdk24'
+if(-not (Test-Path -LiteralPath $amdFolder)){$amdFolder=Join-Path $bin 'amd-fsr-sdk24'}
 if(Test-Path -LiteralPath $amdFolder) {
  $inventory.Add('AMD FSR SDK 2.4: signed Vulkan loader/upscaler, separate AMD binary redistribution terms; https://gpuopen.com/amd-fsr-sdk/')
  $inventory.Add('App-local Microsoft Visual C++ x64 runtime: separate Microsoft redistribution terms. No system installation required.')
  foreach($file in @(Get-ChildItem -LiteralPath $amdFolder -Filter '*.dll' -File)) {
-  $inventory.Add('amd-fsr-sdk24/'+$file.Name+' | version '+[Diagnostics.FileVersionInfo]::GetVersionInfo($file.FullName).FileVersion+' | SHA256 '+(Get-So5FileSha256 $file.FullName))
+  $inventory.Add('AMD provider/'+$file.Name+' | version '+[Diagnostics.FileVersionInfo]::GetVersionInfo($file.FullName).FileVersion+' | SHA256 '+(Get-So5FileSha256 $file.FullName))
  }
 }
 $owners=@(& $pacman -Qoq @dlls)

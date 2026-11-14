@@ -3,6 +3,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "ps4rt_settings.h"
+#include "../../../../launcher/amd_fsr_paths.h"
 #include <windows.h>
 #include <algorithm>
 #include <array>
@@ -45,7 +46,7 @@ struct FsrSdk24::Impl {
             std::vector<wchar_t> path(32768);
             const auto n=GetModuleFileNameW(nullptr,path.data(),DWORD(path.size()));
             if(!n || n>=path.size()) {Fail("cannot locate application directory");return;}
-            directory=std::filesystem::path(std::wstring(path.data(),n)).parent_path()/L"amd-fsr-sdk24";
+            directory=So5AmdFsr::SdkDirectory(std::filesystem::path(std::wstring(path.data(),n)).parent_path());
         }
         // Never search the working directory or PATH for provider binaries.
         effect=LoadLibraryExW((directory/L"amd_fidelityfx_upscaler_vk.dll").c_str(),nullptr,

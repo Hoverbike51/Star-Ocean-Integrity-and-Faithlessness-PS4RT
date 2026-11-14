@@ -103,6 +103,10 @@ public:
     void OnDraw(u64 vs_hash, VideoCore::ImageId color, VideoCore::ImageId depth,
                 bool native_viewport, bool blended=false, u64 ps_hash=0);
 
+    /// Called only for a draw sampling the verified, unmodified title-only atlas.
+    void OnTitleDraw(u64 vs_hash, VideoCore::ImageId color, VideoCore::ImageId depth,
+                     bool native_viewport);
+
     /// A pass's first color target: the last render-size RGBA8 target before the UI is the
     /// game's finished frame.
     void OnColorTarget(VideoCore::ImageId color);
