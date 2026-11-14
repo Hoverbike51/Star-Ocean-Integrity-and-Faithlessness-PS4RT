@@ -178,6 +178,25 @@ foreach(BPP IN ITEMS 8 16 32 64 96 128)
 endforeach()
 add_custom_target(host_shaders DEPENDS ${SHADER_HEADERS})
 
+# Verify exact licensed binaries before staging; source ZIP line endings cannot alter DLLs.
+set(FSR_SDK24_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/amd-fsr-sdk24")
+file(READ "${FSR_SDK24_ROOT}/binaries.json" FSR_SDK24_MANIFEST)
+string(JSON FSR_SDK24_COUNT LENGTH "${FSR_SDK24_MANIFEST}" binaries)
+math(EXPR FSR_SDK24_LAST "${FSR_SDK24_COUNT}-1")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FSR_SDK24_ROOT}/binaries.json")
+foreach(FSR_INDEX RANGE ${FSR_SDK24_LAST})
+    string(JSON FSR_DLL MEMBER "${FSR_SDK24_MANIFEST}" binaries ${FSR_INDEX})
+    string(JSON FSR_HASH GET "${FSR_SDK24_MANIFEST}" binaries "${FSR_DLL}")
+    file(SHA256 "${FSR_SDK24_ROOT}/bin/${FSR_DLL}" FSR_ACTUAL)
+    if(NOT FSR_ACTUAL STREQUAL FSR_HASH)
+        message(FATAL_ERROR "AMD SDK 2.4 binary verification failed: ${FSR_DLL}")
+    endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FSR_SDK24_ROOT}/bin/${FSR_DLL}")
+endforeach()
+# Official signed provider binaries and their app-local Microsoft dependencies.
+# No import library: an unavailable SDK cannot prevent the application starting.
+file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/amd-fsr-sdk24/bin/"
+     DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/amd-fsr-sdk24")
 file(GLOB_RECURSE VIDEO_CORE CONFIGURE_DEPENDS shadps4/video_core/*.cpp)
 file(GLOB_RECURSE RECOMPILER CONFIGURE_DEPENDS shadps4/shader_recompiler/*.cpp)
 list(FILTER VIDEO_CORE EXCLUDE REGEX "renderdoc\\.cpp$")
@@ -466,6 +485,12 @@ add_executable(graphics-settings-test EXCLUDE_FROM_ALL ../tests/test_graphics_se
 target_include_directories(graphics-settings-test PRIVATE shim)
 target_compile_options(graphics-settings-test PRIVATE -UNDEBUG)
 add_test(NAME graphics-settings COMMAND graphics-settings-test)
+add_executable(perf-sampling-test EXCLUDE_FROM_ALL ../tests/test_perf_sampling.cpp)
+target_include_directories(perf-sampling-test PRIVATE shim)
+target_compile_options(perf-sampling-test PRIVATE -UNDEBUG)
+add_test(NAME perf-sampling COMMAND perf-sampling-test)
+set_tests_properties(perf-sampling PROPERTIES TIMEOUT 30)
+
 add_executable(memory-budget-test EXCLUDE_FROM_ALL ../tests/test_memory_budget.cpp)
 target_include_directories(memory-budget-test PRIVATE ../src)
 target_compile_options(memory-budget-test PRIVATE -UNDEBUG)
@@ -560,3 +585,46 @@ target_compile_options(fast-forward-test PRIVATE -UNDEBUG)
 target_link_libraries(fast-forward-test PRIVATE PkgConfig::SDL3)
 add_test(NAME fast-forward COMMAND fast-forward-test)
 add_test(NAME fast-forward-conflicts COMMAND fast-forward-test conflict)
+
+# The official SDK is optional at runtime; exercise its actual Vulkan dispatch separately.
+add_executable(fsr-sdk24-gpu-test EXCLUDE_FROM_ALL ../tests/test_fsr_sdk24_gpu.cpp ../tests/test_gpu_runtime_stubs.cpp)
+target_include_directories(fsr-sdk24-gpu-test PRIVATE shim shadps4 third_party/gcn/include)
+target_compile_options(fsr-sdk24-gpu-test PRIVATE -UNDEBUG -fPIC)
+target_link_libraries(fsr-sdk24-gpu-test PRIVATE ps4rtgpu)
+add_test(NAME fsr-sdk24-gpu COMMAND fsr-sdk24-gpu-test "${CMAKE_CURRENT_SOURCE_DIR}/third_party/amd-fsr-sdk24/bin")
+set_tests_properties(fsr-sdk24-gpu PROPERTIES SKIP_RETURN_CODE 77)
+
+# Capture-only synchronization telemetry, shared by C runtime and C++ report writer.
+add_library(so5-diagnostic-trace STATIC ../src/diagnostic_trace.c)
+set_target_properties(so5-diagnostic-trace PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+target_compile_definitions(so5-diagnostic-trace PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(so5-diagnostic-trace PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(ps4rtgpu PUBLIC so5-diagnostic-trace)
+add_executable(diagnostic-trace-test EXCLUDE_FROM_ALL ../tests/test_diagnostic_trace.cpp)
+target_compile_definitions(diagnostic-trace-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(diagnostic-trace-test PRIVATE -UNDEBUG)
+add_test(NAME diagnostic-trace COMMAND diagnostic-trace-test)
+set_tests_properties(diagnostic-trace PROPERTIES TIMEOUT 30)
+# Exercise the actual CSV/JSON writer without linking the renderer implementation.
+add_executable(performance-report-test EXCLUDE_FROM_ALL ../tests/test_performance_report.cpp)
+target_include_directories(performance-report-test PRIVATE
+    $<TARGET_PROPERTY:ps4rtgpu,INCLUDE_DIRECTORIES>)
+target_compile_definitions(performance-report-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(performance-report-test PRIVATE -UNDEBUG -ffunction-sections -fdata-sections)
+target_link_options(performance-report-test PRIVATE -Wl,--gc-sections)
+target_link_libraries(performance-report-test PRIVATE Vulkan::Headers fmt::fmt Boost::headers
+    magic_enum::magic_enum tsl::robin_map GPUOpen::VulkanMemoryAllocator
+    PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit)
+add_test(NAME performance-report COMMAND performance-report-test "${CMAKE_CURRENT_BINARY_DIR}/diagnostic-test-reports")
+set_tests_properties(performance-report PROPERTIES TIMEOUT 30)
+# Some isolated runtime tests compile the C services directly, without ps4rtgpu.
+get_property(so5_directory_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(so5_target IN LISTS so5_directory_targets)
+    get_target_property(so5_type ${so5_target} TYPE)
+    get_target_property(so5_sources ${so5_target} SOURCES)
+    if(so5_type STREQUAL "EXECUTABLE" AND
+       (so5_sources MATCHES "runtime_(mutex|sema|thread)[.]c" OR
+        so5_target MATCHES "^(diagnostic-trace-test|performance-report-test)$"))
+        target_link_libraries(${so5_target} PRIVATE so5-diagnostic-trace)
+    endif()
+endforeach()

@@ -75,6 +75,13 @@ void Metadata() {
     std::cout << "PASS: numerical versions, prerelease policy, Windows assets, digests, invalid replies, cancellation\n";
 }
 void Paths() {
+    assert(U::ProgramFile("docs/AMD_FSR_SDK.md"));
+    for(const char* file:{"amd_fidelityfx_loader_vk.dll","amd_fidelityfx_upscaler_vk.dll",
+            "msvcp140.dll","vcruntime140.dll","vcruntime140_1.dll"})
+        assert(U::ProgramFile(fs::path("bin/amd-fsr-sdk24")/file));
+    assert(!U::ProgramFile("bin/amd-fsr-sdk24/unknown.dll"));
+    assert(!U::ProgramFile("bin/amd-fsr-sdk24/tools/injected.dll"));
+    assert(!U::ProgramFile("bin/amd-fsr-sdk24/installer.exe"));
     for (const char* name : {"../secret", "root/../secret", "root\\file", "/absolute", "C:/file", "root/file:stream",
         "root/NUL.txt", "root/COM1", "root/con.", "root/file. ", "root//file", "root/file?", "root/./file"})
         Reject([&] { U::EntryPath(name); });
@@ -274,6 +281,7 @@ int main() {
         std::cout << "PASS: real player-folder resources, " << package.files.size() << " allowed program files, and clean-PATH launcher probe\n";
         return 0;
     }
+    if (argc == 2 && std::wstring(argv[1]) == L"--paths-only") { Paths(); return 0; }
     assert(argc == 2); const fs::path binaries = fs::absolute(argv[1]);
     Fixture fixture; Metadata(); Paths(); Transactions(fixture.root); Archives(fixture.root); Handoff(fixture.root, binaries);
     return 0;

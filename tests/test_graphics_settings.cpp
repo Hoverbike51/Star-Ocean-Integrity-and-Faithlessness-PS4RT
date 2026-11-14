@@ -9,6 +9,7 @@
 #include "ps4rt_settings.h"
 #include "ps4rt_perf_stats.h"
 #include "ps4rt_scene_preset.h"
+#include "ps4rt_ultrawide.h"
 
 int main() {
     using namespace Ps4RtSettings;
@@ -77,8 +78,9 @@ int main() {
         assert(Ps4RtOutput::TemporalAllowed(output));
         s.output_res=output;s.scene_preset=-1;SetSceneUpscaler(UpscalerFsr3,false);
         assert(s.upscaler==UpscalerFsr3 && s.jitter);
-        const auto surface=Ps4RtOutput::Content(output);
-        const auto input=Ps4RtScene::Input(s.scene_preset,surface.width,surface.height);
+        const bool adjusted=Ps4RtUltrawide::Adjusted(output);
+        const auto surface=adjusted?Ps4RtOutput::Size{OutputWidths[output],OutputHeights[output]}:Ps4RtOutput::Content(output);
+        const auto input=Ps4RtScene::Input(s.scene_preset,surface.width,surface.height,adjusted);
         assert(input.width<=surface.width && input.height<=surface.height);
         Save();s.scene_preset=-1;s.output_res=OutputDefault;Load();
         assert(s.output_res==output && s.upscaler==UpscalerFsr3);
@@ -137,7 +139,7 @@ int main() {
     Load();
     assert(!s.async_shaders);
     s.show_fps = true;
-    s.overlay_items = 0xdb;
+    s.overlay_items = 0x1db;
     s.overlay_scale = 150;
     s.overlay_corner = 3;
     s.overlay_opacity = 75;
@@ -150,7 +152,7 @@ int main() {
     s.overlay_opacity = 0;
     s.overlay_layout = 0;
     Load();
-    assert(s.show_fps && s.overlay_items == 0xdb);
+    assert(s.show_fps && s.overlay_items == 0x1db);
     assert(s.overlay_scale == 150 && s.overlay_corner == 3);
     assert(s.overlay_opacity == 75 && s.overlay_layout == 1);
     // Existing corner IDs and both new centered positions survive save/load unchanged.
@@ -166,6 +168,22 @@ int main() {
         assert(s.overlay_gpu_model == (position % 2 != 0));
         assert(s.overlay_cpu_model == (position % 2 == 0));
     }
+    for (int layout = 0; layout < 3; ++layout) {
+        s.overlay_layout=layout; Save(); s.overlay_layout=-1; Load();
+        assert(s.overlay_layout==layout);
+    }
+    assert(Ps4RtPerfStats::VisibleItems(0,Ps4RtPerfStats::Technical)==Ps4RtPerfStats::AllItems);
+    assert(Ps4RtPerfStats::VisibleItems(7,Ps4RtPerfStats::OneLine)==7);
+    assert(Ps4RtPerfStats::VisibleItems(7,Ps4RtPerfStats::Stacked)==7);
+    Ps4RtPerfStats::FrameHistory history;
+    history.Add(-1); history.Add(0); history.Add(NAN); history.Add(INFINITY);
+    assert(history.count==0 && history.Mean()==0);
+    for (int i=0; i<240; ++i) history.Add(10);
+    history.Add(250); // A long frame remains visible rather than being filtered out.
+    assert(history.count==240 && history.Offset()==1 && history.Peak()==250);
+    assert(history.Mean()==11);
+    for (int i=0; i<240; ++i) history.Add(20);
+    assert(history.Mean()==20 && history.Peak()==20);
     const Ps4RtPerfStats::Anchor anchors[]={{0,0},{1,0},{0,1},{1,1},{.5f,0},{.5f,1}};
     for (int position = 0; position < 6; ++position) {
         const auto anchor = Ps4RtPerfStats::PositionAnchor(position);
@@ -175,6 +193,25 @@ int main() {
     assert(!Ps4RtPerfStats::MatchesGpuEngine(L"pid_1234_luid_0x1_0xabcd_phys_0_eng_0_engtype_3D",123,1,0xabcd));
     assert(!Ps4RtPerfStats::MatchesGpuEngine(L"pid_123_luid_0x2_0xabcd_phys_0_eng_0_engtype_3D",123,1,0xabcd));
     assert(!Ps4RtPerfStats::MatchesGpuEngine(L"pid_123_luid_0x1_0xabcd_phys_0_eng_0_engtype_Copy",123,1,0xabcd));
+    using namespace Ps4RtPerfStats;
+    assert(MatchesGpuEngine(L"pid_123_luid_0x1_0xabcd_phys_0_eng_1_engtype_Compute_0",123,1,0xabcd));
+    assert(MatchesGpuEngine(L"pid_123_luid_0x1_0xabcd_phys_0_eng_1_engtype_Compute",123,1,0xabcd));
+    assert(!MatchesGpuEngine(L"pid_123_luid_0x1_0xabcd_phys_0_eng_0_engtype_3Dother",123,1,0xabcd));
+    assert(!MatchesGpuEngine(L"pid_123_luid_0x1_0xabcd_phys_0_eng_0_engtype_Compute_bad",123,1,0xabcd));
+    assert(!MatchesGpuEngine(L"pid_123_luid_0x1_0xabcd_phys_0_eng_0_engtype_VideoDecode",123,1,0xabcd));
+    assert(CpuPercent(1000, 1000, 32) == 3.125f);
+    assert(CpuPercent(1000, 1000, 20) == 5.0f);
+    assert(CpuPercent(32000, 1000, 32) == 100.0f);
+    assert(CpuPercent(0, 1000, 32) == 0.0f);
+    assert(CpuPercent(0, 0, 32) < 0 && CpuPercent(1, 1, 0) < 0);
+    CpuCounter counter;
+    assert(counter.Read(5000, 1000, 32) < 0); // First observation is not lifetime work.
+    assert(counter.Read(6000, 2000, 32) == 3.125f);
+    assert(counter.Read(10, 3000, 32) < 0); // Reset must not underflow.
+    assert(counter.Read(10, 3000, 32) < 0); // Empty interval.
+    counter.Reset();
+    assert(counter.Read(1010, 4000, 32) < 0);
+    assert(counter.Read(2010, 5000, 32) == 3.125f);
     for (int provider = 0; provider < UpscalerCount; ++provider) {
         for (int preset = -1; preset < PresetCount; ++preset) {
             const unsigned state = Ps4RtPerfStats::ReconstructionState(provider,preset);
@@ -199,11 +236,16 @@ int main() {
     overlay_sample.cpu_percent=overlay_sample.gpu_percent=-1;
     assert(Ps4RtPerfStats::Format(overlay_sample,Ps4RtPerfStats::Cpu|Ps4RtPerfStats::Gpu,true)=="GPU N/A   CPU N/A");
     assert(Ps4RtPerfStats::Format(overlay_sample,Ps4RtPerfStats::Upscaler,true)=="Native · NO PRESET");
+    assert(Ps4RtPerfStats::Format(overlay_sample,Ps4RtPerfStats::CpuThread,true)=="CPU thread N/A");
+    overlay_sample.busiest_thread_percent=98;
+    assert(Ps4RtPerfStats::Format(overlay_sample,Ps4RtPerfStats::CpuThread,true)=="CPU thread 98%");
+    assert(!(Ps4RtPerfStats::DefaultItems & Ps4RtPerfStats::CpuThread));
     s.menu_tab=4; Save();s.menu_tab=0;Load();assert(s.menu_tab==4);
     for (int provider : {UpscalerOff, UpscalerFsr3, UpscalerFsr4}) {
         for (int output : {1, 2, 3}) {
             s.sharpen = true;
             s.sharpness = 0.42f;
+            s.spatial_aa = true;
             s.anisotropy = 16;
             s.output_res = output;
             SetSceneUpscaler(provider, false);
@@ -213,7 +255,7 @@ int main() {
             assert(s.output_res == output && s.startup_output_res == output);
             assert(s.sharpness > 0.419f && s.sharpness < 0.421f);
             assert(s.anisotropy == 16 && s.startup_anisotropy == 16);
-            assert(!s.object_motion && !s.fsr1 && !s.spatial_aa);
+            assert(!s.object_motion && !s.fsr1 && s.spatial_aa);
             assert(s.jitter == (provider != UpscalerOff));
             assert(s.rcas == (provider == UpscalerOff));
         }
@@ -235,6 +277,13 @@ int main() {
     s.upscaler=UpscalerFsr411;
     ConfigureUpscalerSupport(true,false);
     assert(s.upscaler==UpscalerFsr3 && !s.fsr411_supported);
+    s.upscaler=UpscalerFsrSdk24;ConfigureFsrSdkSupport(true,nullptr);
+    assert(s.upscaler==UpscalerFsrSdk24 && s.fsr_sdk24_supported);
+    Save();Load();assert(s.upscaler==UpscalerFsrSdk24);
+    ConfigureFsrSdkSupport(false,"missing provider");assert(s.upscaler==UpscalerFsr3);
+    s.fsr3_available=false;s.upscaler=UpscalerFsrSdk24;
+    ConfigureFsrSdkSupport(false,"GPU policy");assert(s.upscaler==UpscalerOff);
+    SetFsrSdkProviderName("AMD FSR 4.1.2");assert(FsrSdkProviderName()=="AMD FSR 4.1.2");
     unlink(path);
     std::puts("PASS: native-scene settings persistence and native-port defaults");
 }

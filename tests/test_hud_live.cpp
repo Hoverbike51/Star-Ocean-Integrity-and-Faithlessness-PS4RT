@@ -12,8 +12,11 @@ int main() {
     assert(LivePipe(dir)==LivePipe(dir/L"."));
     assert(LivePipe(dir)==LivePipe(std::filesystem::path(dir.wstring()+L"\\")));
     const auto baseline=Base(Aspect::Superwide);LiveState state;state.Reset(baseline);
+    {LiveRequest request{"session","owner","preview",Serialize(baseline)};request.force_groups=std::uint64_t{1}<<32;
+        assert(DecodeRequest(Encode(request)).force_groups==(std::uint64_t{1}<<32));}
     const auto original=state.Current();auto changed=baseline;changed.groups[0].x=48;changed.groups[0].scale=1.25;
-    changed.reference_width=3840;changed.reference_height=1080; // schema 3 must survive preview/apply/cancel/lease expiry
+    changed.backgrounds[20]=BackgroundFit::Original;changed.backgrounds[31]=BackgroundFit::Extended;
+    changed.reference_width=3840;changed.reference_height=1080; // Sizing and reference output survive preview/apply/cancel/lease expiry
     state.Queue(changed,1);assert(state.Current()==original);assert(state.Boundary());
     assert(state.Current()->layout==changed&&state.Applied()==1&&original->layout==baseline);
     state.Reset(baseline);
@@ -26,6 +29,8 @@ int main() {
         };
         const auto forced=Exchange(dir,{hello.session,first_owner,"preview",Serialize(changed),1u<<7},nullptr);
         assert(forced.accepted&&state.Boundary()&&state.Current()->force_groups==(1u<<7));
+        const auto pause_forced=Exchange(dir,{hello.session,first_owner,"preview",Serialize(changed),std::uint64_t{1}<<32},nullptr);
+        assert(pause_forced.accepted&&state.Boundary()&&state.Current()->force_groups==(std::uint64_t{1}<<32));
         Reject([&]{Exchange(dir,{hello.session,first_owner,"apply",Serialize(changed),1u<<7},nullptr);});
         Reject([&]{Exchange(dir,{hello.session,first_owner,"preview",Serialize(changed),1u<<23},nullptr);});
         assert(send("cancel").accepted&&state.Boundary()&&!state.Current()->force_groups);
@@ -189,7 +194,7 @@ int main() {
     Reject([&]{DecodeRequest(std::string(65537,'x'));});
     Reject([&]{DecodeReply("{}");});
     Reject([&]{DecodeRequest("{\"protocol\":1,\"session\":\"\",\"owner\":\"x\",\"action\":\"preview\",\"layout\":\"\",\"force_groups\":true}");});
-    Reject([&]{DecodeRequest("{\"protocol\":1,\"session\":\"\",\"owner\":\"x\",\"action\":\"preview\",\"layout\":\"\",\"force_groups\":2147483648}");});
+    Reject([&]{DecodeRequest("{\"protocol\":1,\"session\":\"\",\"owner\":\"x\",\"action\":\"preview\",\"layout\":\"\",\"force_groups\":8589934592}");});
     assert(!std::filesystem::exists(dir/"hud-layout.json"));assert(std::filesystem::remove(dir));
     std::cout<<"HUD live: real current-user IPC, immutable frame publication, save/cancel, competing owners, stale/aspect rejection and automatic lease rollback passed\n";
 }

@@ -1,10 +1,30 @@
 # Windows port audit
 
-Current source: **1.0.1**. Rendering/input/Tweaks and optional
+Current source: **1.0.2**. Rendering/input/Tweaks and optional
 DLSS additions are described in the [changelog](../CHANGELOG.md) and current player guides.
 The portability and benchmark inventory below records the earlier Windows integration;
 its dated test observations are not a new validation of this source export. The unresolved
 FSR 4 v07 outdoor/bottom-edge defect remains listed in the current changelog.
+
+## Rendering source updates awaiting gameplay validation
+
+- Fast-forward requests x5 instead of x3; existing input, focus and audio guards remain.
+- The guarded aspect patch also supports true 4:3 and 16:10 camera projections, with
+  proportional menus/movies and a fixed projection ratio for each game session.
+- Filterable color proxy transfers use linear blits instead of point resampling.
+  Depth, stencil and integer data retain exact-value sampling.
+- Direct and indirect full-screen passes using the identified scene-copy/tonemap vertex
+  shader do not receive geometry jitter, avoiding an unwritten jitter-shifted edge.
+- The launcher's Video tab and the in-game Image tab expose optional SDR FXAA, default off,
+  backed by the existing spatial-AA shader and persisted independently of reconstruction.
+
+These are source changes, not a claim of verified outdoor image quality. Some guest compute
+passes still operate on original-size intermediates; a 4K attachment alone does not prove
+that every pass preserves 4K detail. Test interior/exterior transitions in the same scene
+at Original 1080p and Native (100%), with reconstruction disabled and enabled. Keep FXAA
+off for the baseline, then compare it separately. Confirm the actual applied input and
+export diagnostics if pixelation or the bottom-edge artifact persists. No new build or
+gameplay run was performed for these changes.
 
 ## Code and build
 

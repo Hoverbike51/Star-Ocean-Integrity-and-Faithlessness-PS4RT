@@ -8,15 +8,16 @@
 
 #include <atomic>
 #include <cstdint>
+#include <string>
 #include "ps4rt_output.h"
 
 namespace Ps4RtSettings {
 
 enum Upscaler : int { UpscalerOff = 0, UpscalerFsr3 = 1, UpscalerFsr4 = 2, UpscalerFsr411 = 3,
-                      UpscalerTaa = 4, UpscalerDlss = 5, UpscalerCount };
-/// FSR 4 v07 or FSR 4.1.1: the same inputs, settings and placement in the frame.
+                      UpscalerTaa = 4, UpscalerDlss = 5, UpscalerFsrSdk24 = 6, UpscalerCount };
+/// Temporal HDR providers sharing inputs/placement: source-v07, 4.1.1 and official SDK 2.4.
 inline bool IsFsr4(int upscaler) {
-    return upscaler == UpscalerFsr4 || upscaler == UpscalerFsr411;
+    return upscaler == UpscalerFsr4 || upscaler == UpscalerFsr411 || upscaler == UpscalerFsrSdk24;
 }
 enum Preset : int { NativeAA = 0, Quality, Balanced, Performance, UltraPerformance, PresetCount };
 enum DebugView : int { DebugNone = 0, DebugReactive = 1, DebugMotion = 2, DebugViewCount };
@@ -119,6 +120,7 @@ struct Values {
     /// Scene integration status, separate from provider/device support.
     std::atomic<const char*> temporal_problem{nullptr};
     std::atomic<bool> fsr4_supported{false}, fsr411_supported{false};
+    std::atomic<bool> fsr_sdk24_supported{false},fsr_sdk24_configured{false};
     std::atomic<bool> fsr3_configured{false},fsr3_available{true};
     /// DLSS (ps4rt_dlss.dll, NVIDIA RTX) is ready, or why not (null before the device exists).
     std::atomic<bool> dlss_supported{false},dlss_configured{false};
@@ -142,6 +144,9 @@ void SetSceneUpscaler(int selected, bool object_motion);
 void ConfigureUpscalerSupport(bool fsr4, bool fsr411);
 /// After device creation: DLSS availability; a DLSS setting falls back to FSR 3.1 without it.
 void ConfigureDlssSupport(bool available, const char* problem);
+void ConfigureFsrSdkSupport(bool available, const char* problem);
+void SetFsrSdkProviderName(const std::string& name);
+std::string FsrSdkProviderName();
 /// Startup-patched scene dimensions require a newly prepared image.
 bool FixedRenderSession();
 int RenderPreset();

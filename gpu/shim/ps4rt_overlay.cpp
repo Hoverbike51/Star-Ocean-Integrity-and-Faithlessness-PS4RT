@@ -101,12 +101,13 @@ ImFont* performance_font = nullptr;
 // Present rate for the FPS counter.
 std::chrono::steady_clock::time_point last_present{};
 float frame_ms_avg = 0.0f;
+Ps4RtPerfStats::FrameHistory frame_history;
 
 void CommitPendingPreset() {
     auto& s=Ps4RtSettings::Get();
     if(s.upscaler==Ps4RtSettings::UpscalerOff) return;
     const auto output=Ps4RtUltrawide::Content(s.output_res);
-    pending_scene_preset=Ps4RtScene::ForOutput(pending_scene_preset,output.width,output.height);
+    pending_scene_preset=Ps4RtScene::ForOutput(pending_scene_preset,output.width,output.height,Ps4RtUltrawide::Enabled());
     if(s.native_scene && s.scene_preset!=pending_scene_preset) {s.scene_preset=pending_scene_preset;dirty=true;}
 }
 
@@ -288,11 +289,12 @@ void SliderRow(const char* label, std::atomic<int>& value, int lo, int hi, const
 
 const char* UpscalerLabel(int upscaler) {
     switch (upscaler) {
-    case Ps4RtSettings::UpscalerFsr3: return "FSR 3.1";
-    case Ps4RtSettings::UpscalerFsr4: return "FSR 4";
+    case Ps4RtSettings::UpscalerFsr3: return "AMD FSR 3.1.5";
+    case Ps4RtSettings::UpscalerFsr4: return "AMD FSR 4 v7 (INT8)";
     case Ps4RtSettings::UpscalerFsr411: return "FSR 4.1.1";
     case Ps4RtSettings::UpscalerTaa: return "TAA";
     case Ps4RtSettings::UpscalerDlss: return "DLSS";
+    case Ps4RtSettings::UpscalerFsrSdk24: return "AMD FSR 4.1.2";
     default: return "";
     }
 }
@@ -307,7 +309,7 @@ std::string ReconstructionLabel(unsigned state) {
     const int preset = Ps4RtPerfStats::ReconstructionPreset(state);
     if (provider == UpscalerOff) return "Native · NO PRESET";
     if (provider == UpscalerDlss && preset == NativeAA) return "DLAA";
-    const std::string name = UpscalerLabel(provider);
+    const std::string name = provider==UpscalerFsrSdk24 ? FsrSdkProviderName() : UpscalerLabel(provider);
     if (provider == UpscalerTaa) return name + " · NO PRESET";
     const char* label = preset < 0 ? Tr(L"Original 1080p", L"1080p d’origine") :
         preset == NativeAA ? Tr(L"Native (100%)", L"Natif (100 %)") :
@@ -319,11 +321,11 @@ std::string ReconstructionLabel(unsigned state) {
 }
 
 // The performance overlay's text with the current settings (also the menu's preview).
-std::string OverlayText() {
+Ps4RtPerfStats::Sample OverlaySample() {
     namespace P = Ps4RtPerfStats;
     const auto& s = Ps4RtSettings::Get();
-    const unsigned items = s.overlay_items;
-    if ((items & (P::Gpu | P::Cpu | P::Ram | P::Vram)) && overlay_instance) {
+    const unsigned items = P::VisibleItems(s.overlay_items, s.overlay_layout);
+    if ((items & (P::Gpu | P::Cpu | P::Ram | P::Vram | P::CpuThread)) && overlay_instance) {
         P::Start(*overlay_instance);
     }
     P::Sample sample = P::Latest();
@@ -333,7 +335,13 @@ std::string OverlayText() {
     sample.show_gpu_model = s.overlay_gpu_model;
     sample.show_cpu_model = s.overlay_cpu_model;
     sample.version = PS4RT_VERSION_STRING;
-    return P::Format(sample, items, s.overlay_layout == 0);
+    return sample;
+}
+
+std::string OverlayText() {
+    const auto& s = Ps4RtSettings::Get();
+    return Ps4RtPerfStats::Format(OverlaySample(),
+        Ps4RtPerfStats::VisibleItems(s.overlay_items,s.overlay_layout),s.overlay_layout == 0);
 }
 
 void GameTab() {
@@ -543,7 +551,7 @@ void OverlayTab() {
     if (ImGui::BeginTable("##overlay_items", 2, ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableNextColumn();
         static const char* const names[] = {"FPS", "Frametime", "Upscaler", "GPU (name and use)", "CPU (game)",
-                                            "RAM (game / total)", "VRAM (used / available)", "Application version"};
+                                            "RAM (game / total)", "VRAM (used / available)", "Application version", "Busiest CPU thread"};
         for (unsigned item = 0; item < std::size(names); ++item) {
             const unsigned bit = 1u << item;
             bool on = (s.overlay_items & bit) != 0;
@@ -570,8 +578,8 @@ void OverlayTab() {
         static const char* const corners[] = {"Top left", "Top right", "Bottom left", "Bottom right", "Top center", "Bottom center"};
         ChoiceRow("Position", s.overlay_corner, corners, nullptr, 6, "Where the overlay sits.");
         SliderRow("Background opacity", s.overlay_opacity, 0, 100, "%d%%", "0% is no background.");
-        static const char* const layouts[] = {"One line", "One item per line"};
-        ChoiceRow("Layout", s.overlay_layout, layouts, nullptr, 2, "Items side by side or stacked.");
+        static const char* const layouts[] = {"One line", "One item per line", "Technical"};
+        ChoiceRow("Overlay type", s.overlay_layout, layouts, nullptr, 3, "Items side by side or stacked.");
         ImGui::EndTable();
     }
     ImGui::EndDisabled();
@@ -896,7 +904,9 @@ void LoadingScreen() {
 
 void FpsCounter() {
     const auto& s = Ps4RtSettings::Get();
-    const std::string text = OverlayText();
+    const auto sample = OverlaySample();
+    const std::string text = Ps4RtPerfStats::Format(sample,
+        Ps4RtPerfStats::VisibleItems(s.overlay_items,s.overlay_layout),s.overlay_layout == 0);
     if (text.empty()) {
         return;
     }
@@ -906,14 +916,82 @@ void FpsCounter() {
     ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + pad + (viewport->WorkSize.x - 2 * pad) * anchor.x,
                                   viewport->WorkPos.y + pad + (viewport->WorkSize.y - 2 * pad) * anchor.y),
                             ImGuiCond_Always, ImVec2(anchor.x, anchor.y));
+    const bool technical = s.overlay_layout == Ps4RtPerfStats::Technical;
+    float font_scale = s.overlay_scale / 100.0f;
+    if (technical) {
+        // Reserve by labels/model names and fixed numeric envelopes, never live readings.
+        // Auto-fit made the right/center anchors move whenever a counter gained a digit.
+        ImFont* font = performance_font ? performance_font : ImGui::GetFont();
+        const float font_size = 18.0f * base_scale;
+        const auto width = [&](const char* value) {
+            return font->CalcTextSizeA(font_size, FLT_MAX, 0.0f, value).x;
+        };
+        const auto row_width = [&](const char* label, const char* reserve) {
+            return width(label) + width(reserve);
+        };
+        const auto& style = ImGui::GetStyle();
+        const float content_width = std::max({420.0f * base_scale,
+            width("AMD FSR 4 v7 (INT8) · Ultra Performance"),
+            row_width(sample.show_gpu_model ? sample.gpu_name.c_str() : "GPU", " 100%"),
+            row_width(sample.show_cpu_model ? sample.cpu_name.c_str() : "CPU", " 100%"),
+            row_width(Tr(L"Threads / logical CPUs", L"Threads / processeurs logiques"), ": 99999 / 9999"),
+            row_width(Tr(L"Sampling: interval / age / cost", L"Mesure : intervalle / âge / coût"),
+                      ": 9999 ms / 9999 ms / 999.99 ms"),
+            row_width(Tr(L"Applied render resolution", L"Résolution de rendu appliquée"), ": 99999 x 99999"),
+            row_width(Tr(L"Output resolution", L"Résolution de sortie"), ": 99999 x 99999"),
+            row_width(Tr(L"Frame time: average / peak", L"Temps par image : moyenne / pic"),
+                      ": 99999.9 / 99999.9 ms")});
+        const float fixed_height = 60.0f * base_scale + 10.0f * style.ItemSpacing.y +
+                                   2.0f * style.WindowPadding.y;
+        // Fifteen text lines plus one spare line; padding/graph do not follow text scale.
+        const float text_height = 16.0f * font_size;
+        const float available_width = std::max(1.0f, viewport->WorkSize.x - 2 * pad);
+        const float available_height = std::max(1.0f, viewport->WorkSize.y - 2 * pad);
+        font_scale = std::max(0.01f, std::min({font_scale,
+            (available_width - 2.0f * style.WindowPadding.x) / content_width,
+            (available_height - fixed_height) / text_height}));
+        ImGui::SetNextWindowSize(ImVec2(
+            std::min(available_width, std::ceil(content_width * font_scale + 2.0f * style.WindowPadding.x)),
+            std::min(available_height, std::ceil(text_height * font_scale + fixed_height))), ImGuiCond_Always);
+    }
     ImGui::SetNextWindowBgAlpha(s.overlay_opacity / 100.0f);
-    ImGui::Begin("##fps", nullptr,
-                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
-                     ImGuiWindowFlags_NoFocusOnAppearing);
-    ImGui::SetWindowFontScale(s.overlay_scale / 100.0f);
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings |
+        (technical ? ImGuiWindowFlags_None : ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::Begin("##fps", nullptr, flags);
+    ImGui::SetWindowFontScale(1.0f);
     if(performance_font) ImGui::PushFont(performance_font,18.0f);
-    ImGui::TextUnformatted(text.c_str());
+    ImGui::SetWindowFontScale(font_scale);
+    if (s.overlay_layout == Ps4RtPerfStats::Technical) {
+        ImGui::TextColored(ImVec4(.32f,.84f,1.0f,1.0f), "%s", Tr(L"Technical", L"Technique"));
+        ImGui::Separator();
+        ImGui::TextUnformatted(text.c_str());
+        ImGui::Text("%s: %u / %u", Tr(L"Threads / logical CPUs", L"Threads / processeurs logiques"),
+                    sample.thread_count, sample.logical_processors);
+        const int rw = s.active_render_width, rh = s.active_render_height;
+        if (rw > 0 && rh > 0)
+            ImGui::Text("%s: %d x %d", Tr(L"Applied render resolution", L"Résolution de rendu appliquée"),rw,rh);
+        else ImGui::Text("%s: N/A", Tr(L"Applied render resolution", L"Résolution de rendu appliquée"));
+        ImGui::Text("%s: %.0f x %.0f", Tr(L"Output resolution", L"Résolution de sortie"),
+                    viewport->Size.x,viewport->Size.y);
+        if (sample.sample_interval_ms >= 0.0 && sample.sample_age_ms >= 0.0)
+            ImGui::Text("%s: %.0f ms / %.0f ms / %.2f ms", Tr(L"Sampling: interval / age / cost", L"Mesure : intervalle / âge / coût"),
+                        sample.sample_interval_ms,sample.sample_age_ms,sample.sampling_ms);
+        else
+            ImGui::Text("%s: N/A", Tr(L"Sampling: interval / age / cost", L"Mesure : intervalle / âge / coût"));
+        ImGui::Separator();
+        ImGui::Text("%s: %.1f / %.1f ms", Tr(L"Frame time: average / peak", L"Temps par image : moyenne / pic"),
+                    frame_history.Mean(),frame_history.Peak());
+        const float graph_width = std::max(1.0f, ImGui::GetContentRegionAvail().x);
+        const float graph_max = std::clamp(frame_history.Peak() * 1.1f,33.4f,250.0f);
+        ImGui::PushStyleColor(ImGuiCol_PlotLines,ImVec4(.32f,.84f,1.0f,1.0f));
+        ImGui::PlotLines("##frametimes",frame_history.values.data(),int(frame_history.count),
+                         int(frame_history.Offset()),nullptr,0.0f,graph_max,
+                         ImVec2(graph_width,60.0f*base_scale));
+        ImGui::PopStyleColor();
+    } else {
+        ImGui::TextUnformatted(text.c_str());
+    }
     if(performance_font) ImGui::PopFont();
     ImGui::End();
 }
@@ -1456,8 +1534,10 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent,
             bool title_screen, unsigned reconstruction_state) {
     // Present interval for the FPS readout (measured also while nothing is drawn).
     const auto now = std::chrono::steady_clock::now();
+    const bool have_previous = last_present != std::chrono::steady_clock::time_point{};
     const float ms = std::chrono::duration<float, std::milli>(now - last_present).count();
     last_present = now;
+    if (have_previous) frame_history.Add(ms);
     if (ms > 0.0f && ms < 1000.0f) {
         frame_ms_avg = frame_ms_avg == 0.0f ? ms : frame_ms_avg * 0.95f + ms * 0.05f;
     }

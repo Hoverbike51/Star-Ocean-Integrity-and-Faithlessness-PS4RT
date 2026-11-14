@@ -5,6 +5,7 @@
  * the same 9-byte instruction with another displacement. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "diagnostic_trace.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -171,6 +172,7 @@ static void publish(GuestThread *t) {
 }
 /* Host threads that call into guest code without being created by the guest
  * (the main thread, test threads) get a record on first use. */
+static void set_host_name(const char *name);
 GuestThread *runtime_thread_current(void) {
     if (current) return current;
     GuestThread *t=new_thread();
@@ -185,10 +187,12 @@ GuestThread *runtime_thread_current(void) {
 void runtime_thread_attach_host(const char *name) {
     GuestThread *t=runtime_thread_current();
     snprintf(t->name,sizeof(t->name),"%s",name ? name : "host");
+    set_host_name(t->name);
 }
 void runtime_thread_attach_main(void) {
     GuestThread *t=runtime_thread_current();
     snprintf(t->name,sizeof(t->name),"main");
+    set_host_name(t->name);
     apply_native_scheduling(t);
 }
 int32_t runtime_thread_current_priority(void) { return runtime_thread_current()->attr.prio; }
@@ -311,6 +315,7 @@ static void *host_start(void *p) {
     apply_native_scheduling(t);
     if (!exit_setjmp(t)) t->result=t->entry(t->argument);
     runtime_thread_keys_cleanup();
+    so5_diag_thread_exit();
     pthread_mutex_lock(&lock); t->finished=1; ++exited; pthread_mutex_unlock(&lock);
     return t->result;
 }
@@ -351,7 +356,9 @@ static ABI int32_t thread_join(GuestThread *t,void **result) {
     if (t->detached || t->joined) return ERR(22);
     t->joined=1;
     void *value=NULL;
+    So5DiagScope diagnostic=so5_diag_begin(SO5_DIAG_JOIN,(uintptr_t)t);
     int e=pthread_join(t->host,&value);
+    so5_diag_end(diagnostic);
     if (e) { fprintf(stderr,"STOP: host pthread_join failed: %d\n",e); exit(21); }
     if (result) *result=t->result;
     pthread_mutex_lock(&lock); ++joined_count; pthread_mutex_unlock(&lock);

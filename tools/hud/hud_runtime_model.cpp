@@ -11,7 +11,7 @@ namespace So5Hud {
 // Exact native layout XML fingerprints (not the enclosing ISF container).
 // The game passes only this chunk to the GUI loader. Checked for ENG/FRE.
 // These contain no game artwork, scripts or binary payloads.
-const std::array<ResourceBinding,25> RuntimeResources={{
+const std::array<ResourceBinding,31> RuntimeResources={{
     {"commonmemberinfo",0,23308,0x12771e80a03a92da,0x12771e80a03a92da,{-40,855,380,196}},
     {"targetinfo",2,12217,0xa516ac976fb0b7bc,0xa516ac976fb0b7bc,{-10,141,513,189}},
     {"result",3,11347,0x64a3e4814e469b4f,0x64a3e4814e469b4f,{1338,288,582,381}},
@@ -36,9 +36,16 @@ const std::array<ResourceBinding,25> RuntimeResources={{
     {"privateaction",27,7391,0x5e6feda89ff4f781,0x5e6feda89ff4f781,{1252,943,670,54}},
     {"shop",29,10422,0x0ae0874be8584167,0x0ae0874be8584167,{-10,0,1940,1080}},
     {"shopmenu",29,8198,0xa9e921eb9de20325,0xa9e921eb9de20325,{-10,0,1940,1080}},
-    {"fm_quest",30,8470,0x748e6e2e76518312,0x748e6e2e76518312,{-10,0,1940,1080}}
+    {"fm_quest",30,8470,0x748e6e2e76518312,0x748e6e2e76518312,{-10,0,1940,1080}},
+    {"pause",31,7976,0x90921a94d9694f58,0x90921a94d9694f58,{-10,-10,1940,1100}},
+    {"fm_itemcreation",20,4888,0x998156d507d621b4,0x998156d507d621b4,{0,0,1920,1080}},
+    {"fm_partyskill",20,3014,0x1e3d0a5cead7f8eb,0x1e3d0a5cead7f8eb,{0,0,1920,1080}},
+    {"fm_saveload",20,712,0x3768ad31623ca348,0x3768ad31623ca348,{0,0,1920,1080}},
+    {"popwindow",20,4723,0x62ac9b8fbc5459b0,0x62ac9b8fbc5459b0,{-10,0,1940,1080}},
+    {"gameover",20,6329,0xe0ebf4fe642e92a4,0xe0ebf4fe642e92a4,{-10,-10,1940,1100}}
 }};
 const ResourceBinding MinimapComposite{"native_minimap_composite",1,0,0,0,{1584,4,332,332}};
+const ResourceBinding PauseControls{"native_pause_controls",32,0,0,0,{1597,935,494,58}};
 const ResourceBinding Subtitles{"native_caption",28,0,0,0,{200,820,1520,160}};
 const ResourceBinding BattleMenuBackground{"bm_topmenu_background",22,0,0,0,{-10,-10,1940,1100}};
 const std::array<ResourceBinding,4> ProceduralResources={{
@@ -48,7 +55,7 @@ const std::array<ResourceBinding,4> ProceduralResources={{
     {"native_all_ui",26,0,0,0,{0,0,1920,1080}}
 }};
 bool RuntimeSupported(size_t group) {
-    return group==1||group==22||group==28||std::ranges::any_of(ProceduralResources,[&](const auto& r){return r.group==group;})||
+    return group==1||group==22||group==28||group==32||std::ranges::any_of(ProceduralResources,[&](const auto& r){return r.group==group;})||
         std::ranges::any_of(RuntimeResources,[&](const auto& r){return r.group==group;});
 }
 const ResourceBinding* IdentifyResource(std::span<const unsigned char> data) {
@@ -67,20 +74,35 @@ std::uint64_t NativeName(std::string_view name,int handle) {
 }
 Identity IdentifyHandle(const ResourceBinding* r,int handle) {
     Identity id{.resource=r,.handle=handle};if(!r)return id;
-    if(r->group==0) {
+    if(r->group==20&&r->resource!="fm_background") {
+        id.leaf_only=true;
+        if(r->resource=="fm_partyskill")id.roots[0]=NativeName("MASK",handle);
+        else if(r->resource=="popwindow")id.roots[0]=NativeName("IMG_BACK2",handle);
+        else if(r->resource=="gameover") {
+            id.roots[0]=NativeName("BLACKOUT",handle);id.roots[1]=NativeName("IMAGE_BLACK",handle);
+            id.roots[2]=NativeName("IMAGE_BLACK_UD",handle);
+        }else id.roots[0]=NativeName("ALL_SCREEN",handle);
+    }else if(r->group==0) {
         const char* names[]={"BASE","POS_02","POS_03","POS_04","POS_05","POS_06","POS_07"};
         for(size_t n=0;n<7;++n)id.roots[n]=NativeName(names[n],handle);
         id.excluded=NativeName("FMBASE",handle);
     }else if(r->group==29||r->group==30)id.roots[0]=NativeName("BACK",handle);
+    else if(r->group==31)id.roots[0]=NativeName("BG",handle);
     else if(r->group==7)id.roots[0]=NativeName("BM_BASE2",handle);
     else if(r->group==19){id.roots[0]=NativeName("NOWLOADING_SET",handle);id.roots[1]=NativeName("MASK",handle);}
     else if(r->group==2||r->group==3||r->group==4||r->group==5||r->group==6||r->group==9)
         id.roots[0]=NativeName("BASE",handle);
     return id;
 }
+bool IsPauseControls(const Identity& id,std::span<const std::uint64_t> chain) {
+    if(!id.resource||id.resource->resource!="pause"||id.resource->group!=31)return false;
+    const auto guide=NativeName("GUIDE",id.handle),skip=NativeName("SKIP_BUTTON",id.handle);
+    return std::ranges::find(chain,guide)!=chain.end()||std::ranges::find(chain,skip)!=chain.end();
+}
 bool Identity::Accepts(std::span<const std::uint64_t> ancestors) const {
     if(!resource||ancestors.empty())return false;
     if(excluded&&std::ranges::find(ancestors,excluded)!=ancestors.end())return false;
+    if(leaf_only)return std::ranges::any_of(roots,[&](auto root){return root&&root==ancestors.front();});
     if(!roots[0])return true; // whole, unambiguous centered resource
     for(auto root:roots)if(root&&std::ranges::find(ancestors,root)!=ancestors.end())return true;
     return false;
@@ -95,6 +117,17 @@ std::optional<Visual> Transform(Visual v,const ResourceBinding& r,const Setting&
     v.sx*=float(s.scale);v.sy*=float(s.scale);
     if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.sx)||!std::isfinite(v.sy))return {};
     return v;
+}
+Visual BackgroundTransform(double width,double height) {
+    // Reuse dimension validation and precisely the same native fit as Place.
+    (void)Place({0,0,1920,1080},{},width,height);
+    const double unit=std::min(width/1920.,height/1080.);
+    const float sx=float(width/(1920*unit)),sy=float(height/(1080*unit));
+    return {-960*(sx-1),-540*(sy-1),sx,sy};
+}
+Visual BackgroundTransform(const Preset& p,size_t group,double width,double height) {
+    if(!IsBackgroundGroup(group)||p.backgrounds[group]==BackgroundFit::Original)return {0,0,1,1};
+    return BackgroundTransform(width,height);
 }
 Rect GroupBounds(const ResourceBinding& r){auto bounds=r.bounds;if(r.group==0)bounds.w+=PartySlotStep*(PartySlots-1);return bounds;}
 bool RuntimeCompatible(const Preset& p,Aspect actual) {

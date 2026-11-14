@@ -87,12 +87,12 @@ enum Hit {
     HitSaveFolder, HitDefaultSaveFolder, HitOpenSaves, HitBackupToggle,
     HitOpenBackups, HitImportSave, HitShortcut, HitGameLanguage,
     HitGpu, HitMonitor, HitOutputAspect, HitDisplayMode, HitAspectRatio, HitVsync, HitFpsLimit, HitFsr, HitResolution, HitNativeRender,
-    HitAnisotropy, HitAsyncShaders, HitForceFsr3,
+    HitAnisotropy, HitAsyncShaders, HitSpatialAa, HitForceFsr3,
     HitController, HitKeyboardProfile, HitResetControls,
     HitLauncherLanguage, HitUpdateToggle, HitCheckUpdate,
     HitPerformanceOverlay, HitOverlayFps, HitOverlayFrameTime, HitOverlayUpscaler,
     HitOverlayGpu, HitOverlayCpu, HitOverlayRam, HitOverlayVram, HitOverlayVersion,
-    HitOverlayGpuModel, HitOverlayCpuModel,
+    HitOverlayGpuModel, HitOverlayCpuModel, HitOverlayCpuThread,
     HitOverlayScale, HitOverlayCorner, HitOverlayOpacity, HitOverlayLayout,
     HitOpenCache, HitClearCache, HitOpenRoot, HitRefresh,
     HitExportLogs, HitClearLogs, HitPerformanceTools, HitPerformanceCapture, HitOpenPerformanceCaptures,
@@ -158,7 +158,7 @@ struct AppState {
         std::wstring label;
         bool fsr4_supported{}, discrete{}, cpu{};
         uint64_t local_memory{};
-        bool fsr3_technical{},fsr3_recommended{},dlss_supported{};
+        bool fsr3_technical{},fsr3_recommended{},dlss_supported{},fsr_sdk24_files{};
         std::string device_key;
     };
     std::vector<GraphicsAdapter> graphics_adapters;
@@ -211,7 +211,7 @@ struct AppState {
     bool pkg_selected = false;
     bool busy = false;
     bool vsync = true;
-    bool async_shaders = true;
+    bool async_shaders = true, spatial_aa = false;
     bool automatic_save_backups = true;
     bool update_on_start = true;
     bool performance_tools = false;
@@ -223,6 +223,7 @@ struct AppState {
     bool overlay_upscaler = true;
     bool overlay_gpu = false;
     bool overlay_cpu = false;
+    bool overlay_cpu_thread = false;
     bool overlay_gpu_model = true;
     bool overlay_cpu_model = false;
     bool overlay_ram = false;
@@ -253,6 +254,7 @@ struct AppState {
     std::wstring hud_selection;
     bool clipping_content_hits = false;
     int content_bottom = 0;
+    REAL ui_scale=1; // Logical layout and physical input share this transform.
     std::thread update_thread;
     std::mutex update_mutex;
     std::unique_ptr<UpdateEvent> update_event;
@@ -269,6 +271,7 @@ struct AppState {
 AppState app;
 bool selected_gpu_supports_fsr3();
 bool selected_gpu_supports_fsr4();
+bool selected_gpu_supports_fsr_sdk24();
 bool selected_gpu_supports_dlss();
 
 // GDI+ objects must be released before GdiplusShutdown, on the UI thread.
@@ -349,8 +352,15 @@ std::wstring display_mode_label() {
     return loc(L"Sans bordure",L"Borderless");
 }
 
+// Persist the established provider tokens; display precise product names only.
+std::wstring upscaler_display_label(std::wstring_view token) {
+    if(token==L"FSR 3.1")return L"AMD FSR 3.1.5";
+    if(token==L"FSR 4")return L"AMD FSR 4 v7 (INT8)";
+    if(token==L"AMD FSR (SDK 2.4)")return L"AMD FSR 4.1.2";
+    return std::wstring(token);
+}
 std::wstring fsr_label() {
-    return app.fsr == L"off" || app.fsr == L"Désactivé" || app.fsr == L"Disabled" ? loc(L"Désactivé",L"Disabled") : app.fsr;
+    return app.fsr == L"off" || app.fsr == L"Désactivé" || app.fsr == L"Disabled" ? loc(L"Désactivé",L"Disabled") : upscaler_display_label(app.fsr);
 }
 
 std::wstring overlay_corner_label() {
@@ -365,6 +375,7 @@ std::wstring overlay_corner_label() {
 }
 
 std::wstring overlay_layout_label() {
+    if (app.overlay_layout == 2) return loc(L"Technique",L"Technical");
     return app.overlay_layout == 1 ? loc(L"Une donnée par ligne",L"One item per line")
                                    : loc(L"Une seule ligne",L"One line");
 }
@@ -596,6 +607,10 @@ void detect_environment() {
                 auto& adapter=app.graphics_adapters.back();
                 adapter.dlss_supported=So5ProbeDlss(instance,devices[i],program_path(app.root,L"Star Ocean 5.exe").parent_path());
                 adapter.fsr3_technical=Ps4RtUpscaler::ProbeFsr3(devices[i]);
+                const auto sdk_folder=program_path(app.root,L"Star Ocean 5.exe").parent_path()/L"amd-fsr-sdk24";
+                std::error_code sdk_error;
+                adapter.fsr_sdk24_files=fs::is_regular_file(sdk_folder/L"amd_fidelityfx_loader_vk.dll",sdk_error)&&
+                    fs::is_regular_file(sdk_folder/L"amd_fidelityfx_upscaler_vk.dll",sdk_error);
                 adapter.fsr3_recommended=Ps4RtUpscaler::Fsr3Recommended(properties.vendorID,properties.deviceName);
                 adapter.device_key=Ps4RtUpscaler::Fsr3DeviceKey(properties.vendorID,properties.deviceID,identity.deviceUUID);
             }
@@ -610,6 +625,7 @@ void detect_environment() {
     // excludes it, including on first startup or after a device rescan.
     if(app.fsr==L"FSR 4" && !selected_gpu_supports_fsr4()) app.fsr=selected_gpu_supports_fsr3()?L"FSR 3.1":L"off";
     if(app.fsr==L"FSR 3.1" && !selected_gpu_supports_fsr3()) app.fsr=L"off";
+    if(app.fsr==L"AMD FSR (SDK 2.4)" && !selected_gpu_supports_fsr_sdk24()) app.fsr=selected_gpu_supports_fsr3()?L"FSR 3.1":L"off";
 }
 
 std::wstring gpu_label() {
@@ -645,6 +661,10 @@ bool fsr3_forced() {
 }
 bool selected_gpu_supports_fsr3() {
     const auto* gpu=selected_adapter();return gpu && gpu->fsr3_technical && (gpu->fsr3_recommended || fsr3_forced());
+}
+
+bool selected_gpu_supports_fsr_sdk24() {
+    const auto* gpu=selected_adapter();return gpu && gpu->fsr_sdk24_files && selected_gpu_supports_fsr3();
 }
 
 void reject_incompatible_fsr4() {
@@ -721,6 +741,7 @@ void save_settings() {
     WritePrivateProfileStringW(L"Launcher", L"Anisotropy", std::to_wstring(app.anisotropy).c_str(), app.config.c_str());
     write_bool(L"Vsync", app.vsync);
     write_bool(L"AsyncShaders", app.async_shaders);
+    write_bool(L"SpatialAa", app.spatial_aa);
     write_bool(L"AutomaticSaveBackups", app.automatic_save_backups);
     WritePrivateProfileStringW(L"Launcher", L"BackupBeforeLaunch", nullptr, app.config.c_str());
     write_bool(L"UpdateOnStart", app.update_on_start);
@@ -732,6 +753,7 @@ void save_settings() {
     write_bool(L"OverlayUpscaler", app.overlay_upscaler);
     write_bool(L"OverlayGpu", app.overlay_gpu);
     write_bool(L"OverlayCpu", app.overlay_cpu);
+    write_bool(L"OverlayCpuThread", app.overlay_cpu_thread);
     write_bool(L"OverlayGpuModel", app.overlay_gpu_model);
     write_bool(L"OverlayCpuModel", app.overlay_cpu_model);
     write_bool(L"OverlayRam", app.overlay_ram);
@@ -752,7 +774,7 @@ void load_settings() {
     app.save_root = ini_value(L"Launcher", L"SaveRoot", L"");
     app.pkg_extract_root = ini_value(L"Launcher", L"PkgExtractRoot", L"");
     app.fsr = ini_value(L"Launcher", L"FSR", L"FSR 3.1");
-    if(app.fsr!=L"FSR 3.1" && app.fsr!=L"FSR 4" && app.fsr!=L"DLSS") app.fsr=L"off";
+    if(app.fsr!=L"FSR 3.1" && app.fsr!=L"FSR 4" && app.fsr!=L"DLSS" && app.fsr!=L"AMD FSR (SDK 2.4)") app.fsr=L"off";
     app.resolution = ini_value(L"Launcher", L"Resolution", L"1920 × 1080");
     app.resolution = Ps4RtOutput::Labels[Ps4RtOutput::Parse(app.resolution)];
     app.selected_display_id=ini_value(L"Launcher",L"TargetDisplay",L"");
@@ -789,6 +811,7 @@ void load_settings() {
     app.anisotropy = GetPrivateProfileIntW(L"Launcher", L"Anisotropy", 16, app.config.c_str());
     app.vsync = ini_bool(L"Vsync", true);
     app.async_shaders = ini_bool(L"AsyncShaders", true);
+    app.spatial_aa = ini_bool(L"SpatialAa", false);
     app.automatic_save_backups = ini_bool(L"AutomaticSaveBackups", ini_bool(L"BackupBeforeLaunch", true));
     app.update_on_start = ini_bool(L"UpdateOnStart", true);
     app.performance_tools=ini_bool(L"PerformanceTools",false);
@@ -799,6 +822,7 @@ void load_settings() {
     app.overlay_upscaler = ini_bool(L"OverlayUpscaler", true);
     app.overlay_gpu = ini_bool(L"OverlayGpu", false);
     app.overlay_cpu = ini_bool(L"OverlayCpu", false);
+    app.overlay_cpu_thread = ini_bool(L"OverlayCpuThread", false);
     app.overlay_gpu_model = ini_bool(L"OverlayGpuModel", true);
     app.overlay_cpu_model = ini_bool(L"OverlayCpuModel", false);
     app.overlay_ram = ini_bool(L"OverlayRam", false);
@@ -807,7 +831,7 @@ void load_settings() {
     app.overlay_scale = std::clamp(int(GetPrivateProfileIntW(L"Launcher", L"OverlayScale", 100, app.config.c_str())), 50, 300);
     app.overlay_corner = std::clamp(int(GetPrivateProfileIntW(L"Launcher", L"OverlayCorner", 1, app.config.c_str())), 0, 5);
     app.overlay_opacity = std::clamp(int(GetPrivateProfileIntW(L"Launcher", L"OverlayOpacity", 50, app.config.c_str())), 0, 100);
-    app.overlay_layout = GetPrivateProfileIntW(L"Launcher", L"OverlayLayout", 0, app.config.c_str()) == 1 ? 1 : 0;
+    app.overlay_layout = std::clamp(int(GetPrivateProfileIntW(L"Launcher", L"OverlayLayout", 0, app.config.c_str())), 0, 2);
 }
 
 bool game_layout_complete(const fs::path& path) {
@@ -1116,6 +1140,7 @@ void import_save() {
 
 std::wstring fsr_argument() {
     if (app.fsr == L"FSR 3.1") return L"fsr3";
+    if (app.fsr == L"AMD FSR (SDK 2.4)") return L"fsrsdk24";
     if (app.fsr == L"FSR 4") return L"fsr4";
     if (app.fsr == L"DLSS") return L"dlss";
     return L"off";
@@ -1130,13 +1155,13 @@ std::uint64_t available_outputs() {
     return app.display_mode==L"windowed"?app.target_display.window_modes:app.target_display.fullscreen_modes;
 }
 
-bool requested_ultrawide() {
+bool requested_aspect_projection() {
     return app.game_verified && app.detected_title_id==L"CUSA03219" &&
-        app.detected_game_version==L"01.00" && Ps4RtUltrawide::Wide(Ps4RtOutput::Parse(app.resolution));
+        app.detected_game_version==L"01.00" && Ps4RtUltrawide::Adjusted(Ps4RtOutput::Parse(app.resolution));
 }
 Ps4RtOutput::Size requested_scene_output() {
     const int output=Ps4RtOutput::Parse(app.resolution);
-    return requested_ultrawide()?Ps4RtOutput::Size{Ps4RtOutput::Widths[output],Ps4RtOutput::Heights[output]}:Ps4RtOutput::Content(output);
+    return requested_aspect_projection()?Ps4RtOutput::Size{Ps4RtOutput::Widths[output],Ps4RtOutput::Heights[output]}:Ps4RtOutput::Content(output);
 }
 
 std::wstring output_aspect_label(int aspect) {
@@ -1229,7 +1254,7 @@ void write_runtime_settings() {
         while (std::getline(input, line)) lines.push_back(line);
     }
     const auto scene_output=requested_scene_output();
-    if(app.fsr!=L"off") app.scene_preset=Ps4RtScene::ForOutput(app.scene_preset,scene_output.width,scene_output.height);
+    if(app.fsr!=L"off") app.scene_preset=Ps4RtScene::ForOutput(app.scene_preset,scene_output.width,scene_output.height,requested_aspect_projection());
     const std::vector<std::pair<std::string, std::string>> settings = {
         {"scene_preset",std::to_string(app.scene_preset)},
         {"native_render_height",std::to_string(app.native_render_height)},
@@ -1241,12 +1266,14 @@ void write_runtime_settings() {
         {"fps_limit", std::to_string(app.fps_limit)}, {"async_shaders", app.async_shaders ? "1" : "0"},
         {"frames_queued", "2"}, {"render_resolution", "native"},
         {"anisotropy", std::to_string(app.anisotropy)},
+        {"spatial_aa", app.spatial_aa ? "1" : "0"},
         {"show_fps", app.performance_overlay ? "1" : "0"},
         {"overlay_fps", app.overlay_fps ? "1" : "0"},
         {"overlay_frametime", app.overlay_frametime ? "1" : "0"},
         {"overlay_upscaler", app.overlay_upscaler ? "1" : "0"},
         {"overlay_gpu", app.overlay_gpu ? "1" : "0"},
         {"overlay_cpu", app.overlay_cpu ? "1" : "0"},
+        {"overlay_cpu_thread", app.overlay_cpu_thread ? "1" : "0"},
         {"overlay_gpu_model", app.overlay_gpu_model ? "1" : "0"},
         {"overlay_cpu_model", app.overlay_cpu_model ? "1" : "0"},
         {"overlay_ram", app.overlay_ram ? "1" : "0"},
@@ -1302,6 +1329,7 @@ void read_live_runtime_settings() {
         else if(found->second=="fsr3") app.fsr=L"FSR 3.1";
         else if(found->second=="fsr4") app.fsr=L"FSR 4";
         else if(found->second=="dlss") app.fsr=L"DLSS";
+        else if(found->second=="fsrsdk24") app.fsr=L"AMD FSR (SDK 2.4)";
     }
     if(auto found=values.find("display_mode");found!=values.end() &&
         (found->second=="windowed" || found->second=="borderless" || found->second=="fullscreen"))
@@ -1314,6 +1342,7 @@ void read_live_runtime_settings() {
     app.vsync=integer("vsync",app.vsync,0,1)!=0;
     app.window_stretch=integer("window_stretch",app.window_stretch,0,1)!=0;
     app.async_shaders=integer("async_shaders",app.async_shaders,0,1)!=0;
+    app.spatial_aa=integer("spatial_aa",app.spatial_aa,0,1)!=0;
     app.anisotropy=Ps4RtGraphics::ParseAnisotropy(integer("anisotropy",app.anisotropy,0,16));
     const int fps=integer("fps_limit",app.fps_limit,0,60);
     if(fps==0 || fps==30 || fps==60) app.fps_limit=fps;
@@ -1322,12 +1351,13 @@ void read_live_runtime_settings() {
         {"overlay_fps",&app.overlay_fps},{"overlay_frametime",&app.overlay_frametime},{"overlay_upscaler",&app.overlay_upscaler},
         {"overlay_gpu",&app.overlay_gpu},{"overlay_cpu",&app.overlay_cpu},{"overlay_ram",&app.overlay_ram},
         {"overlay_vram",&app.overlay_vram},{"overlay_version",&app.overlay_version},
+        {"overlay_cpu_thread",&app.overlay_cpu_thread},
         {"overlay_gpu_model",&app.overlay_gpu_model},{"overlay_cpu_model",&app.overlay_cpu_model}};
     for(const auto& [key,value]:items) *value=integer(key,*value,0,1)!=0;
     app.overlay_scale=integer("overlay_scale",app.overlay_scale,50,300);
     app.overlay_corner=integer("overlay_corner",app.overlay_corner,0,5);
     app.overlay_opacity=integer("overlay_opacity",app.overlay_opacity,0,100);
-    app.overlay_layout=integer("overlay_layout",app.overlay_layout,0,1);
+    app.overlay_layout=integer("overlay_layout",app.overlay_layout,0,2);
     refresh_target_display(true);save_settings();
 }
 
@@ -1568,6 +1598,7 @@ void run_game(bool prepare_only) {
     if(!prepare_only && app.fsr==L"FSR 4" && !selected_gpu_supports_fsr4()) {
         reject_incompatible_fsr4(); save_settings(); write_runtime_settings(); return;
     }
+    if(!prepare_only && app.fsr==L"AMD FSR (SDK 2.4)" && !selected_gpu_supports_fsr_sdk24()) app.fsr=selected_gpu_supports_fsr3()?L"FSR 3.1":L"off";
     if(!prepare_only && app.fsr==L"DLSS" && !selected_gpu_supports_dlss()) {app.fsr=L"off";append_log(L"DLSS: selected GPU or optional components unavailable; original rendering selected.");}
     if(!prepare_only && app.fsr==L"FSR 3.1" && !selected_gpu_supports_fsr3()) {
         app.fsr=L"off";save_settings();
@@ -1686,7 +1717,7 @@ void run_game(bool prepare_only) {
         set_env(L"PS4RT_GPU_USER_DIR", (user / "gpu").wstring());
         set_env(L"PS4RT_GPU_ID", std::to_wstring(gpu_index));
         set_env(L"SO5_FSR3_FORCE_GPU",fsr3_force);
-        set_env(L"PS4RT_FAST_FORWARD",fast_forward?L"3":L"1");
+        set_env(L"PS4RT_FAST_FORWARD",fast_forward?L"5":L"1");
         set_env(L"SO5_FAST_FORWARD_PAD",fast_forward_pad?L"1":L"0");
         set_env(L"PS4RT_BUILD_VERSION", kVersion);
         set_env(L"PS4RT_PERF_CAPTURE_DIR", performance_capture ? capture_directory.wstring() : L"");
@@ -1819,8 +1850,8 @@ void hit(int id, REAL x, REAL y, REAL width, REAL height) {
     if (app.clipping_content_hits && (y + height <= kHeaderHeight + 4 || y >= app.content_bottom)) return;
     const REAL clipped_y = app.clipping_content_hits ? std::max<REAL>(y, kHeaderHeight + 4) : y;
     const REAL clipped_bottom = app.clipping_content_hits ? std::min<REAL>(y + height, app.content_bottom) : y + height;
-    app.hits.push_back({id, RECT{static_cast<LONG>(x), static_cast<LONG>(clipped_y),
-                                 static_cast<LONG>(x + width), static_cast<LONG>(clipped_bottom)}});
+    app.hits.push_back({id, RECT{LONG(std::floor(x*app.ui_scale)),LONG(std::floor(clipped_y*app.ui_scale)),
+                                 LONG(std::ceil((x+width)*app.ui_scale)),LONG(std::ceil(clipped_bottom*app.ui_scale))}});
 }
 
 void button(Graphics& g, int id, const std::wstring& label, REAL x, REAL y, REAL width, REAL height,
@@ -1873,7 +1904,7 @@ void card(Graphics& g, REAL x, REAL y, REAL width, REAL height, BYTE alpha = 220
 void cached_artwork(Graphics& g, Image* image, REAL x, REAL y, REAL width, REAL height, bool cover) {
     if(!g.IsVisible(RectF(x,y,width,height))) return;
     if (!image || image->GetLastStatus() != Ok) return;
-    const int w = std::max(1,int(std::ceil(width))), h = std::max(1,int(std::ceil(height)));
+    const int w = std::max(1,int(std::ceil(width*app.ui_scale))), h = std::max(1,int(std::ceil(height*app.ui_scale)));
     auto& entries = drawing_cache.artwork;
     auto found = std::find_if(entries.begin(), entries.end(), [&](const auto& e) {
         return e.source == image && e.width == w && e.height == h && e.cover == cover;
@@ -1885,13 +1916,18 @@ void cached_artwork(Graphics& g, Image* image, REAL x, REAL y, REAL width, REAL 
         Graphics scaled(entry.bitmap.get()); scaled.Clear(Color(0,0,0,0));
         scaled.SetInterpolationMode(InterpolationModeHighQualityBicubic);
         scaled.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-        const REAL scale = cover ? std::max(width/image->GetWidth(),height/image->GetHeight())
-                                 : std::min(width/image->GetWidth(),height/image->GetHeight());
+        const REAL scale = cover ? std::max(REAL(w)/image->GetWidth(),REAL(h)/image->GetHeight())
+                                 : std::min(REAL(w)/image->GetWidth(),REAL(h)/image->GetHeight());
         const REAL dw = image->GetWidth()*scale, dh = image->GetHeight()*scale;
-        scaled.DrawImage(image,(width-dw)/2,(height-dh)/2,dw,dh);
+        scaled.DrawImage(image,(w-dw)/2,(h-dh)/2,dw,dh);
         entries.push_back(std::move(entry)); found = std::prev(entries.end());
     }
-    g.DrawImage(found->bitmap.get(),Rect(int(x),int(y),w,h),0,0,w,h,UnitPixel);
+    // Cache at physical size and blit 1:1. Fractional UI scaling otherwise
+    // resamples the complete wallpaper/logo again on every mouse repaint.
+    PointF origin(x,y);g.TransformPoints(CoordinateSpaceDevice,CoordinateSpaceWorld,&origin,1);
+    const auto state=g.Save();g.ResetTransform();
+    g.DrawImage(found->bitmap.get(),Rect(int(std::round(origin.X)),int(std::round(origin.Y)),w,h),0,0,w,h,UnitPixel);
+    g.Restore(state);
 }
 
 void image_fit(Graphics& g, Image* image, REAL x, REAL y, REAL width, REAL height) {
@@ -1962,7 +1998,7 @@ void draw_selector(Graphics& g, REAL width, REAL height) {
         const bool enabled=app.popup_enabled.empty() || (i<app.popup_enabled.size() && app.popup_enabled[i]);
         const bool hot = enabled && app.hover == 2000 + static_cast<int>(i);
         if (hot) { SolidBrush selected(Color(160, 24, 78, 105)); rounded(g, RectF(x + 12, row_y, panel_width - 24, row_height - 3), 9, selected); }
-        text(g, app.popup_values[i]+(enabled?L"":L" · "+std::wstring(loc(L"Indisponible",L"Unavailable"))), x + 25, row_y, panel_width - 70, row_height - 3, 15,
+        text(g, (app.popup_hit==HitFsr?upscaler_display_label(app.popup_values[i]):app.popup_values[i])+(enabled?L"":L" · "+std::wstring(loc(L"Indisponible",L"Unavailable"))), x + 25, row_y, panel_width - 70, row_height - 3, 15,
              enabled?Color(255, 232, 242, 247):Color(255,100,119,130), hot ? FontStyleBold : FontStyleRegular);
         text(g, L"›", x + panel_width - 48, row_y, 22, row_height - 3, 18, Color(255, 82, 207, 244), FontStyleBold, StringAlignmentCenter);
         g.FillRectangle(&divider, RectF(x + 22, row_y + row_height - 2, panel_width - 44, 1));
@@ -2098,7 +2134,7 @@ void draw_header(Graphics& g, REAL width) {
         StringFormat nav_format; nav_format.SetAlignment(StringAlignmentCenter);
         nav_format.SetLineAlignment(StringAlignmentCenter);
         nav_format.SetTrimming(StringTrimmingEllipsisWord);
-        g.DrawString(nav[i].label,-1,cached_font(nav[i].label,13,selected?FontStyleBold:FontStyleRegular),
+        if(g.IsVisible(RectF(x+5,40,tab_width-10,52)))g.DrawString(nav[i].label,-1,cached_font(nav[i].label,13,selected?FontStyleBold:FontStyleRegular),
                      RectF(x+5,40,tab_width-10,52),&nav_format,&nav_text);
         if (selected) g.FillRectangle(&line, RectF(x + 16, 100, tab_width - 32, 3));
         hit(nav[i].id, x + 2, 39, tab_width - 4, 52);
@@ -2272,7 +2308,9 @@ fs::path tweaks_config(){return app.root/L"out/CUSA03219/ps4rt.ini";}
 void refresh_tweaks() {
     app.tweaks=So5Tweaks::Read(tweaks_config());
     if(!tweaks_supported()||app.game_running||app.busy)return;
-    const auto aspect=requested_ultrawide()?(Ps4RtOutput::Group(Ps4RtOutput::Parse(app.resolution))==Ps4RtOutput::Ratio32_9?So5Hud::Aspect::Superwide:So5Hud::Aspect::Wide):So5Hud::Aspect::Standard;
+    const int output=Ps4RtOutput::Parse(app.resolution);
+    const auto size=requested_aspect_projection()?Ps4RtOutput::Size{Ps4RtOutput::Widths[output],Ps4RtOutput::Heights[output]}:Ps4RtOutput::Content(output);
+    const auto aspect=So5Hud::OutputAspect(size.width,size.height);
     if(app.hud_library&&app.hud_library->Snapshot().busy)return;
     if(!app.hud_library||app.hud_aspect!=aspect) {
         app.hud_aspect=aspect;app.hud_selection.clear();
@@ -2335,8 +2373,8 @@ void draw_video(Graphics& g, REAL x, REAL y, REAL width, REAL) {
                 x+12,selector_top+76,width-24,app.displays.size()>1);
 
     const REAL top = selector_top + 162, gap = 18, column = (width - gap) / 2.0f;
-    card(g, x, top, column, 470);
-    card(g, x + column + gap, top, column, 470);
+    card(g, x, top, column, 550);
+    card(g, x + column + gap, top, column, 550);
     text(g, loc(L"AFFICHAGE",L"DISPLAY"), x + 16, top + 12, column - 32, 24, 10, Color(255, 82, 207, 244), FontStyleBold);
     setting_row(g, HitDisplayMode, loc(L"Mode",L"Display mode"), display_mode_label(), x + 12, top + 47, column - 24);
     toggle_row(g, HitVsync, loc(L"Synchronisation verticale",L"Vertical synchronization"), app.vsync, x + 12, top + 105, column - 24);
@@ -2346,9 +2384,9 @@ void draw_video(Graphics& g, REAL x, REAL y, REAL width, REAL) {
     setting_row(g, HitAspectRatio, loc(L"Ajustement de l’image",L"Image fitting"),
                 app.window_stretch ? loc(L"Étirer à la fenêtre",L"Stretch to window") : loc(L"Original",L"Original"),
                 x + 12, top + 337, column - 24, app.display_mode == L"windowed");
-    paragraph(g, requested_ultrawide()?
-        loc(L"Ultralarge expérimental : redémarrez le jeu pour changer de format. Le HUD et les vidéos conservent leurs proportions d’origine.",
-            L"Experimental ultrawide: restart the game to change aspect ratio. HUD and movies keep their original proportions."):
+    paragraph(g, requested_aspect_projection()?
+        loc(L"Format 3D personnalisé : redémarrez pour changer de ratio. Menus et vidéos conservent leurs proportions.",
+            L"Custom 3D aspect: restart to change ratio. Menus and videos retain their proportions."):
         loc(L"Le jeu s’ouvre sur l’écran sélectionné. La scène et le HUD restent en 16:9.",
             L"The game opens on the selected monitor. The scene and HUD remain 16:9."), x + 18, top + 402, column - 36, 58, 12, Color(255, 128, 154, 168));
 
@@ -2357,29 +2395,29 @@ void draw_video(Graphics& g, REAL x, REAL y, REAL width, REAL) {
     setting_row(g, HitFsr, loc(L"Reconstruction",L"Upscaling"), fsr_label(), middle + 12, top + 47, column - 24,
                 Ps4RtOutput::TemporalAllowed(Ps4RtOutput::Parse(app.resolution)));
     setting_row(g, HitNativeRender, loc(L"Résolution de rendu",L"Render resolution"),
-                ([&] { const auto output=requested_scene_output(); const auto input=Ps4RtScene::RequestedInput(app.fsr!=L"off",app.scene_preset,app.native_render_height,output.width,output.height,requested_ultrawide()); return std::to_wstring(input.width)+L" × "+std::to_wstring(input.height); })(), middle + 12, top + 105, column - 24, app.fsr==L"off");
+                ([&] { const auto output=requested_scene_output(); const auto input=Ps4RtScene::RequestedInput(app.fsr!=L"off",app.scene_preset,app.native_render_height,output.width,output.height,requested_aspect_projection()); return std::to_wstring(input.width)+L" × "+std::to_wstring(input.height); })(), middle + 12, top + 105, column - 24, app.fsr==L"off");
     setting_row(g, HitAnisotropy, loc(L"Filtrage anisotrope",L"Anisotropic filtering"), app.anisotropy ? L"×" + std::to_wstring(app.anisotropy) : loc(L"Réglage du jeu",L"Game setting"), middle + 12, top + 163, column - 24);
     toggle_row(g, HitAsyncShaders, loc(L"Shaders asynchrones",L"Asynchronous shaders"), app.async_shaders, middle + 12, top + 221, column - 24);
-    paragraph(g,loc(L"Sans reconstruction, choisissez manuellement la résolution interne. L’UI conserve la résolution de sortie. Avec FSR ou DLSS, les presets gèrent la résolution interne.",
+    toggle_row(g,HitSpatialAa,loc(L"Anticrénelage spatial (FXAA)",L"Spatial anti-aliasing (FXAA)"),
+        app.spatial_aa,middle+12,top+279,column-24);
+    // Contextual help replaces the permanent stack of technical paragraphs.
+    if(app.spatial_aa)paragraph(g,loc(L"Lissage optionnel des contours en SDR, HUD compris. Peut adoucir les détails fins.",
+        L"Optional SDR edge smoothing, including the HUD. May soften fine details."),middle+16,top+338,column-32,64,12,Color(255,147,174,188));
+    if(app.fsr==L"off")paragraph(g,loc(L"Sans reconstruction, choisissez manuellement la résolution interne. L’UI conserve la résolution de sortie. Avec FSR ou DLSS, les presets gèrent la résolution interne.",
         L"Without reconstruction, choose the internal resolution manually. The UI keeps the output resolution. With FSR or DLSS, quality presets control the internal resolution."),
-        middle+16,top+280,column-32,82,12,Color(255,147,174,188));
+        middle+16,top+(app.spatial_aa?408:338),column-32,82,12,Color(255,147,174,188));
     paragraph(g, app.async_shaders ? loc(L"Gameplay plus fluide et moins de saccades de compilation. De brefs scintillements visuels peuvent apparaître.",
                                          L"Smoother gameplay with fewer shader compilation stutters. Brief visual flicker may occasionally appear.")
                                    : loc(L"Compilation synchrone : moins d’artefacts temporaires, mais des saccades peuvent survenir lors du premier passage.",
                                          L"Synchronous compilation: fewer temporary artifacts, but first-time shader compilation may stutter."),
-              middle + 16, top + 370, column - 32, 82, 10, Color(255, 128, 154, 168));
+              middle + 16, top + 494, column - 32, 50, 10, Color(255, 128, 154, 168));
 
-    const REAL lower = top + 488;
-    card(g, x, lower, width, 225);
+    const REAL lower = top + 568;
+    card(g, x, lower, width, 108);
     text(g, loc(L"COMPATIBILITÉ",L"COMPATIBILITY"), x + 18, lower + 12, width - 36, 24, 10, Color(255, 82, 207, 244), FontStyleBold);
-    const REAL chip_width = (width - 86) / 4.0f;
-    chip(g, L"Vulkan 1.3", app.vulkan_ok, x + 16, lower + 50, chip_width);
-    chip(g, loc(L"FSR 3.1 intégré",L"Integrated FSR 3.1"), true, x + 34 + chip_width, lower + 50, chip_width);
-    chip(g, loc(L"FSR 4 avec repli sûr",L"FSR 4 with safe fallback"), true, x + 52 + chip_width * 2, lower + 50, chip_width);
-    chip(g, loc(L"Cache de shaders",L"Shader cache"), app.shader_cache_present, x + 70 + chip_width * 3, lower + 50, chip_width);
-    paragraph(g, loc(L"FSR 4 est vérifié par le runtime. Si le GPU ou les shaders fournis ne sont pas compatibles, il revient automatiquement à FSR 3.1 avant la première image.",
-                     L"FSR 4 is checked by the runtime. If the GPU or supplied shaders are incompatible, it automatically falls back to FSR 3.1 before the first frame."),
-              x + 18, lower + 108, width - 36, 88, 12, Color(255, 147, 174, 188));
+    const REAL chip_width=(width-44)/2;
+    chip(g,L"Vulkan 1.3",app.vulkan_ok,x+16,lower+50,chip_width);
+    chip(g,loc(L"Cache de shaders",L"Shader cache"),app.shader_cache_present,x+28+chip_width,lower+50,chip_width);
 }
 
 void draw_controls(Graphics& g, REAL x, REAL y, REAL width, REAL) {
@@ -2474,36 +2512,40 @@ void draw_advanced(Graphics& g, REAL x, REAL y, REAL width, REAL) {
     paragraph(g,!gpu || !gpu->fsr3_technical?loc(L"Les fonctions Vulkan requises sont indisponibles. Le forçage est désactivé.",L"Required Vulkan capabilities are unavailable. The override is disabled."):gpu->fsr3_recommended?loc(L"FSR 3.1 est disponible automatiquement sur ce GPU.",L"FSR 3.1 is automatically available on this GPU."):
         loc(L"Déverrouillage pour une carte sous le seuil recommandé ou non reconnue. Appliqué au prochain lancement du jeu.",L"Unlock for a below-threshold or unrecognized GPU. Applies on the next game launch."),x+18,top+582,width-36,56,12,Color(255,147,174,188));
     const REAL overlay_top = top + 666;
-    card(g, x, overlay_top, width, 408);
+    card(g, x, overlay_top, width, 466);
     text(g, loc(L"AFFICHAGE DES PERFORMANCES",L"PERFORMANCE OVERLAY"), x + 18, overlay_top + 12,
          width - 36, 24, 10, Color(255, 82, 207, 244), FontStyleBold);
     toggle_row(g, HitPerformanceOverlay, loc(L"Afficher en jeu",L"Show in game"),
                app.performance_overlay, x + 12, overlay_top + 46, width - 24);
+    const bool technical = app.overlay_layout == 2;
     const REAL item_top = overlay_top + 108;
     const REAL item_width = (width - gap - 24) / 2.0f;
     toggle_row(g, HitOverlayFps, loc(L"Images par seconde (IPS)",L"Frames per second (FPS)"),
-               app.overlay_fps, x + 12, item_top, item_width);
+               app.overlay_fps || technical, x + 12, item_top, item_width, !technical);
     toggle_row(g, HitOverlayFrameTime, loc(L"Temps par image",L"Frame time"),
-               app.overlay_frametime, x + 12, item_top + 58, item_width);
+               app.overlay_frametime || technical, x + 12, item_top + 58, item_width, !technical);
     toggle_row(g, HitOverlayUpscaler, loc(L"Reconstruction active",L"Active upscaler"),
-               app.overlay_upscaler, x + 12, item_top + 116, item_width);
+               app.overlay_upscaler || technical, x + 12, item_top + 116, item_width, !technical);
     toggle_row(g, HitOverlayGpu, loc(L"Carte graphique et charge",L"GPU name and load"),
-               app.overlay_gpu, x + 12, item_top + 174, item_width);
+               app.overlay_gpu || technical, x + 12, item_top + 174, item_width, !technical);
     const REAL item_right = x + item_width + gap + 12;
     toggle_row(g, HitOverlayCpu, loc(L"Utilisation processeur",L"CPU usage"),
-               app.overlay_cpu, item_right, item_top, item_width);
+               app.overlay_cpu || technical, item_right, item_top, item_width, !technical);
     toggle_row(g, HitOverlayRam, loc(L"Mémoire vive",L"System memory"),
-               app.overlay_ram, item_right, item_top + 58, item_width);
+               app.overlay_ram || technical, item_right, item_top + 58, item_width, !technical);
     toggle_row(g, HitOverlayVram, loc(L"Mémoire vidéo",L"Video memory"),
-               app.overlay_vram, item_right, item_top + 116, item_width);
+               app.overlay_vram || technical, item_right, item_top + 116, item_width, !technical);
     toggle_row(g, HitOverlayVersion, loc(L"Version de l’application",L"Application version"),
-               app.overlay_version, item_right, item_top + 174, item_width);
+               app.overlay_version || technical, item_right, item_top + 174, item_width, !technical);
     toggle_row(g, HitOverlayGpuModel, loc(L"Afficher le modèle du GPU",L"Show GPU model"),
-               app.overlay_gpu_model, x + 12, item_top + 232, item_width, app.overlay_gpu);
+               app.overlay_gpu_model, x + 12, item_top + 232, item_width, app.overlay_gpu || technical);
     toggle_row(g, HitOverlayCpuModel, loc(L"Afficher le modèle du CPU",L"Show CPU model"),
-               app.overlay_cpu_model, item_right, item_top + 232, item_width, app.overlay_cpu);
+               app.overlay_cpu_model, item_right, item_top + 232, item_width, app.overlay_cpu || technical);
 
-    const REAL appearance_top = overlay_top + 426;
+    toggle_row(g, HitOverlayCpuThread, loc(L"Thread CPU le plus chargé",L"Busiest CPU thread"),
+               app.overlay_cpu_thread || technical, x + 12, item_top + 290, width - 24, !technical);
+
+    const REAL appearance_top = overlay_top + 484;
     card(g, x, appearance_top, width, 180);
     text(g, loc(L"APPARENCE DE L’AFFICHAGE",L"OVERLAY APPEARANCE"), x + 18, appearance_top + 12,
          width - 36, 24, 10, Color(255, 82, 207, 244), FontStyleBold);
@@ -2513,7 +2555,7 @@ void draw_advanced(Graphics& g, REAL x, REAL y, REAL width, REAL) {
                 std::to_wstring(app.overlay_opacity) + L" %", item_right, appearance_top + 46, item_width);
     setting_row(g, HitOverlayCorner, loc(L"Position",L"Position"), overlay_corner_label(),
                 x + 12, appearance_top + 108, item_width);
-    setting_row(g, HitOverlayLayout, loc(L"Disposition",L"Layout"), overlay_layout_label(),
+    setting_row(g, HitOverlayLayout, loc(L"Type d’affichage",L"Overlay type"), overlay_layout_label(),
                 item_right, appearance_top + 108, item_width);
     const REAL tools_top=appearance_top+198;
     card(g,x,tools_top,width,136);
@@ -2523,9 +2565,9 @@ void draw_advanced(Graphics& g, REAL x, REAL y, REAL width, REAL) {
                    L"Shows capture buttons in Logs and diagnostics. Does not start recording."),
               x+18,tools_top+72,width-36,48,12,Color(255,147,174,188));
 
-    const REAL shortcuts_y=y+1718;
+    const REAL shortcuts_y=y+1776;
     card(g,x,shortcuts_y,width,184);
-    toggle_row(g,HitFastForward,loc(L"Mode accéléré (maintenir F2)",L"Fast-forward (hold F2)"),app.fast_forward,x+16,shortcuts_y+16,width-32);
+    toggle_row(g,HitFastForward,std::wstring(loc(L"Mode accéléré (maintenir F2)",L"Fast-forward (hold F2)"))+L" ×5",app.fast_forward,x+16,shortcuts_y+16,width-32);
     toggle_row(g,HitFastForwardPad,loc(L"Raccourci manette R2 + L2",L"Controller shortcut R2 + L2"),app.fast_forward_pad,x+16,shortcuts_y+76,width-32,app.fast_forward);
     paragraph(g,loc(L"Le raccourci est refusé si une touche a été réaffectée. L’audio est coupé pendant l’accélération.",L"The shortcut is refused when its inputs are remapped. Audio is muted during fast-forward."),x+22,shortcuts_y+134,width-44,46,12,Color(255,174,200,214));
 
@@ -2577,7 +2619,8 @@ void draw_logs(Graphics& g, REAL x, REAL y, REAL width, REAL height) {
     const REAL body_top = capture_y + 48;
     const REAL body_height = console_bottom - 16 - body_top;
     if(app.log_console.Handle()) {
-        app.log_console.Place(int(x+18),int(body_top),int(width-36),int(body_height));
+        app.log_console.SetScale(app.ui_scale);
+        app.log_console.Place(int((x+18)*app.ui_scale),int(body_top*app.ui_scale),int((width-36)*app.ui_scale),int(body_height*app.ui_scale));
         if(app.native_logs_revision!=app.logs_revision.load()) {
             std::vector<std::wstring> current;uint64_t revision;
             {std::lock_guard guard(app.mutex);current=app.logs;revision=app.logs_revision;}
@@ -2650,7 +2693,16 @@ void draw_logs(Graphics& g, REAL x, REAL y, REAL width, REAL height) {
     }
 }
 
+// Resize-only, quantized scaling: text grows with available space without
+// shrinking laptop controls. No font rebuild, device scan or timer on hover.
+REAL launcher_scale(int width,int height) {
+    return std::clamp(REAL(std::floor(std::min(width/1360.0,height/760.0)*20)/20),1.0f,1.5f);
+}
 void render_launcher(Graphics& g, int width, int height) {
+    const auto layout_state=g.Save();
+    app.ui_scale=launcher_scale(width,height);
+    g.ScaleTransform(app.ui_scale,app.ui_scale);
+    width=int(width/app.ui_scale);height=int(height/app.ui_scale);
     g.SetSmoothingMode(SmoothingModeAntiAlias);
     g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
     g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
@@ -2667,6 +2719,10 @@ void render_launcher(Graphics& g, int width, int height) {
     draw_header(g, static_cast<REAL>(width));
     const REAL x = 42, y = kHeaderHeight + 26, content_width = width - 84, content_height = height - y - 34;
     const int page_index = static_cast<int>(app.page);
+    const int required = app.page == Page::Controls ? 1200 : app.page == Page::Game ? 900 :
+                         app.page == Page::Advanced ? 2056 : app.page == Page::Video ? 1000 :
+                         app.page == Page::Tweaks ? tweaks_content_height : app.page == Page::Cheats ? cheats_content_height() : 0;
+    app.scroll[page_index]=std::clamp(app.scroll[page_index],0,std::max(0,required-(height-kHeaderHeight-28)));
     const int scroll = app.page == Page::Home ? 0 : app.scroll[page_index];
     const REAL page_y = y - static_cast<REAL>(scroll);
     const GraphicsState content_state = g.Save();
@@ -2686,9 +2742,6 @@ void render_launcher(Graphics& g, int width, int height) {
     app.log_console.Show(app.page==Page::Logs && !app.modal_visible);
     app.clipping_content_hits = false;
     g.Restore(content_state);
-    const int required = app.page == Page::Controls ? 1200 : app.page == Page::Game ? 900 :
-                         app.page == Page::Advanced ? 1998 : app.page == Page::Video ? 1040 :
-                         app.page == Page::Tweaks ? tweaks_content_height : app.page == Page::Cheats ? cheats_content_height() : 0;
     const int viewport = height - kHeaderHeight - 28;
     if (required > viewport && app.page != Page::Home) {
         const REAL track_x = width - 15.0f, track_y = kHeaderHeight + 16.0f, track_height = height - kHeaderHeight - 54.0f;
@@ -2701,6 +2754,7 @@ void render_launcher(Graphics& g, int width, int height) {
     draw_modal(g, static_cast<REAL>(width), static_cast<REAL>(height));
     text(g, std::wstring(loc(L"Version",L"Version")) + L" " + kVersion, width - 170, height - 25, 150, 18, 9,
          Color(255, 101, 127, 142), FontStyleRegular, StringAlignmentFar);
+    g.Restore(layout_state);
 }
 
 void paint(HWND window) {
@@ -2808,6 +2862,11 @@ int render_benchmark(const fs::path& output) {
                 retained.UnlockBits(&a);
             }
             all_matches &= matches;
+            if(!matches && std::string(language.code)=="en") {
+                const CLSID bmp={0x557cf400,0x1a04,0x11d3,{0x9a,0x73,0,0,0xf8,0x1e,0xf3,0x2e}};
+                retained.Save((output.parent_path()/L"redraw-retained.bmp").c_str(),&bmp,nullptr);
+                expected.Save((output.parent_path()/L"redraw-expected.bmp").c_str(),&bmp,nullptr);
+            }
             if(page==Page::Cheats && std::string(language.code)=="fr" && size.first==1360) {
                 const CLSID bmp={0x557cf400,0x1a04,0x11d3,{0x9a,0x73,0,0,0xf8,0x1e,0xf3,0x2e}};
                 expected.Save((output.parent_path()/L"cheats-launcher-fr-top.bmp").c_str(),&bmp,nullptr);
@@ -2820,9 +2879,9 @@ int render_benchmark(const fs::path& output) {
                 const CLSID bmp={0x557cf400,0x1a04,0x11d3,{0x9a,0x73,0,0,0xf8,0x1e,0xf3,0x2e}};
                 expected.Save((output.parent_path()/(L"tweaks-launcher-"+std::wstring(language.code,language.code+std::strlen(language.code))+L".bmp")).c_str(),&bmp,nullptr);
             }
-            if(page==Page::Video && size.first==1360) {
+            if(page==Page::Video) {
                 const CLSID bmp={0x557cf400,0x1a04,0x11d3,{0x9a,0x73,0,0,0xf8,0x1e,0xf3,0x2e}};
-                expected.Save((output.parent_path()/(L"video-launcher-"+std::wstring(language.code,language.code+std::strlen(language.code))+L".bmp")).c_str(),&bmp,nullptr);
+                expected.Save((output.parent_path()/(L"video-launcher-"+std::wstring(language.code,language.code+std::strlen(language.code))+L"-"+std::to_wstring(size.first)+L".bmp")).c_str(),&bmp,nullptr);
             }
             if(!first) report<<",\n"; first=false;
             report<<"    {\"language\":\""<<language.code<<"\",\"width\":"<<size.first<<",\"height\":"<<size.second
@@ -3073,6 +3132,7 @@ void apply_selector(int index) {
             if (adapter.label == value) { app.gpu_index = adapter.runtime_index; break; }
         if(app.fsr==L"FSR 4" && !selected_gpu_supports_fsr4()) reject_incompatible_fsr4();
         if(app.fsr==L"FSR 3.1" && !selected_gpu_supports_fsr3()) app.fsr=L"off";
+        if(app.fsr==L"AMD FSR (SDK 2.4)" && !selected_gpu_supports_fsr_sdk24()) app.fsr=selected_gpu_supports_fsr3()?L"FSR 3.1":L"off";
         write_runtime_settings(); break;
     case HitDisplayMode:
         if (value == loc(L"Fenêtré",L"Windowed")) app.display_mode = L"windowed";
@@ -3092,6 +3152,7 @@ void apply_selector(int index) {
         if(index==0) app.fsr=L"off";
         else if(value==L"FSR 4" && !selected_gpu_supports_fsr4()) reject_incompatible_fsr4();
         else if(value==L"DLSS") app.fsr=selected_gpu_supports_dlss()?L"DLSS":L"off";
+        else if(value==L"AMD FSR (SDK 2.4)") app.fsr=selected_gpu_supports_fsr_sdk24()?value:L"off";
         else app.fsr=value==L"FSR 3.1" && !selected_gpu_supports_fsr3()?L"off":value;
         write_runtime_settings(); break;
     case HitNativeRender:
@@ -3111,7 +3172,7 @@ void apply_selector(int index) {
         app.overlay_corner = std::clamp(index, 0, 5);
         write_runtime_settings(); break;
     case HitOverlayLayout:
-        app.overlay_layout = value == loc(L"Une donnée par ligne",L"One item per line") ? 1 : 0;
+        app.overlay_layout = std::clamp(index, 0, 2);
         write_runtime_settings(); break;
     case HitGameLanguage:
         if (std::find(app.game_languages.begin(), app.game_languages.end(), value) != app.game_languages.end()) app.game_language = value;
@@ -3221,7 +3282,7 @@ void activate(int id) {
     }
     if(id==1997 || id==1998) {
         RECT area{}; GetClientRect(app.window,&area);
-        const int visible=std::min<int>(app.popup_values.size(),std::max(1,int((area.bottom-kHeaderHeight-90)/48)));
+        const int visible=std::min<int>(app.popup_values.size(),std::max(1,int((area.bottom/app.ui_scale-kHeaderHeight-90)/48)));
         app.popup_scroll=std::clamp(app.popup_scroll+(id==1997?-visible:visible),0,int(app.popup_values.size())-visible);
         app.hover=HitNone; return;
     }
@@ -3336,7 +3397,7 @@ void activate(int id) {
         const auto* gpu=selected_adapter();
         if(!gpu || gpu->fsr3_recommended || !gpu->fsr3_technical || app.game_running || app.busy) break;
         if(fsr3_forced()) {
-            app.force_fsr3_gpu.clear();if(app.fsr==L"FSR 3.1") app.fsr=L"off";save_settings();write_runtime_settings();
+            app.force_fsr3_gpu.clear();if(app.fsr==L"FSR 3.1" || app.fsr==L"AMD FSR (SDK 2.4)") app.fsr=L"off";save_settings();write_runtime_settings();
         } else show_modal(loc(L"Forcer FSR 3.1 ?",L"Force FSR 3.1?"),
             loc(L"Ce GPU est sous le seuil recommandé ou n’a pas été reconnu. Forcer FSR 3.1 peut provoquer des chutes de performances et de l’instabilité. Voulez-vous continuer ?",L"This GPU is below the recommended threshold or unrecognized. Forcing FSR 3.1 may cause performance drops and instability. Do you want to continue?"),
             loc(L"Activer quand même",L"Enable anyway"),loc(L"Annuler",L"Cancel"),ModalAction::ForceFsr3);
@@ -3347,16 +3408,16 @@ void activate(int id) {
         // limits that the original 60 FPS game loop can honour without changing game speed.
         open_selector(HitFpsLimit, {L"30 FPS",L"60 FPS",loc(L"Illimitée",L"Unlimited")}); break;
     case HitFsr: {
-        open_selector(HitFsr,{loc(L"Désactivé",L"Disabled"),L"FSR 3.1",L"FSR 4",L"DLSS"});
+        open_selector(HitFsr,{loc(L"Désactivé",L"Disabled"),L"FSR 3.1",L"FSR 4",L"AMD FSR (SDK 2.4)",L"DLSS"});
         const bool temporal=Ps4RtOutput::TemporalAllowed(Ps4RtOutput::Parse(app.resolution));
-        app.popup_enabled={true,temporal&&selected_gpu_supports_fsr3(),temporal&&selected_gpu_supports_fsr4(),temporal&&selected_gpu_supports_dlss()};break;
+        app.popup_enabled={true,temporal&&selected_gpu_supports_fsr3(),temporal&&selected_gpu_supports_fsr4(),temporal&&selected_gpu_supports_fsr_sdk24(),temporal&&selected_gpu_supports_dlss()};break;
     }
     case HitNativeRender: {
         if(app.fsr!=L"off") break;
         std::vector<std::wstring> choices;
         const auto output=requested_scene_output();
         for(int height:Ps4RtScene::NativeHeights) {
-            const auto size=Ps4RtScene::NativeInput(height,output.width,output.height,requested_ultrawide());
+            const auto size=Ps4RtScene::NativeInput(height,output.width,output.height,requested_aspect_projection());
             choices.push_back(std::to_wstring(size.width)+L" × "+std::to_wstring(size.height));
         }
         open_selector(HitNativeRender,choices);break;
@@ -3370,12 +3431,14 @@ void activate(int id) {
         break;
     case HitAnisotropy:
         open_selector(HitAnisotropy, {loc(L"Réglage du jeu",L"Game setting"),L"×2",L"×4",L"×8",L"×16"}); break;
+    case HitSpatialAa: app.spatial_aa = !app.spatial_aa; save_settings(); write_runtime_settings(); break;
     case HitAsyncShaders: app.async_shaders = !app.async_shaders; save_settings(); write_runtime_settings(); break;
     case HitPerformanceOverlay: app.performance_overlay = !app.performance_overlay; save_settings(); write_runtime_settings(); break;
     case HitOverlayFps: app.overlay_fps = !app.overlay_fps; save_settings(); write_runtime_settings(); break;
     case HitOverlayFrameTime: app.overlay_frametime = !app.overlay_frametime; save_settings(); write_runtime_settings(); break;
     case HitOverlayUpscaler: app.overlay_upscaler = !app.overlay_upscaler; save_settings(); write_runtime_settings(); break;
     case HitOverlayGpu: app.overlay_gpu = !app.overlay_gpu; save_settings(); write_runtime_settings(); break;
+    case HitOverlayCpuThread: app.overlay_cpu_thread = !app.overlay_cpu_thread; save_settings(); write_runtime_settings(); break;
     case HitOverlayCpu: app.overlay_cpu = !app.overlay_cpu; save_settings(); write_runtime_settings(); break;
     case HitOverlayGpuModel: app.overlay_gpu_model = !app.overlay_gpu_model; save_settings(); write_runtime_settings(); break;
     case HitOverlayCpuModel: app.overlay_cpu_model = !app.overlay_cpu_model; save_settings(); write_runtime_settings(); break;
@@ -3392,7 +3455,8 @@ void activate(int id) {
                                            loc(L"En haut au milieu",L"Top center"),loc(L"En bas au milieu",L"Bottom center")}); break;
     case HitOverlayLayout:
         open_selector(HitOverlayLayout, {loc(L"Une seule ligne",L"One line"),
-                                         loc(L"Une donnée par ligne",L"One item per line")}); break;
+                                         loc(L"Une donnée par ligne",L"One item per line"),
+                                         loc(L"Technique",L"Technical")}); break;
     case HitBackupToggle: app.automatic_save_backups = !app.automatic_save_backups; save_settings(); break;
     case HitOpenSaves: open_path(save_directory()); break;
     case HitOpenBackups: if (app.game_verified && !app.pkg_selected) open_path(backup_directory()); break;
@@ -3558,18 +3622,21 @@ void draw_chrome_button(const DRAWITEMSTRUCT& item) {
     }
 }
 
-void position_chrome(HWND window,int width) {
+void position_chrome(HWND window,int width,int height) {
+    const REAL scale=launcher_scale(width,height);
+    app.ui_scale=scale;
+    const int button_width=int(std::lround(52*scale)),button_height=int(std::lround(kDragHeight*scale));
     if(!app.minimize_button||!app.close_button)return;
-    static int previous_width=-1;
-    if(width==previous_width)return; // Height-only resize needs no child move.
-    previous_width=width;
+    static int previous_width=-1,previous_height=-1;
+    if(width==previous_width&&button_height==previous_height)return;
+    previous_width=width;previous_height=button_height;
     constexpr UINT flags=SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOREDRAW|SWP_NOCOPYBITS;
     HDWP batch=BeginDeferWindowPos(2);
-    if(batch)batch=DeferWindowPos(batch,app.minimize_button,nullptr,width-104,0,52,kDragHeight,flags);
-    if(batch)batch=DeferWindowPos(batch,app.close_button,nullptr,width-52,0,52,kDragHeight,flags);
+    if(batch)batch=DeferWindowPos(batch,app.minimize_button,nullptr,width-2*button_width,0,button_width,button_height,flags);
+    if(batch)batch=DeferWindowPos(batch,app.close_button,nullptr,width-button_width,0,button_width,button_height,flags);
     if(!batch||!EndDeferWindowPos(batch)) {
-        SetWindowPos(app.minimize_button,nullptr,width-104,0,52,kDragHeight,flags);
-        SetWindowPos(app.close_button,nullptr,width-52,0,52,kDragHeight,flags);
+        SetWindowPos(app.minimize_button,nullptr,width-2*button_width,0,button_width,button_height,flags);
+        SetWindowPos(app.close_button,nullptr,width-button_width,0,button_width,button_height,flags);
     }
     // One coalesced repaint, without synchronous intermediate child erasure.
     RedrawWindow(window,nullptr,nullptr,RDW_INVALIDATE|RDW_ALLCHILDREN|RDW_NOERASE);
@@ -3692,13 +3759,14 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         break;
     case WM_SIZE:
         if(wparam==SIZE_MINIMIZED)return 0;
-        position_chrome(window,LOWORD(lparam));
+        position_chrome(window,LOWORD(lparam),HIWORD(lparam));
+        app.hover=HitNone;
         InvalidateRect(window, nullptr, FALSE); return 0;
     case WM_MOUSEWHEEL: {
         if (app.modal_visible) return 0;
         if(app.popup_hit!=HitNone) {
             RECT area{}; GetClientRect(window,&area);
-            const int visible=std::min<int>(app.popup_values.size(),std::max(1,int((area.bottom-kHeaderHeight-90)/48)));
+            const int visible=std::min<int>(app.popup_values.size(),std::max(1,int((area.bottom/app.ui_scale-kHeaderHeight-90)/48)));
             app.popup_scroll=std::clamp(app.popup_scroll-GET_WHEEL_DELTA_WPARAM(wparam)/WHEEL_DELTA*3,
                                       0,int(app.popup_values.size())-visible);
             app.hover=HitNone; InvalidateRect(window,nullptr,FALSE); return 0;
@@ -3715,9 +3783,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         }
         RECT client{}; GetClientRect(window, &client);
         const int required = app.page == Page::Controls ? 1200 : app.page == Page::Game ? 900 :
-                             app.page == Page::Advanced ? 1998 : app.page == Page::Video ? 1040 :
+                             app.page == Page::Advanced ? 2056 : app.page == Page::Video ? 1000 :
                              app.page == Page::Tweaks ? tweaks_content_height : app.page == Page::Cheats ? cheats_content_height() : 0;
-        const int maximum = std::max(0, required - (static_cast<int>(client.bottom) - kHeaderHeight - 28));
+        const int maximum = std::max(0, required - (static_cast<int>(client.bottom/app.ui_scale) - kHeaderHeight - 28));
         int& offset = app.scroll[static_cast<int>(app.page)];
         offset = std::clamp(offset - GET_WHEEL_DELTA_WPARAM(wparam) / WHEEL_DELTA * 72, 0, maximum);
         InvalidateRect(window, nullptr, FALSE); return 0;
@@ -3764,8 +3832,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         if (point.x > r.right - border) return HTRIGHT;
         // The uninterrupted top strip is a real Windows caption hit area. Tabs and
         // native caption buttons stay in the client area; resizing keeps its edges.
-        if (point.y < kDragHeight && point.x < r.right - 104) return HTCAPTION;
-        if (point.y < kHeaderHeight && point.x < 238) return HTCAPTION;
+        if (point.y < kDragHeight*app.ui_scale && point.x < r.right - 104*app.ui_scale) return HTCAPTION;
+        if (point.y < kHeaderHeight*app.ui_scale && point.x < 238*app.ui_scale) return HTCAPTION;
         return HTCLIENT;
     }
     case WM_DROPFILES: {
@@ -3785,8 +3853,22 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         }
         DragFinish(drop); InvalidateRect(window, nullptr, FALSE); return 0;
     }
-    case WM_LOG_UPDATED:
+    case WM_LOG_UPDATED: {
+        // Batch pipe notifications without delaying input or dropping log lines.
+        // Timer expiry services the latest revision; hidden windows retain data
+        // without painting. Modal/status changes still refresh the parent.
+        if(!wparam) {
+            if(SetTimer(window,6,33,nullptr))return 0;
+        }
         app.log_update_pending = false;
+        static bool previous_busy=false;
+        static std::wstring previous_status;
+        bool state_changed;
+        {
+            std::lock_guard guard(app.mutex);
+            state_changed=previous_busy!=app.busy || previous_status!=app.status;
+            previous_busy=app.busy;previous_status=app.status;
+        }
         if (app.modal_visible) reveal_quick_launch_failure();
         if(app.extraction_active && app.modal_action==ModalAction::CancelExtraction) {
             std::lock_guard guard(app.mutex);
@@ -3798,8 +3880,20 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         EnableWindow(app.minimize_button, !app.modal_visible);
         EnableWindow(app.close_button, !app.modal_visible);
         if (app.modal_visible && GetActiveWindow() == window && GetFocus() != window) SetFocus(window);
-        if (!IsIconic(window)) InvalidateRect(window, nullptr, FALSE);
+        if (!IsIconic(window)) {
+            if(app.modal_visible || state_changed)InvalidateRect(window,nullptr,FALSE);
+            else if(app.page==Page::Logs) {
+                if(app.log_console.Handle()) {
+                    if(app.native_logs_revision!=app.logs_revision.load()) {
+                        std::vector<std::wstring> current;uint64_t revision;
+                        {std::lock_guard guard(app.mutex);current=app.logs;revision=app.logs_revision;}
+                        app.log_console.Update(current);app.native_logs_revision=revision;
+                    }
+                } else InvalidateRect(window,nullptr,FALSE);
+            }
+        }
         return 0;
+    }
     case WM_UPDATE_DONE: receive_update_event(); return 0;
     case WM_CHEATS_READY: receive_native_cheats(); return 0;
     case WM_QUICK_FAILED: reveal_quick_launch_failure(); return 0;
@@ -3831,6 +3925,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         }
         InvalidateRect(window, nullptr, FALSE); return 0;
     case WM_TIMER:
+        if(wparam==6) {
+            KillTimer(window,6);SendMessageW(window,WM_LOG_UPDATED,1,0);return 0;
+        }
         if(wparam==5) {
             if(app.hud_library) {
                 app.hud_snapshot=app.hud_library->Snapshot();
@@ -3888,6 +3985,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             else KillTimer(window, 1);
             return 0;
         }
+        return 0; // Unrelated timers must never start the game.
     case WM_AUTOPLAY:
         run_game(false);
         reveal_quick_launch_failure();

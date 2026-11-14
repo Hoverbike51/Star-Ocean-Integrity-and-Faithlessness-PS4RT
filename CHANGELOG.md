@@ -8,6 +8,114 @@ the original game's complete source code.
 
 [README](README.md) · [Launcher guide](docs/LAUNCHER_GUIDE.md) · [In-game menu guide](docs/IN_GAME_MENU_GUIDE.md)
 
+## 1.1.1 — Performance diagnostic tools
+
+### Sampling and overlay
+
+- Normalize process CPU usage across all logical processors and retain the busiest
+  thread's single-core percentage. Preserve sample age, interval and collection time.
+- Match Windows GPU-engine readings to the current process and Vulkan adapter. Use
+  unavailable readings instead of displaying stale values as current measurements.
+- Add the Technical overlay layout with frame history, CPU/thread information and sampling
+  metadata. Cache thread handles; discover new threads periodically and retire exited ones.
+- Keep the eight busiest sampled threads in fixed-size storage for diagnostic contexts.
+  Publish main/host runtime thread names through Windows thread descriptions.
+
+### Performance capture
+
+- Extend CSV/JSON capture to format 7. Existing CSV columns retain their names and order;
+  new columns are appended.
+- Separate CPU wall times for acquire/resize, composition recording, submission, swapchain
+  presentation and frame retirement. Explicitly label time outside the Present call;
+  it is not a measurement of guest-code execution.
+- Capture the queued frame's effective provider/preset separately from requested settings,
+  actual swapchain output size and the sampled applied internal-render setting.
+- Instrument completed mutex, condition-variable, semaphore and thread-join calls during
+  capture only. Keep per-thread wait state, object identifiers and cumulative counts/durations.
+  Parallel-thread totals may overlap and are not added to or subtracted from frame time.
+- Group stalls over 100 ms into up to 32 contexts with approximately two seconds before
+  and after, merging overlapping events. Previous context is limited to 240 frames.
+  Retain a runtime-thread snapshot and eight sampled busy threads at each context's worst
+  frame; report events exceeding the context limit and the 256 lifetime-thread registry limit.
+- Add separate counts for frames over 100, 250 and 500 ms, and regression checks for
+  bounded tracking, nested waits, thread retirement and actual CSV/JSON serialization.
+- Preserve the illustrated launcher/in-game guides and append the 1.1.1 investigation procedure.
+
+> [!IMPORTANT]
+> This release improves diagnostics. It does not yet resolve issue #11 or the
+> location-dependent Fidel follower issue. Snapshots are taken after a stall, not inside
+> its call stack. A Windows CPU trace on the affected computer may still be required.
+
+## 1.1.0 — Reconstruction, HUD and launcher update
+
+### Rendering and reconstruction
+
+- Correct the official AMD FSR Vulkan dispatch resource formats and SDR/HDR input
+  declaration. Gameplay testing validated the correction for the reported black 3D scene.
+- Clearly distinguish **AMD FSR 3.1.5**, **AMD FSR 4 v7 (INT8)**, **AMD FSR 4.1.2**
+  and **DLSS** in both interfaces while preserving saved provider selections.
+  Retain GPU, component and resource checks; report the effective provider after initialization.
+- Keep reconstruction presets separate from manual internal resolution. Show the applied
+  render size and show the requested input size when it differs, instead of implying that
+  a pending request is already active.
+- Show contextual in-game explanations for the selected preset, FXAA and pending changes
+  without permanently filling the menu with unrelated text.
+
+### HUD layouts and background composition
+
+- Correct custom HUD layout application for **4:3** and **16:10**, alongside **16:9**,
+  **21:9** and **32:9**. Retain original placement without an active custom layout.
+- Fill the loading blackout across the complete output in **both width and height**,
+  including narrow aspect ratios. Keep this safety mask independent of custom HUD placement.
+- Support optional schema-4 JSON background sizing overrides: **Original / Extended**.
+  Explicit preset values take priority over automatic sizing at every supported ratio;
+  Extended fills both axes of recognized menu backgrounds.
+- Keep foreground text, icons and prerendered video separate from backdrop extension.
+  Add a dedicated pause-controls mapping, including the Options/Back prompt.
+- Preserve compatibility with schema-1/2/3 HUD presets and widen group tracking for the
+  additional mappings. Updated HUD and blackout behaviour has been accepted in local testing.
+
+### Launcher, logs and performance display
+
+- Scale the launcher interface with available window space, including text, hit targets,
+  caption buttons and the selectable console.
+- Reduce unnecessary refreshes and clip navigation repainting to changed regions.
+  Reuse unchanged console contents and placement rather than rebuilding them on every refresh.
+- Restore explicit light console text on the dark background, including theme changes.
+- Use UE4SS-style local timestamps: **[YYYY-MM-DD HH:mm:ss.fffffff]**. Stamp complete
+  records once and preserve their timestamps when copied or exported.
+- Keep independent GPU/CPU model-name switches and six overlay positions, including
+  top center and bottom center. Report the effective reconstruction preset, DLAA for
+  DLSS Native (100%), and NO PRESET without reconstruction.
+
+### Tweaks and documentation
+
+- Block exploration leader cycling while **L2 or R2** is held, avoiding accidental
+  changes during trigger combinations.
+- Refresh both illustrated English guides for **1.1.0** using the updated screenshots,
+  captioned controls, comparison tables, application timing and troubleshooting guidance.
+
+> [!WARNING]
+> **Known issue:** Fidel can still stop following the party in some locations when another
+> exploration leader is selected. Restore Fidel as leader if this occurs. The follower
+> behaviour is not considered fully fixed by this release.
+
+Subtitle layout support remains incomplete. The title-screen globe and some zone-boundary
+framing states retain separate aspect-ratio limitations. Image-quality reports still need
+the active provider, preset and applied render dimensions; the validated black-scene fix
+is not a claim that every reconstruction artifact or hardware configuration is resolved.
+
+## 1.0.2 — Ending credits hotfix
+
+- Fix the unsupported-import stop before the ending credits reported in [issue #8](https://github.com/Hoverbike51/Star-Ocean-Integrity-and-Faithlessness-PS4RT/issues/8).
+  Resolve `sceGameLiveStreamingInitialize` and `sceGameLiveStreamingEnableLiveStreaming`
+  as explicit offline acknowledgements. Host capture and network state remain unchanged.
+- Add loader regression checks for the ending capture-service calls, successful return
+  to guest code, and rejection of unknown APIs or mismatched libraries.
+- Gameplay validation confirmed that the ending credits and subsequent videos now
+  play without crashing. This validates the reported ending sequence, not every
+  hardware configuration or a complete playthrough.
+
 ## 1.0.1 — SO5 hotfix 1
 
 - Include verified HUD resource/object identities in the runtime, so compatible HUD

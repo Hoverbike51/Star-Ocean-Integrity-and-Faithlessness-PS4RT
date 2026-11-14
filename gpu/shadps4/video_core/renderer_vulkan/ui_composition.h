@@ -29,7 +29,7 @@ inline bool PerspectiveMenuBackground(bool native_gui, bool offscreen_rgba,
     // previous frame alone cannot turn a movie or a flat menu into a 3D scene.
     return native_gui && offscreen_rgba && native_viewport &&
            std::isfinite(frame_aspect) && std::isfinite(output_aspect) &&
-           output_aspect > 16.f/9+.001f &&
+           frame_aspect>0 && output_aspect>0 && std::abs(output_aspect-16.f/9)>.001f &&
            std::abs(frame_aspect-output_aspect)<.025f;
 }
 
@@ -39,7 +39,8 @@ inline bool WideDisplayScene(bool frame_camera,float frame_aspect,float output_a
     // independently of temporal reconstruction, depth history or a scene snapshot.
     // Missing, previous-frame or 16:9 camera evidence must not stretch a movie.
     return frame_camera&&std::isfinite(frame_aspect)&&std::isfinite(output_aspect)&&
-        output_aspect>16.f/9+.001f&&std::abs(frame_aspect-output_aspect)<.025f;
+        frame_aspect>0&&output_aspect>0&&std::abs(output_aspect-16.f/9)>.001f&&
+        std::abs(frame_aspect-output_aspect)<.025f;
 }
 
 struct DisplayRoute {bool redirect;unsigned width,height;bool sample_composed;};

@@ -6,6 +6,8 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -28,11 +30,49 @@ enum Item : unsigned {
     Ram = 1u << 5,
     Vram = 1u << 6,
     Version = 1u << 7,
-    AllItems = (1u << 8) - 1,
+    CpuThread = 1u << 8, // Appended: existing saved item bits retain their meaning.
+    AllItems = (1u << 9) - 1,
 };
 inline constexpr unsigned DefaultItems = Fps | FrameTime | Upscaler;
+enum Layout : int { OneLine = 0, Stacked = 1, Technical = 2 };
+inline unsigned VisibleItems(unsigned selected, int layout) {
+    return layout == Technical ? AllItems : selected;
+}
 
+// Fixed storage: no allocation or sorting on the presentation thread.
+struct FrameHistory {
+    std::array<float, 240> values{};
+    unsigned next = 0, count = 0;
+    double sum = 0.0;
+    void Add(float ms) {
+        if (!std::isfinite(ms) || ms <= 0.0f || ms > 60000.0f) return;
+        if (count == values.size()) sum -= values[next];
+        else ++count;
+        values[next] = ms;
+        sum += ms;
+        next = (next + 1) % unsigned(values.size());
+    }
+    float Mean() const { return count ? float(sum / count) : 0.0f; }
+    float Peak() const {
+        return count ? *std::max_element(values.begin(), values.begin() + count) : 0.0f;
+    }
+    unsigned Offset() const { return count == values.size() ? next : 0; }
+};
+
+struct ThreadSample {
+    unsigned id{};
+    float percent{-1.0f};
+    char name[128]{};
+    void Assign(unsigned thread_id, float usage, std::string_view text) {
+        id=thread_id; percent=usage;
+        auto count=std::min(text.size(),sizeof(name)-1);
+        if (count<text.size())
+            while (count && (static_cast<unsigned char>(text[count]) & 0xc0)==0x80) --count;
+        std::copy_n(text.data(),count,name); name[count]=0;
+    }
+};
 struct Sample {
+    std::array<ThreadSample, 8> top_threads{};
     float fps = 0.0f, frame_ms = 0.0f;
     std::string upscaler;
     std::string version;
@@ -41,7 +81,8 @@ struct Sample {
     bool show_gpu_model = true, show_cpu_model = false;
     std::string busiest_thread_name;
     float gpu_percent = -1.0f, cpu_percent = -1.0f, busiest_thread_percent = -1.0f;
-    unsigned busiest_thread_id = 0, thread_count = 0;
+    unsigned busiest_thread_id = 0, thread_count = 0, logical_processors = 0;
+    double sample_interval_ms = -1.0, sample_age_ms = -1.0, sampling_ms = -1.0;
     double ram_used_gb = -1.0, ram_total_gb = -1.0, vram_used_gb = -1.0, vram_total_gb = -1.0;
 };
 
@@ -62,11 +103,20 @@ inline Anchor PositionAnchor(int position) {
 inline bool MatchesGpuEngine(std::wstring_view name, unsigned process, uint32_t high, uint32_t low) {
     unsigned pid = 0, luid_high = 0, luid_low = 0;
     int end = 0;
-    const std::wstring terminated{name};
-    return std::swscanf(terminated.c_str(), L"pid_%u_luid_0x%x_0x%x_%n",
+    // Counter names are numerous; parse only their bounded identity prefix without heap work.
+    wchar_t identity[96]{};
+    name.copy(identity, std::min(name.size(), std::size(identity) - 1));
+    const bool same_adapter = std::swscanf(identity, L"pid_%u_luid_0x%x_0x%x_%n",
                        &pid, &luid_high, &luid_low, &end) == 3 && end > 0 &&
-           pid == process && luid_high == high && luid_low == low &&
-           name.find(L"_engtype_3D", size_t(end)) != std::wstring_view::npos;
+           pid == process && luid_high == high && luid_low == low;
+    if (!same_adapter) return false;
+    const auto marker = name.find(L"_engtype_", size_t(end));
+    if (marker == std::wstring_view::npos) return false;
+    const auto engine = name.substr(marker + 9);
+    if (engine == L"3D" || engine == L"Compute") return true;
+    if (!engine.starts_with(L"Compute_")) return false;
+    const auto index = engine.substr(8);
+    return !index.empty() && index.find_first_not_of(L"0123456789") == std::wstring_view::npos;
 }
 
 // Publish provider and preset together, only after a successful dispatch. Provider IDs are
@@ -84,6 +134,22 @@ inline float CpuPercent(uint64_t process_delta, uint64_t wall_delta, unsigned co
     }
     return std::clamp(float(double(process_delta) * 100.0 / (double(wall_delta) * cores)), 0.0f, 100.0f);
 }
+
+// Counter baselines are independent per process/thread. Never interpret a counter reset or
+// a first observation as CPU work during the last interval. All times use 100 ns units.
+struct CpuCounter {
+    uint64_t ticks = 0, time = 0;
+    bool valid = false;
+    void Reset() { valid = false; }
+    float Read(uint64_t current_ticks, uint64_t current_time, unsigned processors = 1) {
+        const float result = valid && current_ticks >= ticks && current_time > time
+            ? CpuPercent(current_ticks - ticks, current_time - time, processors) : -1.0f;
+        ticks = current_ticks;
+        time = current_time;
+        valid = true;
+        return result;
+    }
+};
 
 /// The overlay text for the items in `mask`: one line each, or one line when `row`.
 inline std::string Format(const Sample& s, unsigned mask, bool row) {
@@ -131,6 +197,14 @@ inline std::string Format(const Sample& s, unsigned mask, bool row) {
             std::snprintf(part, sizeof(part), "%s N/A", name);
         } else {
             std::snprintf(part, sizeof(part), "%s %.0f%%", name, s.cpu_percent);
+        }
+        add();
+    }
+    if (mask & CpuThread) {
+        if (s.busiest_thread_percent < 0.0f) {
+            std::snprintf(part, sizeof(part), "CPU thread N/A");
+        } else {
+            std::snprintf(part, sizeof(part), "CPU thread %.0f%%", s.busiest_thread_percent);
         }
         add();
     }

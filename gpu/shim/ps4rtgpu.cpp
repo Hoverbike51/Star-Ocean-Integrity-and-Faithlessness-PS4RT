@@ -294,8 +294,8 @@ extern "C" int ps4rtgpu_init(const Ps4RtGpuConfig* config) {
         config->serial?config->serial:"",config->app_version?config->app_version:"");
     Ps4RtCameraProbe::Initialize({config->game_image,std::size_t(config->game_image_size)},
         config->serial?config->serial:"",config->app_version?config->app_version:"");
-    if(Ps4RtUltrawide::Wide(output))
-        std::printf("Ultrawide: %s; requested %s; original guest allocations retained\n",
+    if(Ps4RtUltrawide::Adjusted(output))
+        std::printf("Scene aspect: %s; requested %s; original guest allocations retained\n",
             wide?"guarded engine aspect applied (projection validation pending)":"executable profile refused; 16:9 fallback",
             Ps4RtOutput::Arguments[output]);
     // GnmDriver creates the presenter that the VideoOut present thread uses.

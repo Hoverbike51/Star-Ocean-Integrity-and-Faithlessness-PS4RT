@@ -35,6 +35,8 @@ public:
         vk::Image image;
         vk::ImageView view;
         u32 width, height;
+        // Required by the official SDK, which creates its own views from VkImage.
+        vk::Format format = vk::Format::eUndefined;
     };
     struct Frame {
         vk::CommandBuffer cmdbuf;
@@ -46,6 +48,7 @@ public:
         float sharpness;
         bool sharpen, reset, auto_exposure;
         bool depth_inverted = false;
+        bool hdr = true;
     };
 
     /// Records FSR 4 into `frame.cmdbuf`; the output stays in General. False when FSR 4

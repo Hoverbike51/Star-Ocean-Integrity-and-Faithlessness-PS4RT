@@ -1,6 +1,7 @@
 #include "video_core/renderer_vulkan/vk_display_registry.h"
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
+#include "video_core/renderer_vulkan/vk_fsr_sdk24.h"
 #include "video_core/renderer_vulkan/vk_display_sample.h"
 
 #include "video_core/renderer_vulkan/motion_history.h"
@@ -110,6 +111,10 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
     Ps4RtSettings::ConfigureUpscalerSupport(instance.IsFsr4Int8Supported(),
                                          instance.IsFsr411Supported());
     fsr4 = std::make_unique<Fsr4Upscaler>(instance, scheduler);
+    if(initial_settings.fsr3_available) {
+        FsrSdk24 probe(instance,scheduler);
+        Ps4RtSettings::ConfigureFsrSdkSupport(probe.Available(),probe.Problem().c_str());
+    } else Ps4RtSettings::ConfigureFsrSdkSupport(false,"GPU capability/default/override policy");
     {
         const Dlss* dlss = Dlss::Get();
         static std::string problem;
@@ -379,7 +384,7 @@ bool TemporalUpscaler::OnFrameStart() {
         fsr4_failed = false;
     }
     if(active && settings.native_scene) {
-        auto& state=Ps4RtSettings::Get();state.scene_preset=Ps4RtScene::ForOutput(state.scene_preset,target_width,target_height);
+        auto& state=Ps4RtSettings::Get();state.scene_preset=Ps4RtScene::ForOutput(state.scene_preset,target_width,target_height,Ps4RtUltrawide::Enabled());
     }
     const int scene_preset=settings.scene_preset;
     const bool manual_changed=ManualRaster() && settings.native_render_height!=applied_native_height;
@@ -1204,8 +1209,8 @@ void TemporalUpscaler::Run() {
         dispatched = true;
     } else if (UseFsr4()) {
         dispatched_provider = Ps4RtSettings::Get().upscaler;
-        dispatched = RecordFsr4(cmdbuf, {input_color, input_color_view, w, h},
-                                {input_depth, input_depth_view, w, h}, w, h, ow, oh, frame_ms);
+        dispatched = RecordFsr4(cmdbuf, {input_color, input_color_view, w, h, color.info.pixel_format},
+                                {input_depth, input_depth_view, w, h, depth_format}, w, h, ow, oh, frame_ms);
     } else if (UseDlss()) {
         dispatched_provider = Ps4RtSettings::UpscalerDlss;
         dispatched = RecordDlss(
@@ -1749,7 +1754,7 @@ void TemporalUpscaler::RejectScenePreset(const char* reason) {
     auto& state=Ps4RtSettings::Get();
     const int previous=Ps4RtScene::ForOutput(
         last_good_scene_output==state.output_res && last_good_scene_preset!=state.scene_preset?last_good_scene_preset:-1,
-        target_width,target_height);
+        target_width,target_height,Ps4RtUltrawide::Enabled());
     state.scene_preset=previous;
     const auto input=Ps4RtScene::Input(previous,target_width,target_height,Ps4RtUltrawide::Enabled());
     if(input.width>target_width || input.height>target_height)
@@ -1905,9 +1910,9 @@ void TemporalUpscaler::RunScaled() {
                               source_width, source_height},
                              w, h, ow, oh, frame_ms, false);
         } else {
-            ok4 = RecordFsr4(cmdbuf, {color_image, color_view, source_width, source_height},
-                            {depth_image, depth_view, source_width, source_height}, w, h, ow,
-                            oh, frame_ms);
+            ok4 = RecordFsr4(cmdbuf, {color_image, color_view, source_width, source_height, color.info.pixel_format},
+                            {depth_image, depth_view, source_width, source_height, depth_format}, w, h, ow,
+                            oh, frame_ms, false);
         }
         if (ok4) {
             if (Ps4RtSettings::Get().upscaler != Ps4RtSettings::UpscalerTaa) {
@@ -2278,7 +2283,7 @@ namespace Vulkan {
 
 bool TemporalUpscaler::UseFsr4() const {
     const int selected = Ps4RtSettings::Get().upscaler;
-    const bool supported = selected == Ps4RtSettings::UpscalerFsr411
+    const bool supported = selected == Ps4RtSettings::UpscalerFsrSdk24 ? Ps4RtSettings::Get().fsr_sdk24_supported.load() : selected == Ps4RtSettings::UpscalerFsr411
                                ? instance.IsFsr411Supported()
                                : instance.IsFsr4Int8Supported();
     return Ps4RtSettings::IsFsr4(selected) && supported && !fsr4_failed;
@@ -2286,7 +2291,7 @@ bool TemporalUpscaler::UseFsr4() const {
 
 bool TemporalUpscaler::RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image color,
                                   Fsr4Upscaler::Image depth, u32 w, u32 h, u32 ow, u32 oh,
-                                  float frame_ms) {
+                                  float frame_ms, bool hdr) {
     const auto& settings = Ps4RtSettings::Get();
     // Same jitter convention as FSR 3; the menu (or toggle 1 << 26) flips it for tests.
     const float sign =
@@ -2295,8 +2300,8 @@ bool TemporalUpscaler::RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image 
         .cmdbuf = cmdbuf,
         .color = color,
         .depth = depth,
-        .motion = {vk::Image(motion_image), *motion_view, w, h},
-        .output = {vk::Image(output_image), *output_view, ow, oh},
+        .motion = {vk::Image(motion_image), *motion_view, w, h, vk::Format::eR16G16Sfloat},
+        .output = {vk::Image(output_image), *output_view, ow, oh, vk::Format::eR16G16B16A16Sfloat},
         .render_width = w,
         .render_height = h,
         .preset = settings.CompactGraphicsMenu() ? Fsr4Upscaler::NativeInputPreset(w, h, ow, oh)
@@ -2311,6 +2316,7 @@ bool TemporalUpscaler::RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image 
         .reset = reset,
         .auto_exposure = settings.fsr4_auto_exposure,
         .depth_inverted = camera_motion.DepthInverted(),
+        .hdr = hdr,
     });
     // The menu shows the reason; it outlives this frame (FSR 4 keeps its last message).
     static std::string shown;
@@ -2327,7 +2333,7 @@ bool TemporalUpscaler::RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image 
     }
     if (!ok && fsr4->Fatal()) {
         std::printf("Upscaler: falling back to FSR 3.1\n");
-        Ps4RtSettings::Get().upscaler = Ps4RtSettings::UpscalerFsr3;
+        Ps4RtSettings::Get().upscaler = settings.fsr3_available ? Ps4RtSettings::UpscalerFsr3 : Ps4RtSettings::UpscalerOff;
         fsr4_failed = true; // EnsureResources creates the FSR 3 context next frame
         reset = true;
     }

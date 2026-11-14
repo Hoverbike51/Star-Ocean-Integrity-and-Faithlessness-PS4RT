@@ -2,6 +2,7 @@
 #pragma once
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -33,6 +34,13 @@ inline bool Wide(int output) {
     return Ps4RtOutput::Group(output)==Ps4RtOutput::Ratio21_9 ||
            Ps4RtOutput::Group(output)==Ps4RtOutput::Ratio32_9;
 }
+// Projection adjustment is distinct from ultrawide HUD layout. Narrower
+// supported formats use a real camera projection too, never a squeezed 16:9 scene.
+inline bool Adjusted(int output) {
+    if(output<0 || output>=Ps4RtOutput::Count) return false;
+    const auto group=Ps4RtOutput::Group(output);
+    return Wide(output) || group==Ps4RtOutput::Ratio4_3 || group==Ps4RtOutput::Ratio16_10;
+}
 inline float Ratio(int output) {
     return output>=0 && output<Ps4RtOutput::Count?
         float(Ps4RtOutput::Widths[output])/Ps4RtOutput::Heights[output]:16.f/9;
@@ -40,15 +48,16 @@ inline float Ratio(int output) {
 // Called before relocation protection and guest initializers. Never touches the
 // on-disk eboot, target allocation sizes, save data or game logic.
 inline bool Patch(std::span<unsigned char> image,std::string_view serial,std::string_view version,int output) {
-    if(!Wide(output) || !Matches(image,serial,version)) return false;
+    if(!Adjusted(output) || !Matches(image,serial,version)) return false;
     const float aspect=Ratio(output);
     std::memcpy(image.data()+AspectAddress,&aspect,sizeof aspect);
     return true;
 }
 inline std::atomic<int> session_output{-1};
-inline bool Enabled() {return Wide(session_output.load());}
+inline bool Enabled() {return Adjusted(session_output.load());}
+inline bool WideEnabled() {return Wide(session_output.load());}
 inline Ps4RtOutput::Size Content(int output) {
-    if(Enabled() && Wide(output)) return {Ps4RtOutput::Widths[output],Ps4RtOutput::Heights[output]};
+    if(Enabled() && Adjusted(output)) return {Ps4RtOutput::Widths[output],Ps4RtOutput::Heights[output]};
     return Ps4RtOutput::Content(output);
 }
 // The engine copies the descriptor at startup. Keep live resolution changes in
@@ -57,7 +66,7 @@ inline std::uint64_t SessionModes(std::uint64_t modes) {
     const int startup=session_output.load();
     if(startup<0) return modes; // launcher and pre-initialization enumeration
     for(int i=0;i<Ps4RtOutput::Count;++i) {
-        const bool allowed=Enabled()?std::abs(Ratio(i)-Ratio(startup))<.001f:!Wide(i);
+        const bool allowed=Enabled()?std::abs(Ratio(i)-Ratio(startup))<.001f:!Adjusted(i);
         if(!allowed) modes&=~(1ull<<i);
     }
     return modes;
@@ -67,7 +76,27 @@ inline Layout Hud(unsigned width,unsigned height) {
     const float scale=std::min(width/1920.f,height/1080.f);
     return {scale,scale,(width-1920*scale)*.5f,(height-1080*scale)*.5f};
 }
+// A native GUI plane has at most one letterboxed axis. Reuse its otherwise
+// unused motion slot: positive f32 compresses X, negative f32 compresses Y,
+// zero is identity. No push-constant ABI or precision reduction is needed.
+inline std::uint32_t HudProjectionParam(float xscale,float yscale,float xoffset,float yoffset,bool enabled) {
+    if(!enabled||xoffset!=0||yoffset!=0||!std::isfinite(xscale)||!std::isfinite(yscale)||xscale<=0||yscale<=0)return 0;
+    if(xscale>yscale+.00001f)return std::bit_cast<std::uint32_t>(yscale/xscale);
+    if(yscale>xscale+.00001f)return std::bit_cast<std::uint32_t>(-xscale/yscale);
+    return 0;
+}
 struct Box {int left,top,right,bottom;};
+// The same mapping is used by the rasterizer and its regression tests. Full
+// native scissors admit relocated UI and the loading mask on both axes. Partial
+// list/menu scissors retain their uniformly fitted original coordinates.
+inline Box HudScissor(unsigned width,unsigned height,Box guest,Layout target,bool layout) {
+    if(layout&&guest.left<=0&&guest.top<=0&&guest.right>=1920&&guest.bottom>=1080)
+        return {0,0,int(width),int(height)};
+    const auto fit=layout?Hud(width,height):target;
+    const auto pixel=[](int v,float scale,float offset){return int(std::lround(v*scale))+int(std::lround(offset));};
+    return {std::max(0,pixel(guest.left,fit.scale_x,fit.offset_x)),std::max(0,pixel(guest.top,fit.scale_y,fit.offset_y)),
+        pixel(guest.right,fit.scale_x,fit.offset_x),pixel(guest.bottom,fit.scale_y,fit.offset_y)};
+}
 inline Box Background(unsigned width,unsigned height,bool scene) {
     if(scene) return {0,0,int(width),int(height)};
     const auto fit=Hud(width,height);

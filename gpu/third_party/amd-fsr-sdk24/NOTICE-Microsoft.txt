@@ -1,0 +1,8 @@
+Microsoft Visual C++ Runtime 14.51.36231, x64
+
+App-local redistributable runtime dependencies of the signed AMD Vulkan provider.
+Original Microsoft binaries are unchanged. They are distributed separately from GPL source.
+Redistributable code list: https://aka.ms/vs/18/redistribution
+License terms: https://visualstudio.microsoft.com/license-terms/
+
+Copyright (c) Microsoft Corporation. All rights reserved.

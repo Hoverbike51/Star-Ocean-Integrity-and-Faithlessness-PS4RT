@@ -304,7 +304,7 @@ void Store(void* p,size_t offset,float v) {std::memcpy(static_cast<unsigned char
 bool FullBlackMask(void* object,int kind) {
     // Only the verified native Rect draw implementation, a full-screen quad,
     // and FOUR black corners. Text, images, movies and partial black panels do
-    // not qualify. Preserve the game's alpha/fade progression and Y geometry.
+    // not qualify. Preserve the game's alpha/fade progression.
     if(kind!=4||!Mapped(object,0x110))return false;
     const float x=Field<float>(object,0x80),y=Field<float>(object,0x84);
     const float w=Field<float>(object,0xb0),h=Field<float>(object,0xb4);
@@ -313,7 +313,7 @@ bool FullBlackMask(void* object,int kind) {
     for(unsigned i=0;i<4;++i)if(Field<unsigned>(object,0x100+i*4)&0xffffff)return false;
     return true;
 }
-bool FullBlackBackdrop(void* object,int kind) {return output_width/output_height>16./9+.001&&FullBlackMask(object,kind);}
+bool FullBlackBackdrop(void* object,int kind) {return std::abs(output_width/output_height-16./9)>.001&&FullBlackMask(object,kind);}
 int PS4_SYSV_ABI Load(void* controller,const void* raw,unsigned bytes,float f) {
     const So5Hud::ResourceBinding* resource=nullptr;const So5Hud::NativeResource* native=nullptr;
     if(bytes<=1048576&&Mapped(raw,bytes)) {
@@ -354,6 +354,7 @@ size_t TreeNames(void* root,int handle,std::array<std::uint64_t,256>& names) {
 // Child GUI resources (notably BM_Icon) have their own handle. Inherit a group
 // only from a fully readable, bounded parent chain with a VERIFIED group root.
 // The child's own identity still supplies its independent per-object edits.
+const So5Hud::Identity pause_controls{.resource=&So5Hud::PauseControls};
 const So5Hud::Identity* AttachedGroup(void* object) {
     std::array<void*,32> visited{};std::array<std::uint64_t,32> names{};
     size_t seen=0,count=0;int previous=0;const So5Hud::Identity* candidate=nullptr;
@@ -361,12 +362,14 @@ const So5Hud::Identity* AttachedGroup(void* object) {
         if(seen==visited.size()||!Mapped(node,0x70)||std::find(visited.begin(),visited.begin()+seen,node)!=visited.begin()+seen)return nullptr;
         visited[seen++]=node;const int handle=Field<int>(node,0x3c);
         if(handle!=previous){
+            if(candidate&&So5Hud::IsPauseControls(*candidate,{names.data(),count}))return &pause_controls;
             if(candidate&&candidate->Accepts({names.data(),count}))return candidate;
             candidate=Find(handle);if(candidate&&candidate->resource->group>=So5Hud::GroupCount)candidate=nullptr;
             count=0;previous=handle;
         }
         names[count++]=Field<std::uint64_t>(node,0x68);
     }
+    if(candidate&&So5Hud::IsPauseControls(*candidate,{names.data(),count}))return &pause_controls;
     return candidate&&candidate->Accepts({names.data(),count})?candidate:nullptr;
 }
 // Result item rows are cloned COLUMN.GUI instances, owned by the native result
@@ -472,9 +475,9 @@ void DrawObject(void* object,void* a,void* b,RenderFn original,int kind,std::uin
     if(const auto* subtitle=SubtitleIdentity(object))identity=subtitle;
     const bool backdrop=FullBlackBackdrop(object,kind);
     if(backdrop&&!identity) {
-        const float stretch=float(output_width/output_height/(16./9));
+        const auto fill=So5Hud::BackgroundTransform(output_width,output_height);
         struct Restore {DrawScope old;~Restore(){draw_scope=old;}} restore{draw_scope};
-        draw_scope={true,{-960*(stretch-1),0,stretch,1}};
+        draw_scope={true,fill};
         backdrop_draws.fetch_add(1,std::memory_order_relaxed);original(object,a,b);return;
     }
     const auto* attached=identity&&identity->resource->group<So5Hud::GroupCount?nullptr:AttachedGroup(object);
@@ -517,15 +520,16 @@ void DrawObject(void* object,void* a,void* b,RenderFn original,int kind,std::uin
     if(!identity&&!attached){ObserveUnknown(object,a,b,original,caller);return;}
     const auto& edits=snapshot?snapshot->elements:startup_elements;
     const auto* group_identity=identity&&identity->resource->group<So5Hud::GroupCount&&identity->Accepts({chain.data(),count})?identity:attached;
+    if(identity&&So5Hud::IsPauseControls(*identity,{chain.data(),count}))group_identity=&pause_controls;
     static const So5Hud::Identity radial_background{.resource=&So5Hud::BattleMenuBackground};
     if(identity&&identity->resource->group==7&&std::find(chain.begin(),chain.begin()+count,So5Hud::NativeName("IMG_BGBLUE",handle))!=chain.begin()+count)group_identity=&radial_background;
     const bool grouped=group_identity!=nullptr;const auto group=grouped?group_identity->resource->group:So5Hud::GroupCount;
-    const bool force=grouped&&snapshot&&(snapshot->force_groups&(1u<<group))&&layout.groups[group].visible;
+    const bool force=grouped&&snapshot&&(snapshot->force_groups&(std::uint64_t{1}<<group))&&layout.groups[group].visible;
     ScopedVisibility visibility(object,group_identity,kind,force);
     if(!Field<unsigned char>(object,0xe5)){original(object,a,b);return;}
-    const bool wide_background=grouped&&(group==20||group==21||group==22||group==29||group==30)&&output_width/output_height>16./9+.001;
-    const float stretch=backdrop||wide_background?float(output_width/output_height/(16./9)):1;
-    So5Hud::Visual affine{-960*(stretch-1),0,stretch,1};
+    const bool background=grouped&&So5Hud::IsBackgroundGroup(group);
+    So5Hud::Visual affine=backdrop?So5Hud::BackgroundTransform(output_width,output_height):
+        background?So5Hud::BackgroundTransform(layout,group,output_width,output_height):So5Hud::Visual{0,0,1,1};
     if(grouped) {
         ++rendered[group];if(!layout.groups[group].visible)return;
         auto t=So5Hud::Transform(affine,*group_identity->resource,layout.groups[group],output_width,output_height);
@@ -567,7 +571,8 @@ void Initialize(std::span<unsigned char> image,std::string_view serial,std::stri
         if(serial!="CUSA03219"||version!="01.00"||image.size()<0xb83a08)
             throw std::runtime_error("unsupported executable revision");
         if(std::filesystem::is_regular_file(catalog_path))So5Hud::SetNativeCatalog(So5Hud::NativeCatalog::Parse(So5Hud::Read(catalog_path,4*1024*1024)));
-        const auto aspect=Ps4RtUltrawide::Enabled()?(Ps4RtOutput::Group(output)==Ps4RtOutput::Ratio32_9?So5Hud::Aspect::Superwide:So5Hud::Aspect::Wide):So5Hud::Aspect::Standard;
+        const auto size=Ps4RtUltrawide::Content(output);
+        const auto aspect=So5Hud::OutputAspect(size.width,size.height);
         // A preset from another output ratio must not disable the guarded
         // bridge/live channel. Preserve its file and start neutral, so the
         // Preset library can apply a matching preset, including 16:9.
@@ -593,7 +598,7 @@ void Initialize(std::span<unsigned char> image,std::string_view serial,std::stri
            !Signature(image,0x874848,{'%','s','_','%','0','9','d',0})||
            !Signature(image,0x206a10,{0x8b,0x8f,0x3c,0x01,0,0,0xb8,0x10,0x27,0,0,0xff,0xc1,0x0f,0x45,0xc1,0x89,0x87,0x3c,0x01,0,0}))
             throw std::runtime_error("GUI loader/render/layout signatures do not match");
-        const auto size=Ps4RtUltrawide::Content(output);output_width=size.width;output_height=size.height;
+        output_width=size.width;output_height=size.height;
         // Guest threads have not started. Both trampolines exist before the
         // first guest call; failure restores all installed bytes.
         // All ten registered XML object types use these six draw implementations.

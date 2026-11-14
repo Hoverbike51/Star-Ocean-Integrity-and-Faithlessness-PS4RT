@@ -43,6 +43,32 @@ constexpr std::array<unsigned char,24> UpdateSignature{
 constexpr std::array<unsigned char,24> CollectSignature{
     0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,
     0x53,0x48,0x83,0xec,0x78,0x48,0x8b,0x05,0x08,0xfe,0x86,0};
+// Native actor initialization assigns root.current_player to actor+0x4608;
+// the native Lua follow-target setter writes this same handle. Validate both
+// consumers before repairing the default player's follow reference.
+constexpr std::array<unsigned char,13> FollowInitializationSignature{
+    0x41,0x8b,0x8e,0xa0,0x86,0x01,0x00,0x89,0x88,0x08,0x46,0x00,0x00};
+constexpr std::array<unsigned char,6> FollowSetterSignature{0x89,0x98,0x08,0x46,0x00,0x00};
+// The native switch computes each companion's formation and initializes its
+// movement controller. A follow handle alone does not leave the idle state.
+constexpr std::size_t FormationAddress=0x18ee70;
+constexpr std::array<unsigned char,24> FormationSignature{
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,
+    0x53,0x48,0x81,0xec,0xa8,0,0,0,0x48,0x8b,0x05,0x15};
+constexpr std::array<unsigned char,30> FormationGuardsSignature{
+    0xf6,0x83,0xa0,0x01,0,0,0x01,0x75,0x7b,0xf6,0x83,0xe4,0x02,0,0,
+    0x20,0x75,0x72,0x48,0x89,0xdf,0xe8,0xe2,0x04,0x11,0,0x84,0xc0,0x75,0x66};
+constexpr std::array<unsigned char,24> FollowMovementSignature{
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,
+    0x53,0x48,0x83,0xec,0x18,0x48,0x89,0xfb,0x45,0x89,0xc6,0x41};
+struct alignas(16) FormationVector {float x{},y{},z{},w=1;};
+using FormationFn=FormationVector*(PS4_SYSV_ABI *)(FormationVector*,void*,int,void*,const FormationVector*);
+using ActorControlFn=void*(PS4_SYSV_ABI *)(void*);
+FormationFn formation{};
+struct FollowerRepairState {
+    std::uintptr_t actor{},control{};std::uint32_t leader{};
+    ULONGLONG next_attempt{};unsigned failures{},messages{};
+} follower_repair;
 // Nine entries are initialized exactly as in native selector 0x1a4070.
 struct Candidate {void* actor{}; std::int16_t id=-1; unsigned char restricted{}; unsigned char padding[5]{};};
 static_assert(sizeof(Candidate)==16 && offsetof(Candidate,restricted)==10);
@@ -67,23 +93,26 @@ std::atomic<ULONGLONG> interested_until{0};
 std::atomic_flag processing=ATOMIC_FLAG_INIT;
 SRWLOCK state_lock=SRWLOCK_INIT;
 struct State {
-    View view; std::uintptr_t root{},actor{}; std::uint32_t handle{}; ULONGLONG at{};
+    View view; std::uintptr_t root{},actor{},default_actor{}; std::uint32_t handle{}; ULONGLONG at{};
     unsigned gate=1,phase{},flags{};unsigned char manager_flags{};int battles{};
     std::array<std::int16_t,9> party{};
 } state;
 struct Selection {
-    std::uintptr_t manager{},root{},actor{};
+    std::uintptr_t manager{},root{},actor{},default_actor{};
     std::uint32_t handle{},default_handle{};
     int id=-1;
     std::array<std::int16_t,9> party{};
+    std::uint32_t former_handle{};
 };
 SRWLOCK selection_lock=SRWLOCK_INIT;
 Selection selection;
 std::atomic<bool> selection_active{false};
-std::atomic<unsigned> suppressed_returns{0};
+std::atomic<unsigned> suppressed_returns{0},follower_repairs{0};
 struct Message {int id=-1; std::uintptr_t root{},actor{}; std::uint32_t handle{}; ULONGLONG at{};} message;
 std::atomic<ULONGLONG> next_inspection{0};
+constexpr unsigned LeaderTriggerMask=0x100|0x200; // Mapped PS4 L2/R2.
 std::atomic<unsigned> input_buttons{0};
+bool TriggerHeld(){return (input_buttons.load(std::memory_order_acquire)&LeaderTriggerMask)!=0;}
 std::atomic<ULONGLONG> direction_message{0},preference_changed_at{0};
 std::atomic<unsigned> preference_revision{0},saved_revision{0};
 ULONGLONG next_restore{};
@@ -292,12 +321,73 @@ void PS4_SYSV_ABI AutomaticReturn(void* manager,std::uint32_t old_handle,std::ui
     // native switches, including scripts, battle and recovery, use their original path.
     change(manager,old_handle,requested);
 }
-bool KeepSelection(void* manager,const State& current,std::uint32_t default_handle) {
+bool KeepSelection(void* manager,const State& current,std::uint32_t default_handle,std::uint32_t former_handle=0) {
     if(!default_handle || !TryAcquireSRWLockExclusive(&selection_lock))return false;
-    selection={reinterpret_cast<std::uintptr_t>(manager),current.root,current.actor,current.handle,default_handle,current.view.current,current.party};
-    suppressed_returns=0;
+    selection={reinterpret_cast<std::uintptr_t>(manager),current.root,current.actor,current.default_actor,current.handle,default_handle,current.view.current,current.party,former_handle};
+    suppressed_returns=0;follower_repair={};
     selection_active.store(current.handle!=default_handle,std::memory_order_release);
     ReleaseSRWLockExclusive(&selection_lock);return true;
+}
+void RepairDefaultFollower(const Selection& chosen) {
+    // Native update thread only, after SelectedContext has excluded battle,
+    // loading, scripted cameras and a changed roster/controlled actor.
+    if(!formation || chosen.party[0]!=0 || chosen.id==0 || !chosen.default_actor || chosen.default_actor==chosen.actor)return;
+    std::uint32_t handle{},target{},removing{},removed{},flags{};
+    std::uintptr_t status{},table{},getter{},control{},general{},parent{},owner{};
+    std::int16_t id=-1;
+    const auto actor=chosen.default_actor;
+    if(!Read(actor,0x54,handle) || handle!=chosen.default_handle ||
+       !Read(actor,0x5a00,status) || !Read(status,8,id) || id!=0 ||
+       !Read(actor,0x4670,removing) || removing || !Read(actor,0x4674,removed) || removed ||
+       !Read(actor,0x64,flags) || (flags&1) || !Read(actor,0x4608,target) ||
+       (target!=0 && target!=handle && target!=chosen.handle) ||
+       !Read(actor,0,table) || !Inside(table,0x390) || !Read(table,0x388,getter) || !Inside(getter))return;
+    control=reinterpret_cast<std::uintptr_t>(reinterpret_cast<ActorControlFn>(getter)(reinterpret_cast<void*>(actor)));
+    int mode{},movement{};std::uint32_t movement_target{};unsigned char locks{},motion{},policy{};
+    if(!Read(control,0x38,owner) || owner!=actor || !Read(control,0x48,general) ||
+       !Read(general,8,parent) || parent!=control || !Read(control,0x50,mode) ||
+       !Read(general,0x2d8,movement) || !Read(general,0x170,movement_target) ||
+       !Read(general,0x1a0,locks) || !Read(general,0x1a3,motion) || !Read(general,0x2e4,policy))return;
+    if(follower_repair.actor!=actor || follower_repair.control!=control || follower_repair.leader!=chosen.handle) {
+        follower_repair={actor,control,chosen.handle};
+        std::printf("Exploration leader: Fidel follower state (control=%d, movement=%d, actor_target=%u, movement_target=%u, leader=%u)\n",
+            mode,movement,target,movement_target,chosen.handle);
+    }
+    // Mode 0 is native companion AI; modes 4/5 belong to player/scripts.
+    // Keep explicit movement orders, script locks and a different live target.
+    if(mode!=0 || (locks&1) || motion || (policy&0x20) ||
+       (movement!=0 && movement!=2) ||
+       (movement==2 && movement_target && movement_target!=handle && movement_target!=chosen.handle && movement_target!=chosen.former_handle)) {
+        if(follower_repair.messages<4) {++follower_repair.messages;std::printf(
+            "Exploration leader: Fidel follow deferred (control=%d, movement=%d, target=%u, locks=%02x/%02x/%02x)\n",
+            mode,movement,movement_target,unsigned(locks),unsigned(motion),unsigned(policy));}
+        return;
+    }
+    if(target==chosen.handle && movement==2 && movement_target==chosen.handle)return;
+    // No repeated roster reset or teleport. Retry a refused initialization at
+    // most once per second, with a bounded failure budget for this selection.
+    const auto now=GetTickCount64();
+    if(now<follower_repair.next_attempt || follower_repair.failures>=3)return;
+    follower_repair.next_attempt=now+1000;
+    if(target!=chosen.handle) {
+        const auto address=actor+0x4608;MEMORY_BASIC_INFORMATION page{};
+        if((address&3) || !VirtualQuery(reinterpret_cast<void*>(address),&page,sizeof(page)) ||
+           page.State!=MEM_COMMIT || (page.Protect&(PAGE_GUARD|PAGE_NOACCESS)) ||
+           (page.Protect&0xff)!=PAGE_READWRITE || address+4>reinterpret_cast<std::uintptr_t>(page.BaseAddress)+page.RegionSize)return;
+        if(std::uint32_t(InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(address),LONG(chosen.handle),LONG(target)))!=target)return;
+    }
+    FormationVector output,input;
+    formation(&output,reinterpret_cast<void*>(chosen.root),0,reinterpret_cast<void*>(actor),&input);
+    if(Read(general,0x2d8,movement) && movement==2 &&
+       Read(general,0x170,movement_target) && movement_target==chosen.handle) {
+        follower_repairs.fetch_add(1,std::memory_order_relaxed);
+        follower_repair.failures=0;
+        if(follower_repair.messages++<4)std::printf("Exploration leader: Fidel native companion follow initialized, target=%u\n",chosen.handle);
+    } else {
+        ++follower_repair.failures;
+        std::printf("Exploration leader: Fidel native follow initialization refused (movement=%d, target=%u, attempt=%u)\n",
+            movement,movement_target,follower_repair.failures);
+    }
 }
 bool Actor(const Candidate& entry,const std::array<std::int16_t,9>& party,std::uint32_t& handle) {
     if(!entry.actor || entry.id<0 || entry.id>5 || entry.restricted ||
@@ -327,6 +417,7 @@ State InspectNative(void* manager,std::array<Candidate,9>& entries) {
     for(const auto& entry:entries) {
         std::uint32_t handle{};
         if(entry.id>=0 && entry.id<6 && counts[entry.id]==1 && Actor(entry,party,handle)) {
+            if(entry.id==party[0])current.default_actor=reinterpret_cast<std::uintptr_t>(entry.actor);
             current.view.available_mask|=1u<<entry.id;
             if(handle==current.handle && reinterpret_cast<std::uintptr_t>(entry.actor)==current.actor)
                 current.view.current=entry.id;
@@ -354,6 +445,11 @@ void Process(void* manager,float delta) {
         if(pending.exchange(false))last_result=Result::None;
         return;
     }
+    if(TriggerHeld()) {
+        direction_message=0;
+        if(pending.exchange(false))last_result=Result::Refused;
+        return;
+    }
     const auto now=GetTickCount64();
     const bool queued=pending.load(std::memory_order_acquire);
     const bool captured=ps4rtgpu_overlay_captures_input()!=0;
@@ -367,7 +463,10 @@ void Process(void* manager,float delta) {
     Measure measurement(process_timing);
     next_inspection=now+100;
     Selection chosen;
-    if(ReadSelection(chosen) && !SelectedContext(manager,chosen))ClearSelection();
+    if(ReadSelection(chosen)) {
+        if(!SelectedContext(manager,chosen))ClearSelection();
+        else RepairDefaultFollower(chosen);
+    }
     // Maintaining a leader must never call the native roster collector or
     // virtual eligibility methods every frame/inspection tick. They are needed
     // only for an actual switch or an open selector, not ordinary movement.
@@ -430,7 +529,7 @@ void Process(void* manager,float delta) {
     }
     // UI selection is a message, never an actor write on the render thread.
     // It is consumed once, after Resume, with fresh native eligibility checks.
-    if(captured)return;
+    if(captured || TriggerHeld())return;
     std::uint32_t selected{},default_handle{};
     for(const auto& entry:entries) {
         if(entry.id==request.id)Read(reinterpret_cast<std::uintptr_t>(entry.actor),0x54,selected);
@@ -452,7 +551,7 @@ void Process(void* manager,float delta) {
     if(applied) {
         current.view.current=request.id;current.handle=selected;
         for(const auto& entry:entries)if(entry.id==request.id)current.actor=reinterpret_cast<std::uintptr_t>(entry.actor);
-        if(!KeepSelection(manager,current,default_handle))
+        if(!KeepSelection(manager,current,default_handle,request.handle))
             std::puts("Exploration leader: automatic-return exemption unavailable; native control remains enabled");
         if(current.view.current!=current.party[0])ArmPortalGuard(current);
         else ClearPortalGuard();
@@ -474,7 +573,10 @@ bool Matches(std::span<const unsigned char> bytes,std::string_view serial,std::s
         Signature(bytes,ReturnCallAddress,ReturnCallSignature) &&
         Signature(bytes,PortalContactAddress,PortalContactSignature) && Signature(bytes,PortalFireAddress,PortalFireSignature) &&
         Signature(bytes,0x1be70e,PortalCountdownSignature) &&
-        Signature(bytes,ControlSwitchAddress,ControlSwitchSignature);
+        Signature(bytes,ControlSwitchAddress,ControlSwitchSignature) &&
+        Signature(bytes,0x18bf1b,FollowInitializationSignature) && Signature(bytes,0x25cdc0,FollowSetterSignature) &&
+        Signature(bytes,FormationAddress,FormationSignature) && Signature(bytes,0x18f2d4,FormationGuardsSignature) &&
+        Signature(bytes,0x29f280,FollowMovementSignature);
 }
 }
 bool Available(){return installed.load(std::memory_order_acquire);}
@@ -488,7 +590,7 @@ View GetView() {
     ReleaseSRWLockShared(&state_lock);return result;
 }
 bool Request(int character) {
-    if(!Available() || !Ps4RtSettings::Get().exploration_leader_enabled || character<0 || character>5 || !TryAcquireSRWLockExclusive(&state_lock))return false;
+    if(!Available() || TriggerHeld() || !Ps4RtSettings::Get().exploration_leader_enabled || character<0 || character>5 || !TryAcquireSRWLockExclusive(&state_lock))return false;
     const auto now=GetTickCount64();
     const bool accepted=state.view.ready && now-state.at<=1500 && character!=state.view.current &&
         (state.view.available_mask&(1u<<character)) && !pending.load(std::memory_order_acquire);
@@ -500,15 +602,18 @@ bool Request(int character) {
 }
 void Input(std::uint32_t buttons,bool captured) {
     constexpr unsigned Left=0x80,Right=0x20;
-    const unsigned held=captured || !Ps4RtSettings::Get().exploration_leader_enabled?0:buttons&(Left|Right);
-    const unsigned before=input_buttons.exchange(held,std::memory_order_relaxed);
+    const unsigned held=captured || !Ps4RtSettings::Get().exploration_leader_enabled?0:buttons&(Left|Right|LeaderTriggerMask);
+    const unsigned before=input_buttons.exchange(held,std::memory_order_acq_rel);
+    if(held&LeaderTriggerMask) {
+        direction_message.store(0,std::memory_order_release);return;
+    }
     if(captured){direction_message.store(0,std::memory_order_release);return;}
     if(!Available() || !held || held==(Left|Right) || (held&before))return;
     Cycle(held==Left?-1:1,false);
 }
 void Cycle(int direction,bool captured) {
     if(captured){direction_message.store(0,std::memory_order_release);return;}
-    if(!Available()||!Ps4RtSettings::Get().exploration_leader_enabled||!direction)return;
+    if(!Available()||TriggerHeld()||!Ps4RtSettings::Get().exploration_leader_enabled||!direction)return;
     direction_message.store((GetTickCount64()<<2)|(direction<0?1:2),std::memory_order_release);
 }
 void FlushPreference() {
@@ -520,6 +625,7 @@ void Report() {
     // Final save also covers a normal exit inside the debounce interval.
     const auto revision=preference_revision.load(std::memory_order_acquire);
     if(revision!=saved_revision.load()) {Ps4RtSettings::Save();saved_revision=revision;}
+    if(follower_repairs.load())std::printf("Exploration leader: initialized Fidel native companion follow=%u\n",follower_repairs.load());
     if(!measure)return;
     LARGE_INTEGER frequency;QueryPerformanceFrequency(&frequency);
     const auto print=[&](const char* label,const Timing& value) {
@@ -549,6 +655,7 @@ void Initialize(std::span<unsigned char> bytes,std::string_view serial,std::stri
     portal_fire=reinterpret_cast<PortalFireFn>(hook.Original(2));
     collect=reinterpret_cast<CollectFn>(base+CollectAddress);
     change=reinterpret_cast<SwitchFn>(base+Ps4RtCameraProbe::ControlSwitchAddress);
+    formation=reinterpret_cast<FormationFn>(base+FormationAddress);
     measure=std::getenv("PS4RT_PERF_CAPTURE_DIR")!=nullptr;
     installed.store(true,std::memory_order_release);
     std::puts("Exploration leader: D-pad left/right or O/P enabled during exploration; preference persists across scenes and sessions");

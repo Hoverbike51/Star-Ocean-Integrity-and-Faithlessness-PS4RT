@@ -95,6 +95,11 @@ int main() {
     assert(!Read(invalid,camera));
     assert(SceneCopy(0x12eb9af0,0x13d64dc6));
     assert(Tonemap(0x12eb9af0,0xfc17f234));
+    // An indirect screen-space triangle must never receive geometry jitter:
+    // shifting a full-target pass leaves an unwritten edge even at native 4K.
+    assert(!JitterGeometry(0x12eb9af0,false));
+    assert(!JitterGeometry(0x12345678,true));
+    assert(JitterGeometry(0x12345678,false));
     assert(!SceneCopy(0x59cb445a,0xf8591c05));
     assert(!SceneCopy(0x12eb9af0,0xfc17f234));
     std::puts("PASS: rendered camera, stale shared VP, affine scale/reflection, reversed depth and guards");

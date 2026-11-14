@@ -51,8 +51,8 @@ void CockpitHudPresets() {
         const char* config=std::getenv("PS4RT_CONFIG");
         if(!config||!*config) return;
         const int output=Ps4RtUltrawide::session_output.load();
-        const auto aspect=Ps4RtUltrawide::Enabled()?
-            (Ps4RtOutput::Group(output)==Ps4RtOutput::Ratio32_9?So5Hud::Aspect::Superwide:So5Hud::Aspect::Wide):So5Hud::Aspect::Standard;
+        const auto size=Ps4RtUltrawide::Content(output);
+        const auto aspect=So5Hud::OutputAspect(size.width,size.height);
         library=std::make_unique<So5Hud::PresetLibrary>(std::filesystem::path(std::u8string_view(reinterpret_cast<const char8_t*>(config))).parent_path(),aspect);
         library->Refresh();
     }
@@ -147,23 +147,23 @@ void CockpitDisplay() {
     ImGui::TextWrapped("%s",Tr(L"Output resolution",L"Résolution de sortie"));
     ImGui::Text("%d × %d",surface.width,surface.height);
     if(Ps4RtUltrawide::Enabled()) ImGui::TextWrapped("%s",Tr(
-        L"Experimental ultrawide: restart the game to change aspect ratio. HUD and movies keep their original proportions.",
-        L"Ultralarge expérimental : redémarrez le jeu pour changer de format. Le HUD et les vidéos conservent leurs proportions d’origine."));
+        L"Custom 3D aspect: restart to change ratio. Menus and videos retain their proportions.",
+        L"Format 3D personnalisé : redémarrez pour changer de ratio. Menus et vidéos conservent leurs proportions."));
     ImGui::EndTable();
 }
 
 void CockpitImage() {
     auto& s=Ps4RtSettings::Get();
     if(!BeginRows("##image-live")) return;
-    const char* providers[]={Tr(L"Disabled",L"Désactivé"),"FSR 3.1","FSR 4 v07","DLSS Super Resolution"};
-    const int values[]={Ps4RtSettings::UpscalerOff,Ps4RtSettings::UpscalerFsr3,Ps4RtSettings::UpscalerFsr4,Ps4RtSettings::UpscalerDlss};
+    const char* providers[]={Tr(L"Disabled",L"Désactivé"),"AMD FSR 3.1.5","AMD FSR 4 v7 (INT8)","AMD FSR 4.1.2","DLSS"};
+    const int values[]={Ps4RtSettings::UpscalerOff,Ps4RtSettings::UpscalerFsr3,Ps4RtSettings::UpscalerFsr4,Ps4RtSettings::UpscalerFsrSdk24,Ps4RtSettings::UpscalerDlss};
     const bool temporal=Ps4RtOutput::TemporalAllowed(s.output_res);
-    const bool available[]={true,temporal&&s.fsr3_available,temporal&&s.fsr4_supported,temporal&&s.dlss_supported};
+    const bool available[]={true,temporal&&s.fsr3_available,temporal&&s.fsr4_supported,temporal&&s.fsr_sdk24_supported,temporal&&s.dlss_supported};
     std::atomic<int> provider{s.upscaler.load()};
     Row(Tr(L"Upscaling",L"Reconstruction"));
-    const char* preview=providers[0];for(int i=0;i<4;++i)if(values[i]==provider)preview=providers[i];
+    const char* preview=providers[0];for(int i=0;i<int(std::size(values));++i)if(values[i]==provider)preview=providers[i];
     if(ImGui::BeginCombo("##provider",preview)) {
-        for(int i=0;i<4;++i) {
+        for(int i=0;i<int(std::size(values));++i) {
             ImGui::BeginDisabled(!available[i]);
             if(ImGui::Selectable(providers[i],values[i]==provider)&&available[i]){provider=values[i];dirty=true;}
             ImGui::EndDisabled();
@@ -195,19 +195,14 @@ void CockpitImage() {
     }
     if(!manual) {
     const auto input_output=Ps4RtUltrawide::Content(s.output_res);
-    pending_scene_preset=Ps4RtScene::ForOutput(pending_scene_preset,input_output.width,input_output.height);
+    pending_scene_preset=Ps4RtScene::ForOutput(pending_scene_preset,input_output.width,input_output.height,Ps4RtUltrawide::Enabled());
     const char* presets[]={Tr(L"Original 1080p",L"1080p d’origine"),Tr(L"Native (100%)",L"Natif (100 %)"),Tr(L"Quality",L"Qualité"),
         Tr(L"Balanced",L"Équilibré"),Tr(L"Performance",L"Performances"),Tr(L"Ultra Performance",L"Ultra Performance")};
     const int preset_values[]={-1,0,1,2,3,4};std::atomic<int> requested{pending_scene_preset};
     // The shared size choices select the CURRENT provider's model/mode.
     // Keep its identity visible; NVIDIA hardware alone does not select DLSS.
-    const char* preset_provider=nullptr;
-    for(int i=1;i<4;++i) if(values[i]==s.upscaler) preset_provider=providers[i];
-    char preset_label[256]{};
     const char* preset_title=Tr(L"Quality preset",L"Preset de reconstruction");
-    std::snprintf(preset_label,sizeof(preset_label),"%s%s%s",preset_title,
-        preset_provider?" · ":"",preset_provider?preset_provider:"");
-    Row(preset_label);
+    Row(preset_title);
     if(ImGui::BeginCombo("##value",presets[std::clamp(requested.load()+1,0,5)])) {
         for(int i=0;i<6;++i) {
             const auto input=Ps4RtScene::Input(preset_values[i],input_output.width,input_output.height,Ps4RtUltrawide::Enabled());
@@ -230,7 +225,8 @@ void CockpitImage() {
     const auto content=Ps4RtUltrawide::Content(s.output_res);
     const auto wanted=Ps4RtScene::RequestedInput(!manual,pending_scene_preset,s.native_render_height,content.width,content.height,Ps4RtUltrawide::Enabled());
     std::snprintf(dimensions,sizeof(dimensions),"%u × %u",wanted.width,wanted.height);
-    InfoRow(Tr(L"Requested input resolution",L"Résolution de rendu demandée"),dimensions);
+    if(wanted.width!=unsigned(s.active_render_width.load())||wanted.height!=unsigned(s.active_render_height.load()))
+        InfoRow(Tr(L"Requested input resolution",L"Résolution de rendu demandée"),dimensions);
     const char* anisotropy_labels[]={Tr(L"Game setting",L"Réglage du jeu"),"×2","×4","×8","×16"};
     ChoiceRow(Tr(L"Anisotropic filtering",L"Filtrage anisotrope"),s.anisotropy,anisotropy_labels,
               Ps4RtGraphics::Anisotropies.data(),int(Ps4RtGraphics::Anisotropies.size()),
@@ -238,7 +234,8 @@ void CockpitImage() {
     char active_anisotropy[24]{};
     if(s.startup_anisotropy) std::snprintf(active_anisotropy,sizeof(active_anisotropy),"×%d",s.startup_anisotropy);
     else std::snprintf(active_anisotropy,sizeof(active_anisotropy),"%s",Tr(L"Game setting",L"Réglage du jeu"));
-    InfoRow(Tr(L"Filtering for this session",L"Filtrage de cette session"),active_anisotropy);
+    if(s.anisotropy!=s.startup_anisotropy)InfoRow(Tr(L"Filtering for this session",L"Filtrage de cette session"),active_anisotropy);
+    CockpitSwitch(Tr(L"Spatial anti-aliasing (FXAA)",L"Anticrénelage spatial (FXAA)"),s.spatial_aa);
     Row(Tr(L"Sharpening",L"Netteté"));
     int strength=s.sharpen?int(s.sharpness*100.0f+0.5f):0;
     if(ImGui::SliderInt("##value",&strength,0,100,"%d%%",ImGuiSliderFlags_AlwaysClamp)) {
@@ -249,9 +246,11 @@ void CockpitImage() {
     ImGui::PopID();
     ImGui::EndTable();
     ImGui::Spacing();
+    if(s.spatial_aa)ImGui::TextWrapped("%s",Tr(L"Optional SDR edge smoothing, including the HUD. May soften fine details.",
+        L"Lissage optionnel des contours en SDR, HUD compris. Peut adoucir les détails fins."));
     const auto requested_input=wanted;
     const double x=double(requested_input.width)/content.width,y=double(requested_input.height)/content.height;
-    ImGui::TextWrapped("%s: %.1f%% × %.1f%% · %.1f%%",Tr(L"Input scale / pixel count",L"Échelle de rendu / nombre de pixels"),x*100,y*100,x*y*100);
+    if(!manual)ImGui::TextWrapped("%s: %.1f%% × %.1f%% · %.1f%%",Tr(L"Input scale / pixel count",L"Échelle de rendu / nombre de pixels"),x*100,y*100,x*y*100);
     if(manual) ImGui::TextWrapped("%s",Tr(
         L"Without reconstruction, choose the internal resolution manually. The UI keeps the output resolution. With FSR or DLSS, quality presets control the internal resolution.",
         L"Sans reconstruction, choisissez manuellement la résolution interne. L’UI conserve la résolution de sortie. Avec FSR ou DLSS, les presets gèrent la résolution interne."));
@@ -264,10 +263,8 @@ void CockpitImage() {
     case 4:ImGui::TextWrapped("%s",Tr(L"Lowest input resolution and GPU workload. Detail loss and reconstruction artifacts are more likely.",L"Résolution de rendu et charge GPU minimales. Les pertes de détails et les artefacts de reconstruction sont plus probables."));break;
     }
     ImGui::Spacing();
-    ImGui::TextWrapped("%s",Tr(L"The preset is applied when this menu closes.",L"Le preset s’applique à la fermeture de ce menu."));
-    ImGui::TextWrapped("%s",s.anisotropy!=s.startup_anisotropy?
-        Tr(L"Anisotropic filtering change saved for the next game launch.",L"Le changement de filtrage anisotrope est enregistré pour le prochain lancement."):
-        Tr(L"Anisotropic filtering changes require a game restart.",L"Les changements de filtrage anisotrope nécessitent un redémarrage du jeu."));
+    if(!manual&&pending_scene_preset!=s.scene_preset_applied)ImGui::TextWrapped("%s",Tr(L"The preset is applied when this menu closes.",L"Le preset s’applique à la fermeture de ce menu."));
+    if(s.anisotropy!=s.startup_anisotropy)ImGui::TextWrapped("%s",Tr(L"Anisotropic filtering change saved for the next game launch.",L"Le changement de filtrage anisotrope est enregistré pour le prochain lancement."));
 }
 
 
@@ -528,22 +525,25 @@ void CockpitPerformance() {
         ImGui::EndTable();
     }
     ImGui::BeginDisabled(!s.show_fps);
+    const bool technical = s.overlay_layout == Ps4RtPerfStats::Technical;
+    ImGui::BeginDisabled(technical);
     const char* metrics[]={Tr(L"Frames per second (FPS)",L"Images par seconde (IPS)"),Tr(L"Frame time",L"Temps par image"),
         Tr(L"Active upscaler",L"Reconstruction active"),Tr(L"GPU name and load",L"Nom et charge du GPU"),Tr(L"CPU usage",L"Utilisation du CPU"),
-        Tr(L"System memory",L"Mémoire système"),Tr(L"Video memory",L"Mémoire vidéo"),Tr(L"Application version",L"Version de l’application")};
+        Tr(L"System memory",L"Mémoire système"),Tr(L"Video memory",L"Mémoire vidéo"),Tr(L"Application version",L"Version de l’application"),Tr(L"Busiest CPU thread",L"Thread CPU le plus chargé")};
     if(ImGui::BeginTable("##metrics",ImGui::GetContentRegionAvail().x>640*base_scale?2:1)) {
         for(unsigned i=0;i<std::size(metrics);++i) {
-            ImGui::TableNextColumn(); bool value=(s.overlay_items&(1u<<i))!=0;
+            ImGui::TableNextColumn(); bool value=technical || (s.overlay_items&(1u<<i))!=0;
             if(ImGui::Checkbox(metrics[i],&value)) {s.overlay_items=value?(s.overlay_items|(1u<<i)):(s.overlay_items&~(1u<<i)); dirty=true;}
         }
         ImGui::EndTable();
     }
+    ImGui::EndDisabled();
     ImGui::Spacing();
     if(BeginRows("##stats-models")) {
-        ImGui::BeginDisabled(!(s.overlay_items & Ps4RtPerfStats::Gpu));
+        ImGui::BeginDisabled(!technical && !(s.overlay_items & Ps4RtPerfStats::Gpu));
         CockpitSwitch(Tr(L"Show GPU model",L"Afficher le modèle du GPU"),s.overlay_gpu_model);
         ImGui::EndDisabled();
-        ImGui::BeginDisabled(!(s.overlay_items & Ps4RtPerfStats::Cpu));
+        ImGui::BeginDisabled(!technical && !(s.overlay_items & Ps4RtPerfStats::Cpu));
         CockpitSwitch(Tr(L"Show CPU model",L"Afficher le modèle du CPU"),s.overlay_cpu_model);
         ImGui::EndDisabled();
         ImGui::EndTable();
@@ -551,8 +551,8 @@ void CockpitPerformance() {
     if(BeginRows("##stats-style")) {
         const char* corners[]={Tr(L"Top left",L"En haut à gauche"),Tr(L"Top right",L"En haut à droite"),Tr(L"Bottom left",L"En bas à gauche"),Tr(L"Bottom right",L"En bas à droite"),Tr(L"Top center",L"En haut au milieu"),Tr(L"Bottom center",L"En bas au milieu")};
         ChoiceRow(Tr(L"Position",L"Position"),s.overlay_corner,corners,nullptr,6);
-        const char* layouts[]={Tr(L"One line",L"Une seule ligne"),Tr(L"One item per line",L"Un indicateur par ligne")};
-        ChoiceRow(Tr(L"Layout",L"Disposition"),s.overlay_layout,layouts,nullptr,2);
+        const char* layouts[]={Tr(L"One line",L"Une seule ligne"),Tr(L"One item per line",L"Un indicateur par ligne"),Tr(L"Technical",L"Technique")};
+        ChoiceRow(Tr(L"Overlay type",L"Type d’affichage"),s.overlay_layout,layouts,nullptr,3);
         SliderRow(Tr(L"Text size",L"Taille du texte"),s.overlay_scale,50,300,"%d%%",nullptr);
         SliderRow(Tr(L"Background opacity",L"Opacité du fond"),s.overlay_opacity,0,100,"%d%%",nullptr);
         ImGui::EndTable();

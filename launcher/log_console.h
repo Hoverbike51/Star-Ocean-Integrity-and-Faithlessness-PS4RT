@@ -27,29 +27,49 @@ struct RetainedDiagnostics {
 };
 // Stamp completed records once at ingestion. Display, selection and export reuse
 // the stored record, so repainting or receiving another pipe chunk never changes its time.
-inline std::wstring Stamp(std::wstring_view line, const SYSTEMTIME& time) {
-    wchar_t prefix[16]{};
-    std::swprintf(prefix, std::size(prefix), L"[%02u:%02u:%02u] ",
-                  unsigned(time.wHour), unsigned(time.wMinute), unsigned(time.wSecond));
+// UE4SS-style local wall-clock time. Fractional digits come from the Windows
+// precise clock (100 ns units); they do not imply 100 ns clock accuracy.
+inline std::wstring Stamp(std::wstring_view line, const SYSTEMTIME& time, unsigned fraction) {
+    wchar_t prefix[40]{};
+    std::swprintf(prefix, std::size(prefix), L"[%04u-%02u-%02u %02u:%02u:%02u.%07u] ",
+                  unsigned(time.wYear), unsigned(time.wMonth), unsigned(time.wDay),
+                  unsigned(time.wHour), unsigned(time.wMinute), unsigned(time.wSecond), fraction);
     std::wstring result(prefix);
     result.append(line);
     return result;
 }
+inline std::wstring Stamp(std::wstring_view line, const SYSTEMTIME& time) {
+    return Stamp(line,time,unsigned(time.wMilliseconds)*10000);
+}
 inline std::wstring Stamp(std::wstring_view line) {
-    SYSTEMTIME time{};
-    GetLocalTime(&time);
-    return Stamp(line, time);
+    FILETIME utc{},local{};SYSTEMTIME time{};
+    GetSystemTimePreciseAsFileTime(&utc);
+    if(!FileTimeToLocalFileTime(&utc,&local) || !FileTimeToSystemTime(&local,&time)) {
+        GetLocalTime(&time);return Stamp(line,time);
+    }
+    ULARGE_INTEGER ticks{};ticks.LowPart=utc.dwLowDateTime;ticks.HighPart=utc.dwHighDateTime;
+    return Stamp(line,time,unsigned(ticks.QuadPart%10000000));
 }
 }
 
 // Native read-only console: selection, Unicode copying and scrolling are provided
 // by Windows Rich Edit. No clipboard data is read by the launcher.
 class LogConsole {
-    HWND window{};HFONT font{};RECT placed{};std::vector<std::wstring> displayed;
+    HWND window{};HFONT font{};int font_pixels=16;RECT placed{};std::vector<std::wstring> displayed;
+    static void ApplyColors(HWND w) {
+        SendMessageW(w,EM_SETBKGNDCOLOR,0,RGB(2,10,16));
+        CHARFORMAT2W cf{};cf.cbSize=sizeof(cf);cf.dwMask=CFM_COLOR;
+        cf.crTextColor=RGB(158,204,193); // Explicit color: never CFE_AUTOCOLOR.
+        SendMessageW(w,EM_SETCHARFORMAT,SCF_DEFAULT,reinterpret_cast<LPARAM>(&cf));
+        SendMessageW(w,EM_SETCHARFORMAT,SCF_ALL,reinterpret_cast<LPARAM>(&cf));
+    }
     static LRESULT CALLBACK Events(HWND w,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR,DWORD_PTR) {
         if(msg==WM_KEYDOWN && (GetKeyState(VK_CONTROL)&0x8000)) {
             if(wp=='A') {SendMessageW(w,EM_SETSEL,0,-1);return 0;}
             if(wp=='C') {SendMessageW(w,WM_COPY,0,0);return 0;}
+        }
+        if(msg==WM_THEMECHANGED || msg==WM_SYSCOLORCHANGE) {
+            const auto result=DefSubclassProc(w,msg,wp,lp);ApplyColors(w);return result;
         }
         if(msg==WM_NCDESTROY) RemoveWindowSubclass(w,Events,1);
         return DefSubclassProc(w,msg,wp,lp);
@@ -70,14 +90,23 @@ public:
         font=CreateFontW(-16,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,
             CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"Consolas");
         SendMessageW(window,WM_SETFONT,reinterpret_cast<WPARAM>(font),FALSE);
-        CHARFORMAT2W cf{};cf.cbSize=sizeof(cf);cf.dwMask=CFM_COLOR;cf.crTextColor=RGB(158,204,193);
-        SendMessageW(window,EM_SETCHARFORMAT,SCF_ALL,reinterpret_cast<LPARAM>(&cf));
+        ApplyColors(window);
         SendMessageW(window,EM_EXLIMITTEXT,0,16*1024*1024);
         // A target width of one disables word wrapping. Long diagnostics use the
         // horizontal scrollbar rather than being cut into narrow visual lines.
         SendMessageW(window,EM_SETTARGETDEVICE,0,1);
         SendMessageW(window,EM_SETUNDOLIMIT,0,0);
         return true;
+    }
+    void SetScale(float scale) {
+        const int pixels=std::clamp(int(16*scale+.5f),16,24);
+        if(!window||pixels==font_pixels)return;
+        HFONT next=CreateFontW(-pixels,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"Consolas");
+        if(!next)return;
+        SendMessageW(window,WM_SETFONT,reinterpret_cast<WPARAM>(next),FALSE);
+        ApplyColors(window);
+        if(font)DeleteObject(font);font=next;font_pixels=pixels;
     }
     void Show(bool show) {if(window && bool(IsWindowVisible(window))!=show) ShowWindow(window,show?SW_SHOWNA:SW_HIDE);}
     void Place(int x,int y,int width,int height) {
@@ -111,6 +140,7 @@ public:
         SendMessageW(window,WM_SETREDRAW,FALSE,0);
         if(append) {SendMessageW(window,EM_SETSEL,-1,-1);SendMessageW(window,EM_REPLACESEL,FALSE,reinterpret_cast<LPARAM>(text.c_str()));}
         else SetWindowTextW(window,text.c_str());
+        ApplyColors(window);
         if(follow) {SendMessageW(window,EM_SETSEL,-1,-1);SendMessageW(window,EM_SCROLLCARET,0,0);}
         else {
             SendMessageW(window,EM_EXSETSEL,0,reinterpret_cast<LPARAM>(&selection));

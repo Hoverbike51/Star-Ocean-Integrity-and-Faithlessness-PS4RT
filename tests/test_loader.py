@@ -148,6 +148,48 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(wrong_library.returncode, 1, wrong_library.stderr)
         self.assertIn('MISSING: Fc8qxlKINYQ#libSceFixture', wrong_library.stdout)
 
+    def test_ending_capture_services_return_to_credits(self):
+        # Exercise the known ending capture contracts through the loader's real
+        # scoped-NID resolver and System V call bridge, not a direct host call.
+        names = ['kvYEw2lBndk#libSceGameLiveStreaming',
+                 'dWM80AX39o4#libSceGameLiveStreaming',
+                 'Fc8qxlKINYQ#libSceVideoRecording', 'ending-credits-continued']
+        code = bytearray(b'\x48\x83\xec\x08')
+        calls = []
+        for index, argument in [(0, 0x100000), (1, 0), (2, 13), (1, 1), (1, 0)]:
+            code += b'\xbf' + struct.pack('<I', argument)
+            # Invalid optional metadata pointer: offline acknowledgements must
+            # never dereference it or allocate a console streaming heap.
+            code += b'\xbe\x01\x00\x00\x00'
+            calls.append((len(code) + 2, index))
+            code += b'\xff\x15\x00\x00\x00\x00\x85\xc0\x74\x02\x0f\x0b'
+        code += b'\x48\x83\xc4\x08'
+        calls.append((len(code) + 2, 3))
+        code += b'\xff\x25\x00\x00\x00\x00'
+        code += b'\x00' * (-len(code) % 8)
+        slots = len(code)
+        code += b'\x00' * (8 * len(names))
+        for displacement, index in calls:
+            struct.pack_into('<i', code, displacement, slots + index * 8 - (displacement + 4))
+        relocs = [(slots + index * 8, 1, index, 0) for index in range(len(names))]
+        result = self.run_image(package(bytes(code), relocs, names, 1))
+        self.assertEqual(result.returncode, 20, result.stdout + result.stderr)
+        self.assertIn('live streaming initialization acknowledged', result.stdout)
+        self.assertIn('live streaming permission acknowledged', result.stdout)
+        self.assertIn('video recording metadata acknowledged', result.stdout)
+        self.assertIn('first unsupported PS4 import: ending-credits-continued', result.stdout)
+        self.assertNotIn('first unsupported PS4 import: kvYEw2lBndk', result.stdout)
+        self.assertNotIn('first unsupported PS4 import: dWM80AX39o4', result.stdout)
+
+    def test_live_streaming_only_resolves_explicit_offline_contracts(self):
+        for name in ['kvYEw2lBndk#libSceFixture', 'dWM80AX39o4#libSceFixture',
+                     'unknown#libSceGameLiveStreaming']:
+            with self.subTest(name=name):
+                result = self.run_image(package(b'\xc3', [(40, 1, 0, 0)], [name], 1),
+                                        '--check-imports')
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn('MISSING: ' + name, result.stdout)
+
     def test_unverified_runtime_stays_disabled(self):
         r = self.run_image(package(b'\xff%\x02\x00\x00\x00\x90\x90', [(8, 1, 0, 0)], ['bzQExy189ZI#libc'], 0))
         self.assertEqual(r.returncode, 20, r.stderr)

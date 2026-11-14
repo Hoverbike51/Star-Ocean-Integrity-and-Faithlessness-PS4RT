@@ -1,4 +1,4 @@
-# Star Ocean 5 for Windows - v1.0.1-hotfix 1
+# Star Ocean 5 for Windows - v1.1.1
 
 **Windows 10/11 x64 player build**
 
@@ -9,14 +9,46 @@ This Windows adaptation combines a native Cockpit launcher, C++ game preparation
 game-specific compatibility runtime. It requires your own supported PS4 game files;
 the original game's complete source code has not been reconstructed.
 
-## Maintenance changes in v1.0.1
+## Changes in v1.1.1
+
+- Diagnostic maintenance release: more reliable CPU/GPU readings and Technical overlay.
+- Capture format 7 appends presentation-stage timings, completed runtime synchronization
+  waits, sampled applied render size and requested/effective reconstruction IDs to the CSV.
+- JSON groups frames over 100 ms into bounded contexts, retaining sampled busy threads and
+  runtime wait snapshots at the worst frame. It also counts frames over 100/250/500 ms.
+- Detailed tracing activates only during a performance capture. Fixed context/thread limits
+  and explicit sampling age help keep collection bounded and interpretation honest.
+- Illustrated guides are retained, with an appended [1.1.1 procedure](LAUNCHER_GUIDE.md#performance-probe-111).
+- This release gathers evidence for issue #11; it does not claim to fix that slowdown or
+  the known location-dependent Fidel follower issue. No rendering/gameplay algorithm is changed.
+
+## Changes in v1.1.0
+
+- Validated correction for the official AMD FSR Vulkan black scene: preserve actual
+  input resource formats and correctly declare SDR/HDR color data.
+- Clear reconstruction names: AMD FSR 3.1.5, AMD FSR 4 v7 (INT8), AMD FSR 4.1.2,
+  and DLSS. Hardware/component checks remain in effect. The SDK may select a
+  compatible fallback provider; the performance overlay reports that effective name.
+- Responsive launcher scaling, reduced video-page clutter and contextual in-game help.
+- Persistent Original/Extended background sizing in compatible HUD JSON presets,
+  with explicit JSON choices taking precedence over automatic sizing. Loading blackout
+  remains full-output; foreground UI, illustrations and videos retain their proportions.
+
+## Fixes in v1.0.2
+
+- Fix the crash before the ending credits caused by missing PS4 GameLiveStreaming imports.
+- The ending credits and subsequent videos have been validated in gameplay.
+- Add regression tests for the ending capture-service calls and strict import resolution.
+  Console broadcast requests do not start network streaming or control host recording.
+
+## Previous maintenance changes in v1.0.1
 
 - Standalone HUD preset identities, complete default DLSS packaging and the missing
   time-conversion import reported by the trophy-menu crash diagnostic.
 - More robust update installation handoff and temporary file-lock handling.
 - Separate launcher/quick-play desktop shortcuts and timestamped console records.
 
-These are source changes for validation. The published 1.0.0 asset is unchanged.
+These changes are available in the source checkout. Build the 1.1.1 player package locally; this documentation update does not publish or replace any GitHub release asset.
 
 ## Highlights since v0.4.0
 
@@ -65,7 +97,7 @@ passcodes cannot be imported by the native extractor.
 ## Clean player folder
 
 The expected distribution folder is
-`ps4rt-star-ocean-5-windows-x64-v1.0.1-latest`.
+`ps4rt-star-ocean-5-windows-x64-v1.1.1-latest`.
 
 | Entry | Purpose |
 | --- | --- |
@@ -80,7 +112,7 @@ game data, personal settings, saves, caches or diagnostic captures. The optional
 probe is disabled by default; its session controls appear when enabled in Advanced.
 For source builds, **build-windows.cmd** creates the player folder under **dist**.
 
-Executable version resources follow **1.0.1 / 1.0.1.0**, with **HoverMods Vault** as the
+Executable version resources follow **1.1.1 / 1.1.1.0**, with **HoverMods Vault** as the
 application company. Third-party code, shader models and game artwork retain their own
 authors, licenses and notices. Preserve corresponding-source obligations when redistributing.
 
@@ -102,12 +134,13 @@ authors, licenses and notices. Preserve corresponding-source obligations when re
 
 ## Validation status
 
-This document describes the current **1.0.1 source update**, which is not yet compiled
-or published. The maintenance changes were checked in an isolated source copy before
-the version bump: 66 native checks and 42 Python checks passed (3 Python checks skipped),
-followed by targeted shortcut/console checks and five synthetic launch scenarios.
-No 1.0.1 executable or ZIP has been generated. Build and test the final player package,
-including in-game HUD/trophy behavior and compatible NVIDIA hardware, before publishing it.
+The ending-crash correction was validated in gameplay: credits and subsequent videos
+play without crashing. All 18 loader regression tests and the two targeted trophy/time
+checks passed before that gameplay validation.
+
+The source version is now **1.1.1**. Isolated compilation and regression checks do not
+replace the installed test build or generate a player ZIP. Build and validate the final player package
+before publishing it; broader hardware and rendering issues remain separate.
 
 Report issues with the Title ID, APP_VER, Windows version, selected GPU/driver, active
 reconstruction/preset, reproduction steps and an exported diagnostic. Keep an earlier

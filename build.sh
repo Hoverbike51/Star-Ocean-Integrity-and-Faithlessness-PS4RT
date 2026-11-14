@@ -71,6 +71,7 @@ MINGW*|MSYS*)
         -DPS4RT_PGO=off -DPS4RT_LTO="${PS4RT_LTO:-OFF}" \
         -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
     ninja -C out/gpu -j "${PS4RT_BUILD_JOBS:-4}" ps4rt ps4rt-launcher ps4rt-pkg-extractor so5-updater so5-bootstrap
+    cp -r out/gpu/amd-fsr-sdk24 out/
     cp 'out/gpu/Star Ocean 5.exe' 'out/Star Ocean 5.exe'
     cp 'out/gpu/Star Ocean 5 Launcher.exe' 'out/Star Ocean 5 Launcher.exe'
     cp out/gpu/PkgExtractor.exe out/PkgExtractor.exe
@@ -90,7 +91,8 @@ MINGW*|MSYS*)
             scene-camera-history-test menu-input-test pad-input-test menu-sounds-test \
             graphics-settings-test memory-budget-test cockpit-test ahsl-cache-test \
             shader-capture-test scene-targets-gpu-test log-console-test fiber-test \
-            half-precision-test native-cheats-test game-languages-test fast-forward-test
+            half-precision-test native-cheats-test game-languages-test fast-forward-test \
+            perf-sampling-test diagnostic-trace-test performance-report-test
         ctest --test-dir out/gpu --output-on-failure
         python -m unittest discover -s tests -p 'test_*.py' -v
     fi

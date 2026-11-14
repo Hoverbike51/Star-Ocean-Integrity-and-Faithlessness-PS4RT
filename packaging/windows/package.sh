@@ -53,13 +53,16 @@ if [[ ${PS4RT_PACKAGE_NO_DLSS:-0} != 1 && -f out/ps4rt_dlss.dll && -f out/nvngx_
     cp out/ps4rt_dlss.dll out/nvngx_dlss.dll "$stage/bin/"
 fi
 
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$PWD/scripts/verify-amd-fsr-sdk.ps1")" -Root "$(cygpath -w "$PWD")"
+mkdir -p "$stage/bin/amd-fsr-sdk24"
+cp gpu/third_party/amd-fsr-sdk24/bin/*.dll "$stage/bin/amd-fsr-sdk24/"
 cp -r gpu/assets/. "$stage/gpu/assets/"
 cp -r fsr4_shaders "$stage/"
 cp -r launcher/assets/. "$stage/launcher/assets/"
 cp LICENSE README.md CHANGELOG.md VERSION "$stage/"
 cp packaging/windows/README-Windows.txt "$stage/"
 cp docs/UPSTREAM_CREDITS.md docs/MINIZ_LICENSE.txt docs/LIBCXX_LICENSE.txt "$stage/docs/"
-cp docs/LAUNCHER_GUIDE.md docs/IN_GAME_MENU_GUIDE.md "$stage/docs/"
+cp docs/LAUNCHER_GUIDE.md docs/IN_GAME_MENU_GUIDE.md docs/AMD_FSR_SDK.md "$stage/docs/"
 mkdir -p "$stage/docs/images/readme"
 cp -r docs/images/readme/launcher docs/images/readme/custom_menu "$stage/docs/images/readme/"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$PWD/packaging/windows/copy-notices.ps1")" \

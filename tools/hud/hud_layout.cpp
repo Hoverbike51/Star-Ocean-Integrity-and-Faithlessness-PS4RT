@@ -43,8 +43,11 @@ const std::array<Spec,GroupCount> Specs={{
     {"private_action","Private action (PA)",Anchor::BottomRight},
     {"subtitles","Subtitles (unverified)",Anchor::Original},
     {"establishment_background","Establishment / shop background",Anchor::Original,false,false,true,true},
-    {"quest_background","Quest menu background",Anchor::Original,false,false,true,true}
+    {"quest_background","Quest menu background",Anchor::Original,false,false,true,true},
+    {"pause_background","Pause menu background",Anchor::Original,false,false,true,true},
+    {"pause_controls","Pause: Options / Return / Skip",Anchor::BottomRight}
 }};
+bool IsBackgroundGroup(size_t group){return group==20||group==21||group==22||group==29||group==30||group==31;}
 namespace {
 [[noreturn]] void Fail(const char* text) {throw std::runtime_error(text);}
 bool Space(char c) {return c==' '||c=='\n'||c=='\r'||c=='\t';}
@@ -94,7 +97,7 @@ size_t Group(std::string_view id) {
     for(size_t n=0;n<Specs.size();++n)if(Specs[n].id==id)return n;Fail("Unknown HUD group.");
 }
 Aspect ParseAspect(std::string_view s) {
-    for(auto a:{Aspect::Standard,Aspect::Wide,Aspect::Superwide})if(AspectName(a)==s)return a;
+    for(auto a:{Aspect::Standard,Aspect::Wide,Aspect::Superwide,Aspect::FourThree,Aspect::SixteenTen})if(AspectName(a)==s)return a;
     Fail("Unsupported aspect base.");
 }
 Anchor ParseAnchor(std::string_view s) {
@@ -103,15 +106,26 @@ Anchor ParseAnchor(std::string_view s) {
 }
 }
 std::string_view AspectName(Aspect a) {
-    switch(a){case Aspect::Standard:return "16:9";case Aspect::Wide:return "21:9";case Aspect::Superwide:return "32:9";}
+    switch(a){case Aspect::Standard:return "16:9";case Aspect::Wide:return "21:9";case Aspect::Superwide:return "32:9";case Aspect::FourThree:return "4:3";case Aspect::SixteenTen:return "16:10";}
     Fail("Invalid aspect.");
 }
 std::string_view AnchorName(Anchor a) {
     constexpr std::string_view names[]={"original","top_left","top_right","bottom_left","bottom_right","left","right","center","world_attached"};
     if(unsigned(a)>=std::size(names))Fail("Invalid anchor.");return names[int(a)];
 }
+Aspect OutputAspect(double width,double height) {
+    if(!std::isfinite(width)||!std::isfinite(height)||width<=0||height<=0)Fail("Invalid output dimensions.");
+    const double ratio=width/height;
+    if(std::abs(ratio-4./3)<.01)return Aspect::FourThree;
+    if(std::abs(ratio-16./10)<.01)return Aspect::SixteenTen;
+    if(std::abs(ratio-32./9)<.01)return Aspect::Superwide;
+    if(ratio>=2.2&&ratio<=2.5)return Aspect::Wide;
+    return Aspect::Standard;
+}
 Rect Canvas(Aspect a) {
-    return {0,0,a==Aspect::Standard?1920.:a==Aspect::Wide?2520.:3840.,1080};
+    switch(a){case Aspect::Standard:return {0,0,1920,1080};case Aspect::Wide:return {0,0,2520,1080};
+        case Aspect::Superwide:return {0,0,3840,1080};case Aspect::FourThree:return {0,0,1440,1080};
+        case Aspect::SixteenTen:return {0,0,1728,1080};}Fail("Invalid aspect.");
 }
 Rect Canvas(const Preset& p) {
     if(!p.reference_width&&!p.reference_height)return Canvas(p.aspect);
@@ -132,13 +146,17 @@ void Validate(const Preset& p) {
         const double ratio=double(p.reference_width)/p.reference_height;
         if((p.aspect==Aspect::Standard&&std::abs(ratio-16./9)>.01)||
            (p.aspect==Aspect::Wide&&(ratio<2.2||ratio>2.5))||
-           (p.aspect==Aspect::Superwide&&std::abs(ratio-32./9)>.01))Fail("Reference output does not match the aspect family.");
+           (p.aspect==Aspect::Superwide&&std::abs(ratio-32./9)>.01)||
+           (p.aspect==Aspect::FourThree&&std::abs(ratio-4./3)>.01)||
+           (p.aspect==Aspect::SixteenTen&&std::abs(ratio-16./10)>.01))Fail("Reference output does not match the aspect family.");
     }
     size_t codepoints=0;
     for(unsigned char c:p.name) {if(c<32||c==127)Fail("Preset name contains control characters.");if((c&0xc0)!=0x80)++codepoints;}
     if(codepoints<1||codepoints>64)Fail("Preset name must contain 1 to 64 characters.");
     for(size_t i=0;i<GroupCount;++i) {
         const auto& v=p.groups[i];const auto& s=Specs[i];AnchorName(v.anchor);
+        if(unsigned(p.backgrounds[i])>unsigned(BackgroundFit::Extended)||
+           (!IsBackgroundGroup(i)&&p.backgrounds[i]!=BackgroundFit::Automatic))Fail("Invalid background sizing override.");
         if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.scale)||
             std::abs(v.x)>3840||std::abs(v.y)>1080||v.scale<.5||v.scale>2)Fail("Layout value is outside its allowed range.");
         if(s.centered&&(v.x!=0||(v.anchor!=Anchor::Original&&v.anchor!=Anchor::Center)))Fail("This HUD group must remain horizontally centered.");
@@ -160,15 +178,20 @@ void Validate(const Preset& p) {
 }
 Preset Parse(std::string_view text) {
     const auto doc=Json(text,1048576);const auto& o=Obj(doc);
-    if(o.contains("reference_output"))Keys(o,{"schema_version","layout_map","title_id","app_ver","name","aspect","units","groups","elements","reference_output"});
+    if(o.contains("backgrounds")) {
+        if(o.contains("reference_output"))Keys(o,{"schema_version","layout_map","title_id","app_ver","name","aspect","units","groups","elements","backgrounds","reference_output"});
+        else Keys(o,{"schema_version","layout_map","title_id","app_ver","name","aspect","units","groups","elements","backgrounds"});
+    }
+    else if(o.contains("reference_output"))Keys(o,{"schema_version","layout_map","title_id","app_ver","name","aspect","units","groups","elements","reference_output"});
     else if(o.contains("elements"))Keys(o,{"schema_version","layout_map","title_id","app_ver","name","aspect","units","groups","elements"});
     else Keys(o,{"schema_version","layout_map","title_id","app_ver","name","aspect","units","groups"});
     const auto schema=o.at("schema_version").is_int64()?o.at("schema_version").as_int64():0;
-    if((schema!=1&&schema!=2&&schema!=3)||(schema>=2)!=o.contains("elements")||(schema==3)!=o.contains("reference_output")||Str(o.at("layout_map"))!=MapId||
+    if((schema<1||schema>4)||(schema>=2)!=o.contains("elements")||(schema==4)!=o.contains("backgrounds")||
+        (schema!=4&&(schema==3)!=o.contains("reference_output"))||Str(o.at("layout_map"))!=MapId||
         Str(o.at("title_id"))!="CUSA03219"||Str(o.at("app_ver"))!="01.00"||Str(o.at("units"))!="logical_1080_anchor_relative")
         Fail("Preset version or game revision is incompatible.");
     auto p=Base(ParseAspect(Str(o.at("aspect"))));p.name=Str(o.at("name"));
-    if(schema==3){const auto& output=Obj(o.at("reference_output"));Keys(output,{"width","height"});
+    if(o.contains("reference_output")){const auto& output=Obj(o.at("reference_output"));Keys(output,{"width","height"});
         const double width=Num(output.at("width")),height=Num(output.at("height"));
         if(!std::isfinite(width)||!std::isfinite(height)||width<64||width>16384||height<64||height>16384||std::floor(width)!=width||std::floor(height)!=height)Fail("Invalid reference output size.");
         p.reference_width=int(width);p.reference_height=int(height);}
@@ -186,10 +209,15 @@ Preset Parse(std::string_view text) {
         p.elements.push_back({Str(e.at("resource"),96),Str(e.at("object"),96),
             {Anchor::Original,Num(e.at("offset_x")),Num(e.at("offset_y")),Num(e.at("scale")),e.at("visible").as_bool()}});
     }
+    if(schema==4)for(const auto& entry:Obj(o.at("backgrounds"))) {
+        const auto group=Group(entry.key());const auto value=Str(entry.value());
+        if(!IsBackgroundGroup(group)||(value!="original"&&value!="extended"))Fail("Invalid background sizing override.");
+        p.backgrounds[group]=value=="original"?BackgroundFit::Original:BackgroundFit::Extended;
+    }
     Validate(p);
     // Migrate only untouched historical built-ins. Never discard custom edits,
     // visibility, object overrides or a user-named layout.
-    if(p.aspect!=Aspect::Standard&&p.name=="Edge-anchored "+std::string(AspectName(p.aspect))&&p.elements.empty()) {
+    if(p.aspect!=Aspect::Standard&&p.name=="Edge-anchored "+std::string(AspectName(p.aspect))&&p.elements.empty()&&schema!=4) {
         bool legacy=true;for(size_t n=0;n<GroupCount;++n)legacy&=p.groups[n]==Setting{Specs[n].preferred,0,0,1,true};
         if(legacy){const auto w=p.reference_width,h=p.reference_height;p=Base(p.aspect);p.reference_width=w;p.reference_height=h;}
     }
@@ -202,14 +230,20 @@ std::string Serialize(const Preset& p) {
         const auto& s=p.groups[n];groups.emplace_back(j::object{{"id",Specs[n].id},{"anchor",AnchorName(s.anchor)},
             {"offset_x",s.x},{"offset_y",s.y},{"scale",s.scale},{"visible",s.visible}});
     }
-    j::object doc{{"schema_version",p.reference_width?3:p.elements.empty()?1:2},{"layout_map",MapId},{"title_id","CUSA03219"},{"app_ver","01.00"},
+    const bool backgrounds=std::ranges::any_of(p.backgrounds,[](auto fit){return fit!=BackgroundFit::Automatic;});
+    j::object doc{{"schema_version",backgrounds?4:p.reference_width?3:p.elements.empty()?1:2},{"layout_map",MapId},{"title_id","CUSA03219"},{"app_ver","01.00"},
         {"name",p.name},{"aspect",AspectName(p.aspect)},{"units","logical_1080_anchor_relative"},{"groups",std::move(groups)}};
-    if(!p.elements.empty()||p.reference_width) {
+    if(!p.elements.empty()||p.reference_width||backgrounds) {
         j::array rows;for(const auto& e:p.elements)rows.emplace_back(j::object{{"resource",e.resource},{"object",e.object},
             {"offset_x",e.value.x},{"offset_y",e.value.y},{"scale",e.value.scale},{"visible",e.value.visible}});
         doc["elements"]=std::move(rows);
     }
     if(p.reference_width)doc["reference_output"]=j::object{{"width",p.reference_width},{"height",p.reference_height}};
+    if(backgrounds) {
+        j::object modes;for(size_t n=0;n<GroupCount;++n)if(p.backgrounds[n]!=BackgroundFit::Automatic)
+            modes[Specs[n].id]=p.backgrounds[n]==BackgroundFit::Original?"original":"extended";
+        doc["backgrounds"]=std::move(modes);
+    }
     return j::serialize(doc)+"\n";
 }
 std::string SerializeReadable(const Preset& p) {

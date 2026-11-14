@@ -201,9 +201,9 @@ void EmitEpilogue(EmitContext& ctx) {
     if (ctx.hw_stage == HwStage::Vertex && ctx.runtime_info.hw.vs.clip_disable) {
         ConvertPositionToClipSpace(ctx);
     }
-    // Native GUI projection only. Widen the clip volume while retaining uniform
-    // 16:9 artwork sizes. The rasterizer supplies zero for ordinary draws, or a
-    // positive f32 compression factor when it actually widened this viewport.
+    // Native GUI projection only. Expand the clip volume on either axis while
+    // retaining uniform artwork sizes. Zero is identity; a positive f32 factor
+    // compresses X (wide output), a negative factor compresses Y (4:3/16:10).
     // These GUI shaders never use the object-motion parameter slot.
     if(ctx.hw_stage==HwStage::Vertex && !ctx.runtime_info.hw.vs.clip_disable &&
        !ctx.runtime_info.hw.vs.motion_vectors && Ps4RtHud::VertexProgram(ctx.info.pgm_hash)) {
@@ -212,9 +212,15 @@ void EmitEpilogue(EmitContext& ctx) {
         const Id bits=ctx.OpLoad(ctx.U32[1],pointer);
         const Id factor=ctx.OpSelect(ctx.F32[1],ctx.OpIEqual(ctx.U1[1],bits,ctx.ConstU32(0u)),
             ctx.Constant(ctx.F32[1],1.f),ctx.OpBitcast(ctx.F32[1],bits));
+        const Id vertical=ctx.OpFOrdLessThan(ctx.U1[1],factor,ctx.Constant(ctx.F32[1],0.f));
+        const Id one=ctx.Constant(ctx.F32[1],1.f);
+        const Id xf=ctx.OpSelect(ctx.F32[1],vertical,one,factor);
+        const Id yf=ctx.OpSelect(ctx.F32[1],vertical,ctx.OpFNegate(ctx.F32[1],factor),one);
         const Id position=ctx.OpLoad(ctx.F32[4],ctx.output_position);
-        const Id x=ctx.OpFMul(ctx.F32[1],ctx.OpCompositeExtract(ctx.F32[1],position,0u),factor);
-        ctx.OpStore(ctx.output_position,ctx.OpCompositeInsert(ctx.F32[4],x,position,0u));
+        const Id x=ctx.OpFMul(ctx.F32[1],ctx.OpCompositeExtract(ctx.F32[1],position,0u),xf);
+        const Id y=ctx.OpFMul(ctx.F32[1],ctx.OpCompositeExtract(ctx.F32[1],position,1u),yf);
+        const Id xy=ctx.OpCompositeInsert(ctx.F32[4],y,ctx.OpCompositeInsert(ctx.F32[4],x,position,0u),1u);
+        ctx.OpStore(ctx.output_position,xy);
     }
 }
 

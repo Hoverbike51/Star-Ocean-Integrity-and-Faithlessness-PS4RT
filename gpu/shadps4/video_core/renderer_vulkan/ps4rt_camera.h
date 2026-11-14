@@ -79,6 +79,10 @@ inline bool Read(std::span<const float> data, Camera& result) {
     return true;
 }
 
+constexpr bool JitterGeometry(unsigned long long vs, bool clip_disabled) {
+    return !clip_disabled && vs!=0x12eb9af0;
+}
+
 constexpr bool SceneCopy(unsigned long long vs, unsigned long long ps) {
     return vs == 0x12eb9af0 && ps == 0x13d64dc6;
 }

@@ -75,7 +75,28 @@ int main(int argc,char** argv) {
         assert(allowed&(1ull<<output));assert(!(allowed&(1ull<<1)));
         for(int i=0;i<Ps4RtOutput::Count;++i) if(allowed&(1ull<<i)) assert(std::abs(Ratio(i)-ratio)<.001f);
     }
+    // Narrower formats change camera projection and use the entire 3D target.
+    // HUD/movie fit remains uniform and centered, with no wide-preset substitution.
+    for(const int output:{Ps4RtOutput::Find(1440,900),Ps4RtOutput::Find(1920,1200),
+                          Ps4RtOutput::Find(1024,768),Ps4RtOutput::Find(1600,1200)}) {
+        assert(output>=0 && Adjusted(output) && !Wide(output));
+        image=pristine;assert(Patch(image,"CUSA03219","01.00",output));
+        session_output=output;assert(Enabled() && !WideEnabled());
+        const auto content=Content(output);const auto fit=Hud(content.width,content.height);
+        assert(content.width==Ps4RtOutput::Widths[output] && content.height==Ps4RtOutput::Heights[output]);
+        assert(fit.scale_x==fit.scale_y && std::abs(fit.offset_x)<.001f && fit.offset_y>0);
+        assert(std::abs(fit.offset_y*2+1080*fit.scale_y-content.height)<.001f);
+        assert(CameraMatches(1.7f/Ratio(output),1.7f,output));
+        assert(!CameraMatches(1.7f/(16.f/9),1.7f,output));
+        const auto modes=SessionModes(~0ull);
+        assert(modes&(1ull<<output));assert(!(modes&(1ull<<1)));
+        assert(Vulkan::UiComposition::WideDisplayScene(true,Ratio(output),Ratio(output)));
+        assert(!Vulkan::UiComposition::WideDisplayScene(false,Ratio(output),Ratio(output)));
+        assert(Vulkan::UiComposition::PerspectiveMenuBackground(true,true,true,Ratio(output),Ratio(output)));
+        assert(!Vulkan::UiComposition::PerspectiveMenuBackground(true,true,true,16.f/9,Ratio(output)));
+    }
     session_output=1;
+    assert(!(SessionModes(~0ull)&(1ull<<Ps4RtOutput::Find(1600,1200))));
     assert(!Enabled() && !(SessionModes(~0ull)&(1ull<<Ps4RtOutput::Find(3440,1440))));
     assert(Content(Ps4RtOutput::Find(3440,1440)).width==2560);
     session_output=-1;
@@ -113,6 +134,9 @@ int main(int argc,char** argv) {
         assert(!WideDisplayScene(true,std::numeric_limits<float>::quiet_NaN(),aspect));
     }
     assert(!WideDisplayScene(true,16.f/9,16.f/9));
+    assert(!WideDisplayScene(true,-4.f/3,-4.f/3));
+    assert(!WideDisplayScene(true,0,0));
+    assert(!PerspectiveMenuBackground(true,true,true,-1,-1));
     const auto transition=RouteDisplay(false,true,0,0,3200,900);
     assert(transition.redirect&&transition.width==3200&&transition.height==900&&!transition.sample_composed);
     const auto reconstructed=RouteDisplay(true,true,3440,1440,3200,900);

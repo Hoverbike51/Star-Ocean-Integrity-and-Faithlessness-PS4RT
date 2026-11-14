@@ -16,10 +16,11 @@ inline Size NativeInput(int height,uint32_t output_width,uint32_t output_height,
     const double aspect=ultrawide && output_height?double(output_width)/output_height:16.0/9.0;
     return {uint32_t(std::max(1l,std::lround(height*aspect/2))*2),uint32_t(height)};
 }
-inline int ForOutput(int preset,uint32_t width,uint32_t height) {
-    // Original is a fixed 1080p input, not a ratio. Smaller outputs need a real
-    // scaled input; choose Quality rather than disabling a supported provider.
-    return preset<0 && (width<1920 || height<1080)?1:std::clamp(preset,-1,4);
+inline int ForOutput(int preset,uint32_t width,uint32_t height,bool native_aspect=false) {
+    // Original keeps a 1080-line input at the actual projection ratio. A 4:3
+    // 1440x1080 input is valid; it must not be rejected for being under 1920 wide.
+    const auto original=NativeInput(1080,width,height,native_aspect);
+    return preset<0 && (width<original.width || height<original.height)?1:std::clamp(preset,-1,4);
 }
 inline Size Input(int preset,uint32_t width,uint32_t height,bool ultrawide=false) {
     if(preset==Original) return ultrawide && height?
@@ -36,6 +37,6 @@ inline int ModelForInput(uint32_t width,uint32_t height,uint32_t output_width,ui
     return 5; // variable-ratio model for the original input at nonstandard ratios
 }
 inline Size RequestedInput(bool temporal,int preset,int native_height,uint32_t width,uint32_t height,bool ultrawide=false) {
-    return temporal?Input(ForOutput(preset,width,height),width,height,ultrawide):NativeInput(native_height,width,height,ultrawide);
+    return temporal?Input(ForOutput(preset,width,height,ultrawide),width,height,ultrawide):NativeInput(native_height,width,height,ultrawide);
 }
 }

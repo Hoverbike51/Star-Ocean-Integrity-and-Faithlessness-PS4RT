@@ -36,18 +36,36 @@ int main(int argc,char** argv) {
         const auto path=std::filesystem::path(argv[1])/("hud-projection-"+std::to_string(ordinal++)+".spv");
         std::ofstream out(path,std::ios::binary);out.write(reinterpret_cast<const char*>(code.data()),code.size()*4);assert(out.good());
     }
-    // At both wide ratios, the new viewport/projection pair preserves original
+    // At all supported ratios, the new viewport/projection pair preserves original
     // centered UI positions and admits edge-translated vertices before clipping.
     const auto& party=So5Hud::RuntimeResources[0];
-    for(auto size:{std::pair{1920.,1080.},{2560.,1080.},{3440.,1440.},{5120.,1440.}}) {
+    for(auto size:{std::pair{1920.,1080.},{2560.,1080.},{3440.,1440.},{5120.,1440.},{1280.,960.},{1600.,1200.},{1920.,1200.},{2560.,1600.}}) {
         const auto [w,h]=size;const auto fit=Ps4RtUltrawide::Hud(unsigned(w),unsigned(h));
-        const double factor=fit.scale_x*1920/w;
+        const auto packed=Ps4RtUltrawide::HudProjectionParam(float(w/1920),float(h/1080),0,0,true);
+        const float encoded=packed?std::bit_cast<float>(packed):1.f;
+        const double factor=encoded<0?1:encoded,yfactor=encoded<0?-encoded:1;
+        for(double logical:{0.,100.,540.,1080.}) {
+            const double pixel=((logical/540-1)*yfactor+1)*h/2;
+            assert(std::abs(pixel-(logical*fit.scale_y+fit.offset_y))<.001);
+        }
+        const auto full=Ps4RtUltrawide::HudScissor(unsigned(w),unsigned(h),{0,0,1920,1080},{float(w/1920),float(h/1080),0,0},true);
+        assert(full.left==0&&full.top==0&&full.right==w&&full.bottom==h);
+        const auto partial=Ps4RtUltrawide::HudScissor(unsigned(w),unsigned(h),{100,100,1800,1000},{float(w/1920),float(h/1080),0,0},true);
+        assert(std::abs(partial.left-(100*fit.scale_x+fit.offset_x))<=1);
+        assert(std::abs(partial.top-(100*fit.scale_y+fit.offset_y))<=1);
+        // A complete black/background quad must survive clipping and cover
+        // the exact output, without stretching any foreground glyphs.
+        const auto fill=So5Hud::BackgroundTransform(w,h);
+        assert(std::abs(((fill.x/960-1)*factor+1)*w/2)<.001);
+        assert(std::abs(((fill.y/540-1)*yfactor+1)*h/2)<.001);
+        assert(std::abs((((fill.x+1920*fill.sx)/960-1)*factor+1)*w/2-w)<.001);
+        assert(std::abs((((fill.y+1080*fill.sy)/540-1)*yfactor+1)*h/2-h)<.001);
         for(double logical:{0.,100.,960.,1920.}) {
             const double clip=logical/960-1;
             const double pixel=(clip*factor+1)*w/2;
             assert(std::abs(pixel-(logical*fit.scale_x+fit.offset_x))<.001);
         }
-        auto setting=So5Hud::Base(w/h>3?So5Hud::Aspect::Superwide:w/h>2?So5Hud::Aspect::Wide:So5Hud::Aspect::Standard).groups[0];
+        auto setting=So5Hud::Base(So5Hud::OutputAspect(w,h)).groups[0];
         const auto visual=So5Hud::Transform({100,900,1,1},party,setting,w,h);assert(visual);
         const double clip=(visual->x/960-1)*factor;
         assert(clip>=-1&&clip<=1);

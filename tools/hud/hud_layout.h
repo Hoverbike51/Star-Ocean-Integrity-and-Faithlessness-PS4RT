@@ -9,10 +9,14 @@
 
 namespace So5Hud {
 inline constexpr std::string_view MapId="so5-cusa03219-01.00-hud-research";
-inline constexpr size_t GroupCount=31;
+inline constexpr size_t GroupCount=33;
 inline constexpr size_t PartySlots=7;
 inline constexpr double PartySlotStep=252;
-enum class Aspect { Standard, Wide, Superwide };
+enum class Aspect { Standard, Wide, Superwide, FourThree, SixteenTen };
+// Classify supported output families without coupling presets to GPU settings.
+Aspect OutputAspect(double width,double height);
+enum class BackgroundFit { Automatic, Original, Extended };
+bool IsBackgroundGroup(size_t group);
 enum class Anchor { Original, TopLeft, TopRight, BottomLeft, BottomRight, Left, Right, Center, World };
 struct Rect { double x=0,y=0,w=0,h=0; };
 struct Spec { std::string_view id,label; Anchor preferred; bool centered=false,world=false,locked=false,hide=true; };
@@ -33,6 +37,8 @@ struct Preset {
     Aspect aspect=Aspect::Standard;
     std::array<Setting,GroupCount> groups{};
     std::vector<ElementSetting> elements;
+    // Missing JSON choices retain the automatic background policy.
+    std::array<BackgroundFit,GroupCount> backgrounds{};
     // Optional authoring reference; runtime anchors still use the actual output.
     int reference_width=0,reference_height=0;
     bool operator==(const Preset&) const=default;

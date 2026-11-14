@@ -9,7 +9,7 @@
 namespace {
 std::atomic<unsigned> factor{1};std::atomic<bool> combo{false};
 bool key=false,focused=true;std::map<SDL_JoystickID,unsigned> pads;
-unsigned Setting(){static unsigned value=[] {const char* s=std::getenv("PS4RT_FAST_FORWARD");return s&&s[0]=='1'?1u:3u;}();return value;}
+unsigned Setting(){static unsigned value=[] {const char* s=std::getenv("PS4RT_FAST_FORWARD");return s&&s[0]=='1'?1u:5u;}();return value;}
 bool KeyAllowed(){static bool allowed=[] {const char* s=std::getenv("PS4RT_KEY_MAP"),*axes=std::getenv("PS4RT_KEY_AXES");return (!s||!std::strstr(s,"F2"))&&(!axes||!std::strstr(axes,"F2"));}();return allowed;}
 bool PadAllowed(){static bool allowed=[] {const char* enabled=std::getenv("SO5_FAST_FORWARD_PAD"),*map=std::getenv("PS4RT_PAD_MAP");const char* mode=std::getenv("PS4RT_INPUT_MODE");return enabled&&enabled[0]=='1'&&(!map||!map[0])&&(!mode||std::strcmp(mode,"keyboard"));}();return allowed;}
 void Publish(){bool held=false;for(auto [id,state]:pads)held|=state==3;combo=held&&PadAllowed();factor=(key||combo.load())?Setting():1;}

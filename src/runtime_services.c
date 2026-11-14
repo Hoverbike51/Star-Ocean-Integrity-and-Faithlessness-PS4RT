@@ -138,6 +138,20 @@ static ABI int32_t video_recording_set_info(void) {
     note("video recording metadata acknowledged (console recording unavailable)");
     return ORBIS_OK;
 }
+/* The ending also initializes the PS4 broadcast service and changes its capture
+ * permission. These are acknowledgements only: no guest heap/pointers are used,
+ * no broadcast is started, and host capture (for example OBS) is unaffected.
+ * Keep the two verified imports explicit; other streaming APIs remain unknown. */
+static ABI int32_t live_streaming_initialize(uint64_t heap_size) {
+    (void)heap_size;
+    note("live streaming initialization acknowledged (console broadcasting unavailable)");
+    return ORBIS_OK;
+}
+static ABI int32_t live_streaming_enable(int32_t enable) {
+    (void)enable;
+    note("live streaming permission acknowledged (host capture unchanged)");
+    return ORBIS_OK;
+}
 /* Console screenshot configuration only. Capture requests remain unresolved;
  * host F12 screenshots are a separate presenter feature. Retain the overlay
  * parameters without inventing an interpretation of the console origin enum. */
@@ -614,6 +628,8 @@ static ABI int32_t audio_in_open(void) { return AUDIO_IN_NOT_OPENED; }
 
 static const RuntimeExport exports[]={
     {"sceVideoRecordingSetInfo",video_recording_set_info},
+    {"sceGameLiveStreamingInitialize",live_streaming_initialize},
+    {"sceGameLiveStreamingEnableLiveStreaming",live_streaming_enable},
     {"sceScreenShotDisable",screenshot_disable},
     {"sceScreenShotEnable",screenshot_enable},
     {"sceScreenShotSetOverlayImageWithOrigin",screenshot_overlay},

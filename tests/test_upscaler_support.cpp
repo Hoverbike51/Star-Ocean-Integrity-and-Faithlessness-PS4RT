@@ -40,6 +40,11 @@ int main(int argc,char** argv) {
     assert(Ps4RtScene::ModelForInput(1920,1080,2560,1440)==5);
     assert(Ps4RtScene::ForOutput(-1,1280,720)==1);
     assert(Ps4RtScene::ForOutput(-1,1920,1080)==-1);
+    assert(Ps4RtScene::ForOutput(-1,1440,1080,true)==-1);
+    assert(Ps4RtScene::ForOutput(-1,1280,960,true)==1);
+    assert((Ps4RtScene::RequestedInput(true,-1,1080,1440,1080,true)==Ps4RtScene::Size{1440,1080}));
+    assert((Ps4RtScene::NativeInput(2160,1600,1200,true)==Ps4RtScene::Size{2880,2160}));
+    assert((Ps4RtScene::NativeInput(2160,1920,1200,true)==Ps4RtScene::Size{3456,2160}));
     for(int preset=0;preset<5;++preset) {
         const auto input=Ps4RtScene::Input(preset,1280,720);assert(input.width<=1280 && input.height<=720);
     }

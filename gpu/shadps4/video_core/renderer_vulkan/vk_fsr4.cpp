@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "video_core/renderer_vulkan/vk_fsr4.h"
+#include "video_core/renderer_vulkan/vk_fsr_sdk24.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -73,6 +74,7 @@ struct Fsr4Upscaler::Impl {
     u64 next_frame_id = 1;
     std::deque<std::pair<u64, u64>> in_flight; ///< provider frame id, scheduler tick
     // ps4rt: FSR 4.1.1 (upscaler=fsr411): the replay of AMD's 4.1.1 DLL (fsr411/).
+    std::unique_ptr<FsrSdk24> sdk24;
     std::unique_ptr<Fsr411::Upscaler> fsr411;
     std::deque<u64> fsr411_ticks; ///< scheduler ticks of its recent frames (constant ring)
     std::string fsr411_described;
@@ -291,6 +293,13 @@ struct Fsr4Upscaler::Impl {
     }
 
     bool Record(const Frame& f) {
+        if(Ps4RtSettings::Get().upscaler==Ps4RtSettings::UpscalerFsrSdk24) {
+            if(!sdk24) sdk24=std::make_unique<FsrSdk24>(instance,scheduler);
+            const bool ok=sdk24->Record(f);
+            if(!ok) {Fail("AMD FSR SDK 2.4: "+sdk24->Problem(),!sdk24->Available());}
+            else problem.clear();
+            return ok;
+        }
         if (Ps4RtSettings::Get().upscaler == Ps4RtSettings::UpscalerFsr411) {
             return Record411(f);
         }

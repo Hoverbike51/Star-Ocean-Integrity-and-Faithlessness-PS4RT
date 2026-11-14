@@ -1,11 +1,11 @@
 > [!NOTE]
-> The SO5 Windows version is now 1.0.1-hotfix 1 and run better with few features! <br>
+> The current Windows source version is 1.1.1, with improved local performance diagnostics; the validated AMD FSR Vulkan scene-rendering correction is retained for the time being <br>
 > Tested with `Ryzen 9 9950X3D2` CPU with `Radeon RX 9070 XT` GPU running Windows 11 x64 <br>
 > Tested with `Intel i5 7th Gen` CPU with `Nvidia GTX 1050 Ti` GPU running Windows 10 x64 (laptop)
 
 > [!IMPORTANT]
-> The `21:9` and `32:9` aspect ratios are now rendered correctly, It might work better <br>
-> with the newly pre-trained shader model up to `4320p` for `FSR 4`  <br>
+> The `4:3`, `16:10`, `21:9` and `32:9` aspect ratios are supported. <br>
+> However, actual image-quality improvements are **not guaranteed** when using `AMD FSR 4 v7 (INT8)` shader models or `AMD FSR 4.1.2` through the official `SDK 2.4`.
 > I've worked hard to make the `HUD` [customizable!](https://github.com/Hoverbike51/hoverbike51.github.io/tree/main/SO5-HUD-Layout-Studio)
 
 # Star Ocean 5 — Windows port
@@ -19,7 +19,7 @@
 </p>
 
 
-Version **1.0.1**, for **Windows 10/11 x64**. This branch adapts the game-specific PS4RT
+Version **1.1.1**, for **Windows 10/11 x64**. This branch adapts the game-specific PS4RT
 compatibility runtime for Star Ocean: Integrity and Faithlessness (PS4).
 It is experimental and has not been validated across a complete playthrough or every PC.
 
@@ -35,7 +35,7 @@ but marked as untested; unrelated titles and PS3 editions are rejected.
 
 ## Playing
 
-![sample_16_9](docs/images/readme/sample/sample_16_9.png)
+![sample_cover](docs/images/readme/sample/sample_cover.png)
 
 For a player package, extract the entire folder and double-click **Star Ocean 5 Launcher.exe**.
 The root executable starts the real launcher in `bin/`. Keep the complete folder together;
@@ -63,8 +63,13 @@ limits in [window presentation](docs/LAUNCHER_GUIDE.md#video).
 The default scene input is 1080p. With reconstruction disabled, manual internal scene
 resolution can be selected up to 2160p subject to device/runtime checks. With reconstruction
 enabled, use the provider's presets. See [image settings and limits](docs/IN_GAME_MENU_GUIDE.md#image).
+**AMD FSR 3.1.5**, **AMD FSR 4 v7 (INT8)**, **AMD FSR 4.1.2** and **DLSS** are distinct
+reconstruction choices. The AMD FSR 4.1.2 option uses the official SDK 2.4 Vulkan provider;
+the effective provider remains subject to hardware checks and is reported in the performance overlay. Its signed provider binaries and app-local Microsoft
+runtime are included by the packaging scripts. See [integration and validation limits](docs/AMD_FSR_SDK.md).
 The launcher initially uses 84% of the work area, capped at 1580 x 940, with scrolling for
-long settings pages. Anisotropic filtering changes require a game restart.
+long settings pages. Its UI grows with available window space while keeping laptop controls
+readable; clickable areas and the native log console use the same scale. Anisotropic filtering changes require a game restart.
 Windowed output sets the initial client size and permits manual resizing. Native `21:9`/`32:9`
 scene rendering is separate from final image fitting and HUD layout. Prerendered video
 keeps its original aspect ratio. See [display settings](docs/LAUNCHER_GUIDE.md#video).
@@ -90,6 +95,13 @@ Enable it only for a diagnostic session; reports stay local and are excluded fro
 Enable **Performance capture tools** in Advanced to show the two controls in Logs & diagnostics.
 Enabling the tools alone does not start a recording.
 
+**1.1.1 diagnostic update:** capture reports now distinguish presentation stages, completed
+runtime synchronization waits and requested/effective reconstruction settings. Bounded
+contexts around frames over 100 ms include sampled busy threads and runtime wait snapshots.
+See the [updated capture procedure](docs/LAUNCHER_GUIDE.md#performance-probe-111).
+This improves evidence collection for performance investigations; it does not claim to fix
+the hardware-dependent slowdown reported in issue #11.
+
 ## Building from source on Windows
 
 These instructions apply to the source checkout, not to a player package.
@@ -107,7 +119,7 @@ From a terminal in the checkout:
 
 ```powershell
 .\build-windows.cmd
-& '.\dist\ps4rt-star-ocean-5-windows-x64-v1.0.1-latest\Star Ocean 5 Launcher.exe'
+& '.\dist\ps4rt-star-ocean-5-windows-x64-v1.1.1-latest\Star Ocean 5 Launcher.exe'
 ```
 
 The CMD build creates a separate, clean player folder without a ZIP by default.
@@ -123,7 +135,7 @@ OK: the native runtime, launcher, extractor and updater are complete without MSY
 ```
 Job is done!
 
-The folder is created under `dist/ps4rt-star-ocean-5-windows-x64-v1.0.1-latest/`.
+The folder is created under `dist/ps4rt-star-ocean-5-windows-x64-v1.1.1-latest/`.
 The name is read from `VERSION`; no user-specific absolute path is stored in the build scripts.
 Keep that entire folder for playing; source files and build intermediates stay in the checkout.
 The root launcher is a small native bootstrap, with no application DLLs at the root.

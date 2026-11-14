@@ -21,11 +21,17 @@ int main(int argc,char** argv) {
     s.native_scene=true;s.display_window_modes=Ps4RtOutput::Fitting(3840,2160);
     s.display_fullscreen_modes=s.display_window_modes.load();s.output_res=3;
     using namespace Ps4RtOverlay;
-    for (const auto* key : {L"Show GPU model",L"Show CPU model",L"Top center",L"Bottom center"}) {
+    for (const auto* key : {L"Show GPU model",L"Show CPU model",L"Top center",L"Bottom center",
+        L"Spatial anti-aliasing (FXAA)",
+        L"Optional SDR edge smoothing, including the HUD. May soften fine details.",
+        L"Custom 3D aspect: restart to change ratio. Menus and videos retain their proportions."}) {
         const auto* text=ps4rt_localize(languages[language],key);
         assert(text && *text);
         if(language) assert(std::wcscmp(text,key));
     }
+    assert(!std::strcmp(UpscalerLabel(Ps4RtSettings::UpscalerFsr3),"AMD FSR 3.1.5"));
+    assert(!std::strcmp(UpscalerLabel(Ps4RtSettings::UpscalerFsr4),"AMD FSR 4 v7 (INT8)"));
+    assert(!std::strcmp(UpscalerLabel(Ps4RtSettings::UpscalerFsrSdk24),"AMD FSR 4.1.2"));
     assert(ReconstructionLabel(0)=="Native · NO PRESET");
     assert(ReconstructionLabel(Ps4RtPerfStats::ReconstructionState(Ps4RtSettings::UpscalerDlss,0))=="DLAA");
     assert(ReconstructionLabel(Ps4RtPerfStats::ReconstructionState(Ps4RtSettings::UpscalerTaa,0))=="TAA · NO PRESET");

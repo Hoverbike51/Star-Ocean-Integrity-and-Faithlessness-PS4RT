@@ -1,6 +1,7 @@
 /* PS4 mutex handles backed by native Windows winpthreads. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "diagnostic_trace.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -80,7 +81,9 @@ static int32_t ensure_mutex(GuestMutex **mutex) {
 static ABI int32_t mutex_lock(GuestMutex **mutex) {
     int32_t e = ensure_mutex(mutex);
     if (e) return e;
+    So5DiagScope diagnostic = so5_diag_begin(SO5_DIAG_MUTEX, (uintptr_t)*mutex);
     e = orbis_error(pthread_mutex_lock(&(*mutex)->native));
+    so5_diag_end(diagnostic);
     if (!e) ++locks;
     return e;
 }
@@ -118,7 +121,9 @@ static ABI int32_t mutex_timedlock(GuestMutex **mutex, uint32_t usec) {
     if (e) return e;
     struct timespec end;
     if (deadline_after(&end, usec)) return orbis_error(EINVAL);
+    So5DiagScope diagnostic = so5_diag_begin(SO5_DIAG_MUTEX, (uintptr_t)*mutex);
     e = timed_error(pthread_mutex_timedlock(&(*mutex)->native, &end));
+    so5_diag_end(diagnostic);
     if (!e) ++locks;
     return e;
 }
@@ -160,14 +165,20 @@ static ABI int32_t cond_wait(GuestCond **cond, GuestMutex **mutex) {
     if (e) return e;
     if (!mutex || (uintptr_t)*mutex < 3) return orbis_error(EINVAL);
     ++waits;
-    return orbis_error(pthread_cond_wait(&(*cond)->native, &(*mutex)->native));
+    So5DiagScope diagnostic = so5_diag_begin(SO5_DIAG_CONDITION, (uintptr_t)*cond);
+    e = orbis_error(pthread_cond_wait(&(*cond)->native, &(*mutex)->native));
+    so5_diag_end(diagnostic);
+    return e;
 }
 static int32_t cond_wait_until(GuestCond **cond, GuestMutex **mutex, const struct timespec *end) {
     int32_t e = ensure_cond(cond);
     if (e) return e;
     if (!mutex || (uintptr_t)*mutex < 3 || !end) return orbis_error(EINVAL);
     ++waits;
-    return timed_error(pthread_cond_timedwait(&(*cond)->native, &(*mutex)->native, end));
+    So5DiagScope diagnostic = so5_diag_begin(SO5_DIAG_CONDITION, (uintptr_t)*cond);
+    e = timed_error(pthread_cond_timedwait(&(*cond)->native, &(*mutex)->native, end));
+    so5_diag_end(diagnostic);
+    return e;
 }
 static ABI int32_t cond_timedwait(GuestCond **cond, GuestMutex **mutex, uint32_t usec) {
     struct timespec end;

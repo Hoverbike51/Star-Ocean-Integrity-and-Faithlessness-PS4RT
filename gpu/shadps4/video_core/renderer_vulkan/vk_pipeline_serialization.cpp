@@ -54,7 +54,7 @@ namespace {
 // shader binary cache version. No cache deletion is needed for A/B comparisons.
 u32 CurrentShaderBinaryVersion(u64 program=0) {
     return RenderOptions::ShaderBinaryVersion(
-        Serialization::ShaderBinaryVersion + (Ps4RtHud::VertexProgram(program)?1u:0u),
+        Serialization::ShaderBinaryVersion + (Ps4RtHud::VertexProgram(program)?2u:0u),
         RenderOptions::ShaderBinarySalt(RenderOptions::Current().dref,
                                        AmdPathsOff::Current().shaderext) |
             (Ps4RtGpuWorkarounds::Current().preserve_wqm_helpers ? 4u : 0u) |

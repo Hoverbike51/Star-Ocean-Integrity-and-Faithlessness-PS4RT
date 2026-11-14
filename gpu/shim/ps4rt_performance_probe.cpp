@@ -2,6 +2,8 @@
 
 #include "ps4rt_performance_probe.h"
 #include "ps4rt_ui_layout_trace.h"
+#include "ps4rt_stall_windows.h"
+#include "../../src/diagnostic_trace.h"
 
 #include <algorithm>
 #include <atomic>
@@ -42,6 +44,10 @@ using Clock = std::chrono::steady_clock;
 namespace fs = std::filesystem;
 
 struct Frame {
+    PresentTiming timing{};
+    double outside_present_ms{};
+    int render_width{}, render_height{}, requested_provider{}, requested_preset{};
+    std::array<double, SO5_DIAG_PHASES> runtime_wait_ms{};
     std::uint64_t index{};
     double elapsed_ms{};
     double frame_ms{};
@@ -76,6 +82,8 @@ struct Frame {
     std::uint32_t busiest_thread_id{};
     std::string busiest_thread_name;
     std::uint32_t thread_count{};
+    unsigned cpu_logical_processors{};
+    double sample_interval_ms{-1.0}, sample_age_ms{-1.0}, sampling_ms{-1.0};
     float gpu_percent{-1.0f};
     double ram_gb{-1.0};
     double vram_gb{-1.0};
@@ -86,6 +94,15 @@ std::atomic_bool finished{false};
 std::atomic<std::uint64_t> gpu_wait_ns{0}, host_wait_ns{0}, present_wait_ns{0};
 std::mutex mutex;
 std::vector<Frame> frames;
+StallWindows stall_windows;
+struct StallSnapshot {
+    std::array<So5DiagThread, SO5_DIAG_THREADS> threads{};
+    std::size_t count{};
+    unsigned dropped_threads{};
+    Ps4RtPerfStats::Sample usage;
+};
+std::array<StallSnapshot, 32> stall_snapshots;
+std::array<std::uint64_t, SO5_DIAG_PHASES> previous_runtime_wait{};
 fs::path directory;
 std::string stem;
 std::string gpu_name;
@@ -252,7 +269,11 @@ void WriteReports(const std::vector<Frame>& captured) {
            "drain_pm4,drain_commands,drain_compute,drain_submission_end,drain_draw,"
            "drain_rasterizer,cpu_percent,busiest_thread_percent,busiest_thread_id,"
            "busiest_thread_name,thread_count,gpu_percent,"
-           "ram_gb,vram_gb\n";
+           "ram_gb,vram_gb,cpu_logical_processors,usage_interval_ms,usage_age_ms,usage_collection_ms,"
+           "outside_present_ms,acquire_resize_ms,compose_ms,submit_ms,swapchain_present_ms,retire_ms,"
+           "effective_provider_id,effective_preset_id,output_width,output_height,"
+           "render_width_sampled,render_height_sampled,requested_provider_id,requested_preset_id,"
+           "runtime_mutex_ms,runtime_condition_ms,runtime_semaphore_ms,runtime_join_ms\n";
     csv << std::fixed << std::setprecision(3);
     for (const Frame& f : captured) {
         csv << f.index << ',' << f.elapsed_ms << ',' << f.frame_ms << ',' << f.present_cpu_ms << ','
@@ -268,7 +289,18 @@ void WriteReports(const std::vector<Frame>& captured) {
             << ',' << f.drain_rasterizer << ',' << f.cpu_percent << ','
             << f.busiest_thread_percent << ',' << f.busiest_thread_id << ','
             << CsvEscape(f.busiest_thread_name) << ',' << f.thread_count << ',' << f.gpu_percent << ','
-            << f.ram_gb << ',' << f.vram_gb << '\n';
+            << f.ram_gb << ',' << f.vram_gb << ',' << f.cpu_logical_processors << ','
+            << f.sample_interval_ms << ',' << f.sample_age_ms << ',' << f.sampling_ms << ','
+            << f.outside_present_ms << ',' << Milliseconds(f.timing.acquire_ns) << ','
+            << Milliseconds(f.timing.compose_ns) << ',' << Milliseconds(f.timing.submit_ns) << ','
+            << Milliseconds(f.timing.present_ns) << ',' << Milliseconds(f.timing.retire_ns) << ','
+            << Ps4RtPerfStats::ReconstructionProvider(f.timing.reconstruction_state) << ','
+            << Ps4RtPerfStats::ReconstructionPreset(f.timing.reconstruction_state) << ','
+            << f.timing.output_width << ',' << f.timing.output_height << ','
+            << f.render_width << ',' << f.render_height << ',' << f.requested_provider << ','
+            << f.requested_preset;
+        for (unsigned p=1; p<SO5_DIAG_PHASES; ++p) csv << ',' << f.runtime_wait_ms[p];
+        csv << '\n';
     }
     csv.close();
 
@@ -279,7 +311,7 @@ void WriteReports(const std::vector<Frame>& captured) {
     double guest_wait = 0.0, snapshot = 0.0;
     double cpu_sum = 0.0, thread_sum = 0.0, gpu_sum = 0.0;
     double cpu_max = 0.0, thread_max = 0.0, gpu_max = 0.0;
-    std::uint64_t compiles = 0, skipped_draws = 0, over25 = 0, over33 = 0, over50 = 0;
+    std::uint64_t compiles = 0, skipped_draws = 0, over25 = 0, over33 = 0, over50 = 0, over100 = 0, over250 = 0, over500 = 0;
     std::uint64_t cpu_samples = 0, thread_samples = 0, gpu_samples = 0;
     struct ThreadAggregate {
         std::uint64_t samples{};
@@ -294,6 +326,9 @@ void WriteReports(const std::vector<Frame>& captured) {
             over25 += f.frame_ms > 25.0;
             over33 += f.frame_ms > 33.333;
             over50 += f.frame_ms > 50.0;
+            over100 += f.frame_ms > 100.0;
+            over250 += f.frame_ms > 250.0;
+            over500 += f.frame_ms > 500.0;
         }
         gpu_wait += f.gpu_wait_ms;
         host_wait += f.host_wait_ms;
@@ -369,8 +404,8 @@ void WriteReports(const std::vector<Frame>& captured) {
     std::ofstream json(json_path, std::ios::trunc);
     json << std::fixed << std::setprecision(3)
          << "{\n"
-         << "  \"format\": \"PS4RT performance capture 6\",\n"
-         << "  \"runtime_revision\": \"windows-binding-serial-quiet\",\n"
+         << "  \"format\": \"PS4RT performance capture 7\",\n"
+         << "  \"runtime_revision\": \"diagnostics-1.1.1\",\n"
          << "  \"version\": \"" << JsonEscape(version ? version : "unknown") << "\",\n"
          << "  \"gpu\": \"" << JsonEscape(gpu_name) << "\",\n"
          << "  \"upscaler\": \"" << Ps4RtSettings::UpscalerName(settings.upscaler.load()) << "\",\n"
@@ -390,7 +425,8 @@ void WriteReports(const std::vector<Frame>& captured) {
          << Percentile(frame_times, 0.50) << ", \"p95\": " << Percentile(frame_times, 0.95)
          << ", \"p99\": " << Percentile(frame_times, 0.99) << "},\n"
          << "  \"stutter_frames\": {\"over_25_ms\": " << over25 << ", \"over_33_3_ms\": "
-         << over33 << ", \"over_50_ms\": " << over50 << "},\n"
+         << over33 << ", \"over_50_ms\": " << over50 << ", \"over_100_ms\": " << over100
+         << ", \"over_250_ms\": " << over250 << ", \"over_500_ms\": " << over500 << "},\n"
          << "  \"usage_percent\": {\"cpu_mean\": " << (cpu_samples ? cpu_sum / cpu_samples : -1.0)
          << ", \"cpu_max\": " << cpu_max << ", \"busiest_thread_mean\": "
          << (thread_samples ? thread_sum / thread_samples : -1.0) << ", \"busiest_thread_max\": "
@@ -465,7 +501,51 @@ void WriteReports(const std::vector<Frame>& captured) {
              << aggregate.max_percent << "}";
     }
     if (!ranked_threads.empty()) json << '\n';
-    json << "  ]\n}\n";
+    unsigned dropped_registrations=0;
+    so5_diag_snapshot(nullptr,0,&dropped_registrations);
+    json << "  ],\n  \"runtime_thread_registry\": {\"lifetime_limit\": 256, \"dropped_registrations\": "
+         << dropped_registrations << "},\n  \"timing_semantics\": {"
+         << "\"present_stages\": \"CPU wall time; acquire includes resize/recreation; present includes submit lock\", "
+         << "\"outside_present_ms\": \"Frame interval minus this Present call; includes uninstrumented work, scheduling and pacing, not measured guest execution\", "
+         << "\"runtime_waits\": \"Completed instrumented calls, aggregated across parallel threads; never subtract from frame time\", "
+         << "\"render_size\": \"Sampled applied runtime setting, not a queued-frame resource measurement\", "
+         << "\"thread_snapshot\": \"Taken after worst stall; current waits may differ from the cause; totals are cumulative\", "
+         << "\"usage\": \"Independent approximately 500 ms samples; inspect usage_age_ms\"},\n"
+         << "  \"stall_context\": {\"threshold_ms\": 100, \"context_ms\": 2000, "
+         << "\"history_frame_limit\": 240, \"window_limit\": 32, \"dropped_stalls\": "
+         << stall_windows.dropped_stalls << ", \"windows\": [";
+    for (std::size_t i=0; i<stall_windows.count; ++i) {
+        const auto& w=stall_windows.windows[i]; const auto& snap=stall_snapshots[i];
+        json << (i ? "," : "") << "\n    {\"first_frame\": " << w.first
+             << ", \"trigger_frame\": " << w.trigger << ", \"worst_frame\": " << w.worst
+             << ", \"last_frame\": " << w.last << ", \"peak_ms\": " << w.peak_ms
+             << ", \"stalls\": " << w.stalls << ", \"dropped_thread_registrations\": "
+             << snap.dropped_threads << ", \"usage_age_ms\": " << snap.usage.sample_age_ms
+             << ", \"top_threads\": [";
+        bool wrote=false;
+        for (const auto& t : snap.usage.top_threads) {
+            if (!t.id) continue;
+            json << (wrote ? "," : "") << "{\"id\": " << t.id << ", \"name\": \""
+                 << JsonEscape(t.name) << "\", \"cpu_percent_one_core\": " << t.percent << "}";
+            wrote=true;
+        }
+        json << "], \"runtime_threads\": [";
+        for (std::size_t j=0; j<snap.count; ++j) {
+            const auto& t=snap.threads[j];
+            json << (j ? "," : "") << "{\"slot\": " << t.slot << ", \"id\": " << t.thread_id
+                 << ", \"runtime_exit_reported\": " << (t.live ? "false" : "true")
+                 << ", \"phase\": \"" << so5_diag_phase_name(t.phase)
+                 << "\", \"object\": " << t.object << ", \"current_wait_ms\": " << Milliseconds(t.age_ns)
+                 << ", \"completed_waits\": [";
+            for (unsigned p=1;p<SO5_DIAG_PHASES;++p) {
+                json << (p>1 ? "," : "") << "{\"reason\": \"" << so5_diag_phase_name(p)
+                     << "\", \"calls\": " << t.calls[p] << ", \"total_ms\": " << Milliseconds(t.total_ns[p]) << "}";
+            }
+            json << "]}";
+        }
+        json << "]}";
+    }
+    json << "\n  ]}\n}\n";
     json.close();
     std::printf("Performance capture written: %s.json and %s.csv\n", stem.c_str(), stem.c_str());
 }
@@ -494,6 +574,11 @@ void Start(const Vulkan::Instance& instance, const Vulkan::Rasterizer& rasterize
     previous_skipped_draws = Vulkan::g_ps4rt_pending_draws.load(std::memory_order_relaxed);
     capture_started = Ps4RtShaderCapture::GetStatistics();
     frames.clear();
+    stall_windows = {};
+    for (auto& snapshot : stall_snapshots) snapshot = {};
+    so5_diag_enable(1);
+    so5_diag_totals(previous_runtime_wait.data());
+    gpu_wait_ns = 0; host_wait_ns = 0; present_wait_ns = 0;
     frames.reserve(60 * 30 * 20); // up to about 20 minutes without reallocating at 60 FPS
     finished = false;
     Ps4RtUiLayout::capture.Reset();
@@ -518,7 +603,7 @@ void AddPresentWait(std::uint64_t nanoseconds) {
     if (Active()) present_wait_ns.fetch_add(nanoseconds, std::memory_order_relaxed);
 }
 
-void RecordFrame(std::uint64_t present_cpu_nanoseconds) {
+void RecordFrame(const PresentTiming& timing) {
     if (!Active()) return;
     const auto now = Clock::now();
     const std::uint64_t now_tsc = __rdtsc();
@@ -537,6 +622,7 @@ void RecordFrame(std::uint64_t present_cpu_nanoseconds) {
     Frame frame;
     {
         std::scoped_lock lock{mutex};
+        if (!Active()) return;
         frame.index = frames.size();
         if (frame.index == 0) started = previous_frame = now;
         frame.elapsed_ms = std::chrono::duration<double, std::milli>(now - started).count();
@@ -544,7 +630,19 @@ void RecordFrame(std::uint64_t present_cpu_nanoseconds) {
                              ? 0.0
                              : std::chrono::duration<double, std::milli>(now - previous_frame)
                                    .count();
-        frame.present_cpu_ms = Milliseconds(present_cpu_nanoseconds);
+        frame.timing = timing;
+        frame.present_cpu_ms = Milliseconds(timing.total_ns);
+        frame.outside_present_ms = frame.index ? std::max(0.0, frame.frame_ms-frame.present_cpu_ms) : 0.0;
+        const auto& graphics = Ps4RtSettings::Get();
+        frame.render_width = graphics.active_render_width.load();
+        frame.render_height = graphics.active_render_height.load();
+        frame.requested_provider = graphics.upscaler.load();
+        frame.requested_preset = graphics.preset.load();
+        std::array<std::uint64_t, SO5_DIAG_PHASES> waits{};
+        so5_diag_totals(waits.data());
+        for (unsigned p=1; p<SO5_DIAG_PHASES; ++p)
+            frame.runtime_wait_ms[p] = Milliseconds(Delta(waits[p],previous_runtime_wait[p]));
+        previous_runtime_wait=waits;
         frame.gpu_wait_ms = Milliseconds(gpu_wait_ns.exchange(0, std::memory_order_relaxed));
         frame.host_wait_ms = Milliseconds(host_wait_ns.exchange(0, std::memory_order_relaxed));
         frame.present_wait_ms = Milliseconds(present_wait_ns.exchange(0, std::memory_order_relaxed));
@@ -581,6 +679,10 @@ void RecordFrame(std::uint64_t present_cpu_nanoseconds) {
         frame.drain_rasterizer =
             ReasonDelta(pipeline, previous_pipeline, Vulkan::DrawPipe::ReasonRasterizer);
         frame.cpu_percent = sample.cpu_percent;
+        frame.cpu_logical_processors = sample.logical_processors;
+        frame.sample_interval_ms = sample.sample_interval_ms;
+        frame.sample_age_ms = sample.sample_age_ms;
+        frame.sampling_ms = sample.sampling_ms;
         frame.busiest_thread_percent = sample.busiest_thread_percent;
         frame.busiest_thread_id = sample.busiest_thread_id;
         frame.busiest_thread_name = sample.busiest_thread_name;
@@ -589,6 +691,13 @@ void RecordFrame(std::uint64_t present_cpu_nanoseconds) {
         frame.ram_gb = sample.ram_used_gb;
         frame.vram_gb = sample.vram_used_gb;
         frames.push_back(frame);
+        const int event = stall_windows.Observe(frame.index,frame.elapsed_ms,frame.frame_ms);
+        if (event >= 0) {
+            auto& snapshot=stall_snapshots[std::size_t(event)];
+            snapshot.count=so5_diag_snapshot(snapshot.threads.data(),snapshot.threads.size(),
+                                             &snapshot.dropped_threads);
+            snapshot.usage=sample;
+        }
     }
     if (now - previous_log_time >= std::chrono::seconds(5)) {
         const double interval_ms =
@@ -632,6 +741,7 @@ void RecordFrame(std::uint64_t present_cpu_nanoseconds) {
 
 void Finish() {
     if (finished.exchange(true) || !active.exchange(false)) return;
+    so5_diag_enable(0);
     finished_tsc = __rdtsc();
     pipeline_finished = capture_rasterizer ? capture_rasterizer->DrawPipelineTelemetry(true)
                                            : previous_pipeline;

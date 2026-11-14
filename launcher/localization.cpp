@@ -14,6 +14,7 @@ const CockpitTranslation kCockpit[] = {
 #include "localization_leader.inc"
 #include "localization_tweaks.inc"
 #include "localization_performance.inc"
+#include "localization_render.inc"
 #include "localization_shortcuts.inc"
 };
 #undef M

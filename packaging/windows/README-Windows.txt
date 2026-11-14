@@ -1,4 +1,4 @@
-Star Ocean 5 - Windows 10/11 x64 - Experimental version 1.0.1
+Star Ocean 5 - Windows 10/11 x64 - Experimental version 1.0.2
 ==========================================================
 
 Start Star Ocean 5 Launcher.exe at the root of the extracted player folder.

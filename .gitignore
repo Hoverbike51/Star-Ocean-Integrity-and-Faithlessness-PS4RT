@@ -449,3 +449,10 @@ secrets*
 !/fsr4_shaders/fsr4_model_v07_i8_ultraperf_4320_pass9.spv
 !/fsr4_shaders/fsr4_model_v07_i8_ultraperf_4320_post.spv
 !/fsr4_shaders/fsr4_model_v07_i8_ultraperf_4320_pre.spv
+
+# Official signed AMD SDK 2.4 and app-local Microsoft redistributables.
+!/gpu/third_party/amd-fsr-sdk24/bin/amd_fidelityfx_loader_vk.dll
+!/gpu/third_party/amd-fsr-sdk24/bin/amd_fidelityfx_upscaler_vk.dll
+!/gpu/third_party/amd-fsr-sdk24/bin/msvcp140.dll
+!/gpu/third_party/amd-fsr-sdk24/bin/vcruntime140.dll
+!/gpu/third_party/amd-fsr-sdk24/bin/vcruntime140_1.dll

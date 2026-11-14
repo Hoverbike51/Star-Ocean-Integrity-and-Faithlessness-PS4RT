@@ -329,7 +329,12 @@ bool ProgramFile(const fs::path& relative) {
     const std::string parent=Lower(relative.parent_path().generic_string());
     if ((parent == "docs/images/readme/launcher" || parent == "docs/images/readme/custom_menu") &&
         name.ends_with(".png")) return true;
-    if (name == "docs/launcher_guide.md" || name == "docs/in_game_menu_guide.md") return true;
+    if (name == "docs/launcher_guide.md" || name == "docs/in_game_menu_guide.md" || name == "docs/amd_fsr_sdk.md") return true;
+    if (parent == "bin/amd-fsr-sdk24") {
+        const std::string file=Lower(relative.filename().generic_string());
+        return file=="amd_fidelityfx_loader_vk.dll" || file=="amd_fidelityfx_upscaler_vk.dll" ||
+               file=="msvcp140.dll" || file=="vcruntime140.dll" || file=="vcruntime140_1.dll";
+    }
     if (relative.parent_path() == "bin") {
         return name == "bin/star ocean 5.exe" || name == "bin/star ocean 5 launcher.exe" ||
                name == "bin/pkgextractor.exe" || name == "bin/so5-updater.exe" || name.ends_with(".dll");

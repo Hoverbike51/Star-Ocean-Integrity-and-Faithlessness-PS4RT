@@ -15,7 +15,8 @@ namespace {
 using namespace Ps4RtLeader;
 void* expected_manager{};
 float expected_delta=1;
-unsigned updates{},queries{},changes{};
+unsigned updates{},queries{},changes{},formations{};
+bool refuse_formation{};
 unsigned portal_contacts{},portal_fires{};
 bool capture{},refuse{},duplicate{},restricted{},unknown{},no_current{};
 std::array<std::vector<unsigned char>,6> actors,statuses;
@@ -48,15 +49,44 @@ void PS4_SYSV_ABI NativeChange(void* manager,std::uint32_t old_handle,std::uint3
     std::uint32_t before{};assert(Read(owner_address,0x186a0,before) && old_handle==before);
     ++changes;
     if(!refuse) {
+        // Match the real transfer: actor references and control ownership move,
+        // independently of the general controller's persistent movement state.
+        for(auto& value:actors) {
+            const auto actor=reinterpret_cast<std::uintptr_t>(value.data());std::uint32_t target{};
+            if(Read(actor,0x4608,target) && target==old_handle)Store(actor,0x4608,next);
+        }
+        const auto old_control=reinterpret_cast<std::uintptr_t>(actors[(old_handle-42)/2].data())+0x5b00;
+        const auto new_control=reinterpret_cast<std::uintptr_t>(actors[(next-42)/2].data())+0x5b00;
+        if(Readable(old_control+0x50,4))Store(old_control,0x50,int(0));
+        if(Readable(new_control+0x50,4))Store(new_control,0x50,int(4));
         Store(owner_address,0x186a0,next);
         Store(controller_address,0xa8,reinterpret_cast<std::uintptr_t>(actors[(next-42)/2].data()));
     }
+}
+FormationVector* PS4_SYSV_ABI NativeFormation(FormationVector* out,void* root,int slot,void* actor,const FormationVector* input) {
+    assert(root==reinterpret_cast<void*>(owner_address) && slot==0 && actor==actors[0].data());
+    assert(input->x==0 && input->y==0 && input->z==0 && input->w==1);++formations;
+    if(!refuse_formation) {
+        const auto control=reinterpret_cast<std::uintptr_t>(actor)+0x5b00;
+        std::uintptr_t general{};std::uint32_t leader{};
+        assert(Read(control,0x48,general) && Read(owner_address,0x186a0,leader));
+        Store(general,0x2d8,int(2));Store(general,0x170,leader);
+    }
+    *out=*input;return out;
 }
 void PS4_SYSV_ABI NativePortalContact(void*,int){++portal_contacts;}
 bool PS4_SYSV_ABI NativePortalFire(void*,int){++portal_fires;return true;}
 void Refresh() {next_inspection=0;Inspect();Update(expected_manager,expected_delta);}
 void ResetCurrent() {
     Ps4RtSettings::Get().exploration_leader_enabled=true;ClearPortalGuard();
+    follower_repair={};
+    for(unsigned i=0;i<actors.size();++i)
+        Store(reinterpret_cast<std::uintptr_t>(actors[i].data())+0x5b00,0x50,int(i==0?4:0));
+    if(actors[0].size()>0x6000) {
+        const auto general=reinterpret_cast<std::uintptr_t>(actors[0].data())+0x5c00;
+        Store(general,0x2d8,int(0));Store(general,0x170,std::uint32_t(42));
+        Store(reinterpret_cast<std::uintptr_t>(actors[0].data()),0x4608,std::uint32_t(42));
+    }
     Ps4RtSettings::Get().exploration_leader=-1;ClearSelection();next_restore=0;direction_message=0;input_buttons=0;
     Store(owner_address,0x186a0,std::uint32_t(42));
     Store(controller_address,0xa8,reinterpret_cast<std::uintptr_t>(actors[0].data()));
@@ -80,18 +110,23 @@ int main() {
     sig(FollowUpdateAddress,FollowSignature);sig(0x4fbdb0,LensSignature);sig(0x188e70,ManagerSignature);
     sig(UpdateAddress,UpdateSignature);sig(CollectAddress,CollectSignature);sig(ControlSwitchAddress,ControlSwitchSignature);
     sig(0x29ae30,ReturnOwnerSignature);sig(0x29ba5d,ReturnContextSignature);sig(ReturnCallAddress,ReturnCallSignature);
+    sig(FormationAddress,FormationSignature);sig(0x18f2d4,FormationGuardsSignature);sig(0x29f280,FollowMovementSignature);
+    sig(0x18bf1b,FollowInitializationSignature);sig(0x25cdc0,FollowSetterSignature);
     sig(PortalContactAddress,PortalContactSignature);sig(PortalFireAddress,PortalFireSignature);
     sig(0x1be70e,PortalCountdownSignature);
     assert(Matches(image,"CUSA03219","01.00"));
     assert(!Matches(image,"CUSA00000","01.00") && !Matches(image,"CUSA03219","01.01"));
     assert(!Matches(image.first(100),"CUSA03219","01.00"));
-    for(auto at:{UpdateAddress,CollectAddress,ControlSwitchAddress,std::size_t(0x29ae30),std::size_t(0x29ba5d),ReturnCallAddress,PortalContactAddress,PortalFireAddress,std::size_t(0x1be70e)}) {
+    for(auto at:{UpdateAddress,CollectAddress,ControlSwitchAddress,std::size_t(0x29ae30),std::size_t(0x29ba5d),ReturnCallAddress,PortalContactAddress,PortalFireAddress,std::size_t(0x1be70e),std::size_t(0x18bf1b),std::size_t(0x25cdc0),FormationAddress,std::size_t(0x18f2d4),std::size_t(0x29f280)}) {
         memory[at]^=1;assert(!Matches(image,"CUSA03219","01.00"));memory[at]^=1;
     }
     Initialize(image,"CUSA03219","01.01");assert(!Available());
     // Two tiny eligibility fixtures return false/true; real game code is not executed.
     const unsigned char allowed[]={0x31,0xc0,0xc3},blocked[]={0xb0,0x01,0xc3};
     std::memcpy(memory+0x1000,allowed,sizeof allowed);std::memcpy(memory+0x1010,blocked,sizeof blocked);
+    // Owned getter fixture returns actor's embedded control object (SysV RDI).
+    const unsigned char control_getter[]={0x48,0x8d,0x87,0x00,0x5b,0,0,0xc3};
+    std::memcpy(memory+0x1020,control_getter,sizeof control_getter);
     DWORD old{};assert(VirtualProtect(memory+0x1000,4096,PAGE_EXECUTE_READ,&old));
     FlushInstructionCache(GetCurrentProcess(),memory+0x1000,4096);
     std::vector<unsigned char> scene(0x80),owner(0x18800),controller(0x200),party(0x22000);
@@ -106,15 +141,17 @@ int main() {
     Store(ptr(owner),0x340+0x48,unsigned(2));Store(ptr(owner),0x28,ptr(controller));
     Store(ptr(owner),0x78,int(-1));Store(base,0xb83aa0,ptr(scene));Store(base,0xb839f8,ptr(party));
     Store(ptr(owner),0x186a8,ptr(scene));
-    Store(native_table,0x3a0,base+0x1000);
+    Store(native_table,0x3a0,base+0x1000);Store(native_table,0x388,base+0x1020);
     for(int i=0;i<9;++i)Store(ptr(party),0x54+0x21f80+i*4,std::int16_t(i<6?i:-1));
     for(int id=0;id<6;++id) {
-        actors[id].resize(0x5a10);statuses[id].resize(0x20);
+        actors[id].resize(0x6100);statuses[id].resize(0x20);
         Map(actors[id]);Map(statuses[id]);
         Store(ptr(actors[id]),0,native_table);Store(ptr(actors[id]),0x54,std::uint32_t(42+id*2));
         Store(ptr(actors[id]),0x5a00,ptr(statuses[id]));Store(ptr(statuses[id]),8,std::int16_t(id));
+        const auto control=ptr(actors[id])+0x5b00,general=ptr(actors[id])+0x5c00;
+        Store(control,0x38,ptr(actors[id]));Store(control,0x48,general);Store(general,8,control);
     }
-    original=&NativeUpdate;collect=&NativeCollect;change=&NativeChange;installed=true;
+    original=&NativeUpdate;collect=&NativeCollect;change=&NativeChange;formation=&NativeFormation;installed=true;
     portal_contact=&NativePortalContact;portal_fire=&NativePortalFire;
     ResetCurrent();assert(GetView().available_mask==63 && updates==1);
     // No inspection or native query work during ordinary gameplay without a request.
@@ -209,6 +246,51 @@ int main() {
     Store(native_table,0x3a0,base+0x1010);AutomaticReturn(expected_manager,48,42);assert(selection_active);
     assert(queries==hot_queries && changes==hot_changes);
     Store(native_table,0x3a0,base+0x1000);ResetCurrent();
+    // Regression: the switch already updates actor.follow_target, but Fidel's
+    // movement controller may still be idle or targeting his own handle.
+    ResetCurrent();assert(Request(3));Refresh();
+    const auto fidel=ptr(actors[0]),fidel_control=fidel+0x5b00,fidel_general=fidel+0x5c00;
+    Store(fidel,0x4608,std::uint32_t(48));const auto repairs=follower_repairs.load(),formation_before=formations;
+    Refresh();std::uint32_t follow{};int movement{};
+    assert(Read(fidel_general,0x170,follow) && follow==48);
+    assert(Read(fidel_general,0x2d8,movement) && movement==2);
+    assert(follower_repairs==repairs+1 && formations==formation_before+1);
+    const auto stable_memory_queries=windows_memory_queries;
+    for(int i=0;i<100;++i)Refresh();
+    assert(follower_repairs==repairs+1 && formations==formation_before+1 && windows_memory_queries==stable_memory_queries);
+    // A second leader handover must retarget the movement controller as well.
+    assert(Request(2));Refresh();Refresh();assert(Read(fidel_general,0x170,follow) && follow==46);
+    assert(Request(3));Refresh();Refresh();assert(Read(fidel_general,0x170,follow) && follow==48);
+    // Self-targeting follow state is repaired by native initialization too.
+    Store(fidel_general,0x170,std::uint32_t(42));follower_repair.next_attempt=0;Refresh();
+    assert(Read(fidel_general,0x170,follow) && follow==48);
+    // Preserve script/control ownership, explicit movement and actor retirement.
+    Store(fidel_general,0x2d8,int(0));
+    const Guard follower_guards[]={
+        {fidel_control,0x50,4,4},{fidel_control,0x50,5,4},
+        {fidel_general,0x1a0,1,1},{fidel_general,0x1a3,1,1},{fidel_general,0x2e4,0x20,1},
+        {fidel_general,0x2d8,1,4},{fidel_general,0x2d8,3,4},
+        {fidel_control,0x38,0,8},{fidel_general,8,0,8},
+        {fidel,0x4670,1,4},{fidel,0x4674,1,4},{fidel,0x64,1,4}};
+    for(const auto& g:follower_guards) {
+        std::uint64_t saved{};std::memcpy(&saved,reinterpret_cast<void*>(g.object+g.offset),g.size);
+        std::memcpy(reinterpret_cast<void*>(g.object+g.offset),&g.bad,g.size);
+        const auto calls=formations;follower_repair.next_attempt=0;Refresh();assert(formations==calls);
+        std::memcpy(reinterpret_cast<void*>(g.object+g.offset),&saved,g.size);
+    }
+    Store(fidel_general,0x2d8,int(2));Store(fidel_general,0x170,std::uint32_t(50));
+    auto calls=formations;Refresh();assert(formations==calls);
+    Store(fidel_general,0x2d8,int(0));Store(fidel,0x4608,std::uint32_t(50));
+    Refresh();assert(formations==calls && Read(fidel,0x4608,follow) && follow==50);
+    Store(fidel,0x4608,std::uint32_t(42));Store(owner_address,0x1858c,unsigned(1));
+    Refresh();assert(formations==calls);Store(owner_address,0x1858c,unsigned(0));
+    ResetCurrent();assert(Request(3));Refresh();refuse_formation=true;calls=formations;
+    for(int i=0;i<20;++i)Refresh();assert(formations==calls+1);
+    for(int i=0;i<5;++i){follower_repair.next_attempt=0;Refresh();}
+    assert(formations==calls+3);refuse_formation=false;
+    ResetCurrent();assert(Request(3));Refresh();Refresh();
+    assert(Read(fidel_general,0x2d8,movement) && movement==2);
+    ResetCurrent();calls=formations;Refresh();assert(formations==calls); // Fidel remains player.
     // One mapped direction edge switches once, wraps in party order, skips
     // unavailable entries and never consumes/modifies native battle input.
     interested_until=0;
@@ -224,6 +306,17 @@ int main() {
     Store(owner_address,0x1858c,unsigned(0));step();assert(changes==count);
     // O/P routes to the same native queue without modifying sampled gamepad
     // buttons. Capture/focus loss cancels a queued keyboard action.
+    // L2/R2 protect both D-pad and O/P, including an already queued edge.
+    // Releasing a trigger with D-pad still held must not manufacture a new edge.
+    for(auto trigger:{0x100u,0x200u,0x300u}) {
+        ResetCurrent();count=changes;
+        Input(trigger|0x20,false);Cycle(1,false);assert(!Request(1));step();assert(changes==count);
+        Input(0x20,false);step();assert(changes==count);
+        Input(0,false);Input(0x20,false);Input(trigger,false);step();assert(changes==count);
+        Input(0,false);Input(0x20,false);step();assert(GetView().current==1);
+        Input(0,false);Refresh();assert(Request(2));Input(trigger,false);step();assert(!pending && changes==count+1);
+        Input(0,false);step();assert(changes==count+1);
+    }
     ResetCurrent();Cycle(1,false);step();assert(GetView().current==1);
     Cycle(-1,false);step();assert(GetView().current==0);
     Cycle(-1,false);Cycle(0,true);count=changes;step();assert(changes==count);
@@ -281,6 +374,8 @@ int main() {
     portal_guard.at=GetTickCount64()-1500;
     interested_until=0;
     auto fires=portal_fires;auto contacts=portal_contacts;
+    Refresh(); // Finish one-time initialization, then close selector diagnostics.
+    interested_until=0;
     const auto before_guard_queries=queries,before_guard_windows=windows_memory_queries;
     for(unsigned i=0;i<600;++i) {
         PortalContact(portals,5);step();assert(!PortalFire(portals,5));

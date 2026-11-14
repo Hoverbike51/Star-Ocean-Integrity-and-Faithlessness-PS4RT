@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ps4rt_perf_stats.h"
+#include "ps4rt_perf_windows.h"
 
 #include <chrono>
 #include <mutex>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 #include <cmath>
 #include <cstring>
@@ -15,7 +15,6 @@
 #include <pdh.h>
 #include <pdhmsg.h>
 #include <psapi.h>
-#include <tlhelp32.h>
 
 namespace Ps4RtPerfStats {
 
@@ -24,28 +23,10 @@ namespace {
 std::mutex mutex;
 Sample latest;
 std::once_flag started;
+Windows::Clock::time_point sampled_at{};
 
-uint64_t Ticks(const FILETIME& time) {
-    return (uint64_t(time.dwHighDateTime) << 32) | time.dwLowDateTime;
-}
-
-std::string ThreadName(HANDLE thread) {
-    PWSTR wide{};
-    if (FAILED(GetThreadDescription(thread, &wide)) || !wide) {
-        return "<unnamed>";
-    }
-    const int bytes = WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
-    std::string result = bytes > 1 ? std::string(size_t(bytes), '\0') : std::string{"<unnamed>"};
-    if (bytes > 1) {
-        WideCharToMultiByte(CP_UTF8, 0, wide, -1, result.data(), bytes, nullptr, nullptr);
-        result.pop_back();
-    }
-    LocalFree(wide);
-    return result;
-}
-
-// This process's 3D-engine utilization from Windows GPU Engine counters. Restrict the
-// measurement to the selected Vulkan adapter's LUID. Unavailable/invalid data stays negative.
+// Selected process and adapter only. Use the busiest graphics/compute engine;
+// summing concurrent engines overstates GPU saturation. Invalid data stays unavailable.
 class GpuUsage {
 public:
     explicit GpuUsage(const Vulkan::Instance& instance) {
@@ -75,34 +56,35 @@ public:
         if (!query || PdhCollectQueryData(query) != ERROR_SUCCESS) {
             return -1.0f;
         }
-        DWORD size = 0, count = 0;
-        if (PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, &size, &count,
-                                         nullptr) != PDH_MORE_DATA) {
-            return -1.0f;
-        }
-        buffer.resize(size);
-        auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
-        if (PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, &size, &count,
-                                         items) != ERROR_SUCCESS) {
-            return -1.0f;
-        }
-        double total = 0.0;
-        bool matched = false;
-        for (DWORD i = 0; i < count; ++i) {
-            const wchar_t* name = items[i].szName;
-            const auto status = items[i].FmtValue.CStatus;
-            const double value = items[i].FmtValue.doubleValue;
-            if (name && (status == PDH_CSTATUS_VALID_DATA || status == PDH_CSTATUS_NEW_DATA) &&
-                std::isfinite(value) && value >= 0.0 &&
-                MatchesGpuEngine(name, GetCurrentProcessId(), luid_high, luid_low)) {
-                total += value;
-                matched = true;
+        // Wildcard instances can change between the size query and read (hotplug/process exit).
+        for (unsigned attempt = 0; attempt < 3; ++attempt) {
+            DWORD size = 0, count = 0;
+            if (PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100,
+                                             &size, &count, nullptr) != PDH_MORE_DATA || !size)
+                return -1.0f;
+            buffer.resize(size);
+            auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
+            const auto result = PdhGetFormattedCounterArrayW(counter,
+                PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, &size, &count, items);
+            if (result == PDH_MORE_DATA) continue; // Re-query size from zero on the next attempt.
+            if (result != ERROR_SUCCESS) return -1.0f;
+            double busiest = -1.0;
+            for (DWORD i = 0; i < count; ++i) {
+                const auto status = items[i].FmtValue.CStatus;
+                const double value = items[i].FmtValue.doubleValue;
+                if (items[i].szName &&
+                    (status == PDH_CSTATUS_VALID_DATA || status == PDH_CSTATUS_NEW_DATA) &&
+                    std::isfinite(value) && value >= 0.0 &&
+                    MatchesGpuEngine(items[i].szName, pid, luid_high, luid_low))
+                    busiest = std::max(busiest, value);
             }
+            return busiest < 0.0 ? -1.0f : std::clamp(float(busiest), 0.0f, 100.0f);
         }
-        return matched ? std::clamp(float(total), 0.0f, 100.0f) : -1.0f;
+        return -1.0f;
     }
 
 private:
+    const DWORD pid = GetCurrentProcessId();
     PDH_HQUERY query = nullptr;
     PDH_HCOUNTER counter = nullptr;
     uint32_t luid_low = 0, luid_high = 0;
@@ -127,64 +109,28 @@ std::string CpuModel() {
 void Run(const Vulkan::Instance* instance) {
     GpuUsage gpu{*instance};
     const std::string gpu_model{instance->GetModelName()}, cpu_model = CpuModel();
-    FILETIME created, ended, kernel, user, now;
-    uint64_t last_process = 0, last_wall = 0;
-    std::unordered_map<DWORD, uint64_t> last_thread_ticks;
-    const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
+    CpuCounter process;
+    Windows::ThreadUsage threads;
+    const unsigned processors = Windows::LogicalProcessors();
+    auto previous_sample = Windows::Clock::time_point{};
     constexpr double GiB = 1024.0 * 1024.0 * 1024.0;
     while (true) {
+        const auto begin = Windows::Clock::now();
         Sample s;
         s.gpu_name = gpu_model;
         s.cpu_name = cpu_model;
-        GetSystemTimeAsFileTime(&now);
-        uint64_t wall_delta = 0;
+        s.logical_processors = processors;
+        if (previous_sample != Windows::Clock::time_point{})
+            s.sample_interval_ms = std::chrono::duration<double, std::milli>(begin - previous_sample).count();
+        previous_sample = begin;
+        FILETIME created{}, ended{}, kernel{}, user{};
         if (GetProcessTimes(GetCurrentProcess(), &created, &ended, &kernel, &user)) {
-            const uint64_t process = Ticks(kernel) + Ticks(user), wall = Ticks(now);
-            if (last_wall) {
-                wall_delta = wall - last_wall;
-                s.cpu_percent = CpuPercent(process - last_process, wall_delta, cores);
-            }
-            last_process = process;
-            last_wall = wall;
+            s.cpu_percent = process.Read(Windows::Ticks(kernel) + Windows::Ticks(user),
+                                         Windows::Now(), processors);
+        } else {
+            process.Reset();
         }
-        // Process-wide CPU usage hides a saturated game thread on high-core-count CPUs. Sample
-        // every thread twice a second and report the busiest one as a percentage of one core.
-        std::unordered_map<DWORD, uint64_t> current_thread_ticks;
-        const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-        if (snapshot != INVALID_HANDLE_VALUE) {
-            THREADENTRY32 entry{.dwSize = sizeof(THREADENTRY32)};
-            if (Thread32First(snapshot, &entry)) {
-                do {
-                    if (entry.th32OwnerProcessID != GetCurrentProcessId()) continue;
-                    ++s.thread_count;
-                    const HANDLE thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE,
-                                                     entry.th32ThreadID);
-                    if (!thread) continue;
-                    FILETIME thread_created{}, thread_ended{}, thread_kernel{}, thread_user{};
-                    if (GetThreadTimes(thread, &thread_created, &thread_ended, &thread_kernel,
-                                       &thread_user)) {
-                        const uint64_t ticks = Ticks(thread_kernel) + Ticks(thread_user);
-                        current_thread_ticks.emplace(entry.th32ThreadID, ticks);
-                        if (wall_delta) {
-                            const auto previous = last_thread_ticks.find(entry.th32ThreadID);
-                            if (previous != last_thread_ticks.end() && ticks >= previous->second) {
-                                const float percent = std::clamp(
-                                    float(double(ticks - previous->second) * 100.0 /
-                                          double(wall_delta)), 0.0f, 100.0f);
-                                if (percent > s.busiest_thread_percent) {
-                                    s.busiest_thread_percent = percent;
-                                    s.busiest_thread_id = entry.th32ThreadID;
-                                    s.busiest_thread_name = ThreadName(thread);
-                                }
-                            }
-                        }
-                    }
-                    CloseHandle(thread);
-                } while (Thread32Next(snapshot, &entry));
-            }
-            CloseHandle(snapshot);
-        }
-        last_thread_ticks = std::move(current_thread_ticks);
+        threads.Read(s);
         PROCESS_MEMORY_COUNTERS memory{};
         if (K32GetProcessMemoryInfo(GetCurrentProcess(), &memory, sizeof(memory))) {
             s.ram_used_gb = double(memory.WorkingSetSize) / GiB;
@@ -198,11 +144,14 @@ void Run(const Vulkan::Instance* instance) {
             s.vram_total_gb = double(instance->GetDeviceMemoryBudgetNow()) / GiB;
         }
         s.gpu_percent = gpu.Percent();
+        const auto end = Windows::Clock::now();
+        s.sampling_ms = std::chrono::duration<double, std::milli>(end - begin).count();
         {
             std::scoped_lock lock{mutex};
             latest = std::move(s);
+            sampled_at = end;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::this_thread::sleep_until(begin + std::chrono::milliseconds(500));
     }
 }
 
@@ -216,7 +165,20 @@ void Start(const Vulkan::Instance& instance) {
 
 Sample Latest() {
     std::scoped_lock lock{mutex};
-    return latest;
+    Sample result = latest;
+    if (sampled_at != Windows::Clock::time_point{}) {
+        result.sample_age_ms = std::chrono::duration<double, std::milli>(
+            Windows::Clock::now() - sampled_at).count();
+        if (result.sample_age_ms > 2000.0) {
+            result.cpu_percent = result.gpu_percent = result.busiest_thread_percent = -1.0f;
+            result.ram_used_gb = result.ram_total_gb = -1.0;
+            result.vram_used_gb = result.vram_total_gb = -1.0;
+            result.busiest_thread_id = result.thread_count = 0;
+            result.busiest_thread_name.clear();
+            result.top_threads = {};
+        }
+    }
+    return result;
 }
 
 } // namespace Ps4RtPerfStats

@@ -825,3 +825,5 @@
 {"BNowx2l588E#libkernel","sceKernelGetProcessTimeCounterFrequency"},
 {"NWtTN10cJzE#libSceLibcInternalExt","sceLibcHeapGetTraceInfo"},
 {"Fc8qxlKINYQ#libSceVideoRecording","sceVideoRecordingSetInfo"},
+{"kvYEw2lBndk#libSceGameLiveStreaming","sceGameLiveStreamingInitialize"},
+{"dWM80AX39o4#libSceGameLiveStreaming","sceGameLiveStreamingEnableLiveStreaming"},

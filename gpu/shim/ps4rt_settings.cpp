@@ -31,7 +31,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     const float f = float(std::atof(value.c_str()));
     const int i = std::atoi(value.c_str());
     static const char* const overlay_keys[] = {"overlay_fps", "overlay_frametime", "overlay_upscaler",
-                                               "overlay_gpu", "overlay_cpu", "overlay_ram", "overlay_vram", "overlay_version"};
+                                               "overlay_gpu", "overlay_cpu", "overlay_ram", "overlay_vram", "overlay_version", "overlay_cpu_thread"};
     for (unsigned item = 0; item < std::size(overlay_keys); ++item) {
         if (key == overlay_keys[item]) {
             const unsigned bit = 1u << item;
@@ -54,7 +54,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         return;
     }
     if (key == "overlay_layout") {
-        v.overlay_layout = i == 1 ? 1 : 0;
+        v.overlay_layout = std::clamp(i, 0, 2);
         return;
     }
     if (key == "menu_tab") {
@@ -255,18 +255,26 @@ void SetSceneUpscaler(int selected, bool object_motion) {
     // Scaled presets provide a real input no larger than the selected output.
     if (v.native_scene && !Ps4RtOutput::TemporalAllowed(v.output_res)) selected = UpscalerOff;
     if (selected != UpscalerOff && selected != UpscalerFsr3 &&
-        selected != UpscalerFsr4 && selected != UpscalerFsr411 && selected != UpscalerDlss) selected = UpscalerOff;
+        selected != UpscalerFsr4 && selected != UpscalerFsr411 && selected != UpscalerDlss && selected != UpscalerFsrSdk24) selected = UpscalerOff;
     if(selected==UpscalerFsr3 && v.fsr3_configured && !v.fsr3_available) selected=UpscalerOff;
     if(selected==UpscalerDlss && v.dlss_configured && !v.dlss_supported) selected=UpscalerOff;
+    if(selected==UpscalerFsrSdk24 && v.fsr_sdk24_configured && !v.fsr_sdk24_supported) selected=UpscalerOff;
     const bool temporal = selected != UpscalerOff;
     if(temporal && v.native_scene) {
-        const auto output=Ps4RtUltrawide::Content(v.output_res);
-        v.scene_preset=Ps4RtScene::ForOutput(v.scene_preset,output.width,output.height);
+        // Before executable validation, size the request for its intended aspect.
+        // Frame-start validation will recheck it against the real projection or
+        // its guarded 16:9 fallback; no camera memory is patched here.
+        const bool pending=Ps4RtUltrawide::session_output.load()<0;
+        const bool adjusted=pending?Ps4RtUltrawide::Adjusted(v.output_res):Ps4RtUltrawide::Enabled();
+        const auto output=pending&&adjusted?
+            Ps4RtOutput::Size{OutputWidths[v.output_res],OutputHeights[v.output_res]}:
+            Ps4RtUltrawide::Content(v.output_res);
+        v.scene_preset=Ps4RtScene::ForOutput(v.scene_preset,output.width,output.height,adjusted);
     }
     v.jitter = temporal;
     v.object_motion = temporal && object_motion;
     v.reactive = false;
-    v.spatial_aa = false;
+    // Spatial AA is an independent, explicit final-image filter.
     v.fsr1 = false;
     v.rcas = !temporal && v.sharpen;
     v.rcas_strength = int(std::clamp(v.sharpness.load(), 0.0f, 1.0f) * 100.0f);
@@ -304,6 +312,17 @@ void ConfigureDlssSupport(bool available, const char* problem) {
         SetSceneUpscaler(UpscalerFsr3,false);
         std::printf("Upscaler: DLSS unavailable (%s); selected %s\n",
                     kept.empty() ? "ps4rt_dlss.dll or nvngx_dlss.dll missing" : kept.c_str(),UpscalerName(v.upscaler));
+    }
+}
+
+namespace { std::mutex sdk_name_mutex; std::string sdk_provider_name="AMD FSR (SDK 2.4)"; }
+void SetFsrSdkProviderName(const std::string& name) {std::lock_guard lock(sdk_name_mutex);sdk_provider_name=name;}
+std::string FsrSdkProviderName() {std::lock_guard lock(sdk_name_mutex);return sdk_provider_name;}
+void ConfigureFsrSdkSupport(bool available, const char* problem) {
+    auto& v=Get();v.fsr_sdk24_supported=available;v.fsr_sdk24_configured=true;
+    if(v.upscaler==UpscalerFsrSdk24 && !available) {
+        std::printf("Upscaler: AMD FSR SDK 2.4 unavailable (%s); selecting a supported fallback\n",problem?problem:"GPU policy");
+        SetSceneUpscaler(v.fsr3_available?UpscalerFsr3:UpscalerOff,false);
     }
 }
 
@@ -358,6 +377,7 @@ void Save() {
                  int(v.overlay_items >> 3 & 1), int(v.overlay_items >> 4 & 1), int(v.overlay_items >> 5 & 1),
                  int(v.overlay_items >> 6 & 1), v.overlay_scale.load(), v.overlay_corner.load(),
                  v.overlay_opacity.load(), v.overlay_layout.load(), v.menu_tab.load(), int(v.overlay_items >> 7 & 1));
+    std::fprintf(file, "overlay_cpu_thread=%d\n", int(v.overlay_items >> 8 & 1));
     std::fprintf(file, "overlay_gpu_model=%d\noverlay_cpu_model=%d\n",
                  int(v.overlay_gpu_model.load()), int(v.overlay_cpu_model.load()));
     std::fprintf(file,
@@ -396,7 +416,7 @@ const char* PresetName(int preset) {
 }
 
 const char* UpscalerName(int upscaler) {
-    static constexpr const char* names[UpscalerCount] = {"off", "fsr3", "fsr4", "fsr411", "taa", "dlss"};
+    static constexpr const char* names[UpscalerCount] = {"off", "fsr3", "fsr4", "fsr411", "taa", "dlss", "fsrsdk24"};
     return names[std::clamp(upscaler, 0, UpscalerCount - 1)];
 }
 

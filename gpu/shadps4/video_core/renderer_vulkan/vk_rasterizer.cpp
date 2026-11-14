@@ -948,7 +948,6 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         regs.color_control.mode != AmdGpu::ColorControl::OperationMode::Disable &&
         regs.color_target_mask.GetMask(0) && regs.color_buffers[0] &&
         DisplayRegistry::IsDisplayBuffer(regs.color_buffers[0].Address());
-    if (writes_display) ;
     const bool frame_start = writes_display && (!Ps4RtSettings::Get().native_scene ||
         Ps4RtCamera::SceneCopy(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
                                   pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash));
@@ -1129,14 +1128,15 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }
     }
     if(Ps4RtHud::VertexProgram(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash)) {
-        push_data.motion_param=Ps4RtHud::Active()&&!Regs().IsClipDisabled()&&target_scale[0]>target_scale[1]+.001f&&target_offset[0]==0?
-            std::bit_cast<u32>(target_scale[1]/target_scale[0]):0;
+        push_data.motion_param=Ps4RtUltrawide::HudProjectionParam(target_scale[0],target_scale[1],
+            target_offset[0],target_offset[1],Ps4RtHud::Active()&&!Regs().IsClipDisabled());
     }
     pipeline->BindResources(set_writes, push_data);
     // ps4rt: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).
     draw_jitter = {};
     if (upscaler->Enabled() && db_desc.first && db_desc.first == camera_motion->Depth() &&
+        Ps4RtCamera::JitterGeometry(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,regs.IsClipDisabled()) &&
         (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
         draw_jitter = upscaler->Jitter();
     }
@@ -1267,12 +1267,13 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     push_data.yscale *= target_scale[1];
     push_data.yoffset = push_data.yoffset * target_scale[1] + target_offset[1];
     if(Ps4RtHud::VertexProgram(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash)) {
-        push_data.motion_param=Ps4RtHud::Active()&&!Regs().IsClipDisabled()&&target_scale[0]>target_scale[1]+.001f&&target_offset[0]==0?
-            std::bit_cast<u32>(target_scale[1]/target_scale[0]):0;
+        push_data.motion_param=Ps4RtUltrawide::HudProjectionParam(target_scale[0],target_scale[1],
+            target_offset[0],target_offset[1],Ps4RtHud::Active()&&!Regs().IsClipDisabled());
     }
     pipeline->BindResources(set_writes, push_data);
     draw_jitter = {};
-    if (upscaler->Enabled() && db_desc.first && db_desc.first == camera_motion->Depth()) {
+    if (upscaler->Enabled() && db_desc.first && db_desc.first == camera_motion->Depth() &&
+        Ps4RtCamera::JitterGeometry(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,Regs().IsClipDisabled())) {
         draw_jitter = upscaler->Jitter();
     }
     UpdateDynamicState(pipeline, is_indexed);
@@ -3063,8 +3064,8 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
                 target_scale={layout.scale_x*coordinates_x,layout.scale_y*coordinates_y};
                 target_offset={layout.offset_x,layout.offset_y};
                 if(Ps4RtHud::Active()&&native_coordinates&&Ps4RtHud::VertexProgram(vs)&&!regs.IsClipDisabled()) {
-                    target_scale={redirect.width/1920.f,layout.scale_y};
-                    target_offset[0]=0;
+                    target_scale={redirect.width/1920.f,redirect.height/1080.f};
+                    target_offset={0,0};
                 }
             }
         }
@@ -3413,20 +3414,14 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
                 .width=output.width,.height=output.height,.display=display,.clip_disabled=regs.IsClipDisabled()});
         }
         if (target_scale[0] != 1.0f || target_scale[1] != 1.0f || target_offset[0] || target_offset[1]) {
-            const auto scale = [](s32 v, float f) { return s32(std::lround(float(v) * f)); };
             const bool layout=Ps4RtHud::Active()&&Ps4RtUltrawide::Enabled()&&
                 Ps4RtHud::VertexProgram(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash);
-            // Full native scissors must admit HUD relocated into the wide wings.
-            // Partial scissors still belong to centered menu/list windows.
-            const bool full=layout&&vp_scsr.top_left_x<=0&&vp_scsr.top_left_y<=0&&
-                vp_scsr.bottom_right_x>=1920&&vp_scsr.bottom_right_y>=1080;
             const auto output=Ps4RtUltrawide::Content(Ps4RtSettings::Get().output_res);
-            const auto safe=Ps4RtUltrawide::Hud(output.width,output.height);
-            const float xs=layout?safe.scale_x:target_scale[0],xo=layout?safe.offset_x:target_offset[0];
-            const s32 x0 = full?0:std::max(0,scale(vp_scsr.top_left_x, xs)+s32(std::lround(xo)));
-            const s32 y0 = std::max(0,scale(vp_scsr.top_left_y, target_scale[1])+s32(std::lround(target_offset[1])));
-            const s32 x1 = full?s32(output.width):scale(vp_scsr.top_left_x + s32(vp_scsr.GetWidth()), xs)+s32(std::lround(xo));
-            const s32 y1 = scale(vp_scsr.top_left_y + s32(vp_scsr.GetHeight()), target_scale[1])+s32(std::lround(target_offset[1]));
+            const auto box=Ps4RtUltrawide::HudScissor(output.width,output.height,
+                {vp_scsr.top_left_x,vp_scsr.top_left_y,
+                 vp_scsr.top_left_x+s32(vp_scsr.GetWidth()),vp_scsr.top_left_y+s32(vp_scsr.GetHeight())},
+                {target_scale[0],target_scale[1],target_offset[0],target_offset[1]},layout);
+            const auto [x0,y0,x1,y1]=box;
             scissors.push_back({
                 .offset = {x0, y0},
                 .extent = {u32(std::max(x1 - x0, 0)), u32(std::max(y1 - y0, 0))},

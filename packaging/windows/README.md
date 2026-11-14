@@ -98,7 +98,7 @@ The following explicit form remains supported:
 ```
 
 The result is created under
-`dist\ps4rt-star-ocean-5-windows-x64-v1.0.1-latest\`. It contains only the executables, required DLLs,
+`dist\ps4rt-star-ocean-5-windows-x64-v1.0.2-latest\`. It contains only the executables, required DLLs,
 assets, integrated PKG extractor, license, and player documentation. Only a static native
 `Star Ocean 5 Launcher.exe` entry remains at the root; the real launcher, runtime, extractor,
 updater and DLLs are in `bin/`. Assets remain under their existing root subdirectories. Source files, CMake/Ninja
@@ -132,8 +132,8 @@ Players do not need Python, MSYS2, or PowerShell.
 Test either the player folder or the ZIP from PowerShell with a `PATH` that does not contain MSYS2:
 
 ```powershell
-.\packaging\windows\smoke-test.ps1 .\dist\ps4rt-star-ocean-5-windows-x64-v1.0.1-latest
-.\packaging\windows\smoke-test.ps1 .\dist\ps4rt-star-ocean-5-windows-x64-v1.0.1-latest.zip
+.\packaging\windows\smoke-test.ps1 .\dist\ps4rt-star-ocean-5-windows-x64-v1.0.2-latest
+.\packaging\windows\smoke-test.ps1 .\dist\ps4rt-star-ocean-5-windows-x64-v1.0.2-latest.zip
 ```
 
 ## Graphics menu

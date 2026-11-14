@@ -65,7 +65,7 @@ void LiveState::Reset(const Preset& p) {
     Validate(p);std::atomic_store(&pending,std::shared_ptr<const LiveSnapshot>{});
     std::atomic_store(&current,std::make_shared<const LiveSnapshot>(LiveSnapshot{p,0,CompileElements(p)}));applied=0;++generation;
 }
-void LiveState::Queue(const Preset& p,std::uint64_t rev,std::uint32_t force) {
+void LiveState::Queue(const Preset& p,std::uint64_t rev,std::uint64_t force) {
     std::atomic_store_explicit(&pending,std::make_shared<const LiveSnapshot>(LiveSnapshot{p,rev,CompileElements(p),force}),std::memory_order_release);
 }
 bool LiveState::Boundary() {
@@ -82,14 +82,15 @@ std::string Encode(const LiveRequest& r) {
     if(r.force_groups)o["force_groups"]=r.force_groups;return j::serialize(o);
 }
 LiveRequest DecodeRequest(std::string_view text) {
-    auto o=MessageObject(text);std::uint32_t force=0;
+    auto o=MessageObject(text);std::uint64_t force=0;
     if(o.contains("force_groups")){const auto n=Number(o,"force_groups");
-        if(n>=(1u<<GroupCount))Fail("Invalid development HUD mask.");force=std::uint32_t(n);o.erase("force_groups");}
+        static_assert(GroupCount<64);
+        if(n>=(std::uint64_t{1}<<GroupCount))Fail("Invalid development HUD mask.");force=n;o.erase("force_groups");}
     Keys(o,{"protocol","session","owner","action","layout"});
     LiveRequest r{Text(o,"session",64),Text(o,"owner",64),Text(o,"action",16),Text(o,"layout",1048576)};
     r.force_groups=force;
     if(force&&r.action!="preview")Fail("Development visibility is available only in live preview.");
-    for(size_t n=0;n<GroupCount;++n)if((force&(1u<<n))&&!RuntimeSupported(n))Fail("Unbound HUD cannot be forced visible.");
+    for(size_t n=0;n<GroupCount;++n)if((force&(std::uint64_t{1}<<n))&&!RuntimeSupported(n))Fail("Unbound HUD cannot be forced visible.");
     if(r.owner.empty()||r.action.empty())Fail("Missing live owner/action.");return r;
 }
 std::string Encode(const LiveReply& r) {
@@ -193,7 +194,7 @@ LiveClient::LiveClient(std::filesystem::path p):prepared(std::move(p)),owner(Liv
 }
 LiveClient::~LiveClient(){ {std::scoped_lock lock(mutex);closing=true;}SetEvent(stop);wake.notify_all();if(worker.joinable())worker.join();CloseHandle(stop);}
 void LiveClient::Connect() {{std::scoped_lock lock(mutex);enabled=true;updated=true;action="heartbeat";}wake.notify_one();}
-void LiveClient::Preview(const Preset& p,std::uint32_t force) {Validate(p);{std::scoped_lock lock(mutex);latest=p;force_groups=force;has_preview=true;enabled=true;updated=true;action="preview";}wake.notify_one();}
+void LiveClient::Preview(const Preset& p,std::uint64_t force) {Validate(p);{std::scoped_lock lock(mutex);latest=p;force_groups=force;has_preview=true;enabled=true;updated=true;action="preview";}wake.notify_one();}
 void LiveClient::Apply(const Preset& p) {Validate(p);{std::scoped_lock lock(mutex);latest=p;force_groups=0;has_preview=true;enabled=true;updated=true;action="apply";}wake.notify_one();}
 void LiveClient::Cancel() {{std::scoped_lock lock(mutex);enabled=false;has_preview=false;force_groups=0;updated=true;action="cancel";}wake.notify_one();}
 void LiveClient::RestoreOriginal() {{std::scoped_lock lock(mutex);enabled=false;has_preview=false;force_groups=0;updated=true;action="restore";}wake.notify_one();}
@@ -201,7 +202,7 @@ std::string LiveClient::Status(){std::scoped_lock lock(mutex);return status;}
 bool LiveClient::Connected(){std::scoped_lock lock(mutex);return connected;}
 void LiveClient::Run() {
     for(;;) {
-        Preset p;std::string operation;std::uint32_t force=0;bool retry=false;
+        Preset p;std::string operation;std::uint64_t force=0;bool retry=false;
         {std::unique_lock lock(mutex);wake.wait_for(lock,std::chrono::milliseconds(500),[&]{return updated||closing;});
             if(closing)return;if(!updated&&!enabled)continue;p=latest;operation=updated?action:"heartbeat";force=force_groups;updated=false;}
         try {

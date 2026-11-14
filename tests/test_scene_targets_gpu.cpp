@@ -49,9 +49,9 @@ int main() {
     const VkBufferCreateInfo bc{.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,.size=bytes,.usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     const VmaAllocationCreateInfo ac{.flags=VMA_ALLOCATION_CREATE_MAPPED_BIT|VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,.usage=VMA_MEMORY_USAGE_AUTO_PREFER_HOST};
     assert(vmaCreateBuffer(instance.GetAllocator(),&bc,&ac,&buffer,&allocation,&mapped)==VK_SUCCESS);
-    for(const auto output:std::array<Ps4RtScene::Size,4>{{{3840,2160},{3440,1440},{5120,1440},{1920,1080}}})
+    for(const auto output:std::array<Ps4RtScene::Size,6>{{{3840,2160},{3440,1440},{5120,1440},{1920,1080},{1600,1200},{1920,1200}}})
     for(const auto preset:{1,2,3,4,0,-1,720,1080,1440,2160}) {
-        const bool wide=output.width*9>output.height*16;
+        const bool wide=output.width*9!=output.height*16; // any adjusted 3D projection
         const auto requested=preset>4?Ps4RtScene::NativeInput(preset,output.width,output.height,wide):
             Ps4RtScene::Input(preset,output.width,output.height,wide);
         const auto generation=targets.Generation();const auto old=targets.Size();
@@ -141,5 +141,22 @@ int main() {
     // Restore the proxy layout contract before its normal resolve/destruction.
     cmd=scheduler.CommandBuffer();
     transition(native4k.image,vk::ImageLayout::eTransferSrcOptimal,native4k.layout);
-    scheduler.Finish();vmaDestroyBuffer(instance.GetAllocator(),buffer,allocation);
+    scheduler.Finish();
+    // Resolving a single 4K colour pixel into its 1080p compute intermediate
+    // must average the four source pixels, not select one with a point filter.
+    runtime.Transit(&color,vk::ImageLayout::eTransferSrcOptimal,
+        vk::PipelineStageFlagBits2::eTransfer,vk::AccessFlagBits2::eTransferRead);
+    runtime.FlushBarriers();
+    const vk::BufferImageCopy native_copy{.imageSubresource={vk::ImageAspectFlagBits::eColor,0,0,1},
+        .imageExtent={1920,1080,1}};
+    scheduler.CommandBuffer().copyImageToBuffer(color.GetImage(),vk::ImageLayout::eTransferSrcOptimal,
+        buffer,native_copy,dispatch);
+    scheduler.Finish();
+    assert(vmaInvalidateAllocation(instance.GetAllocator(),allocation,0,VK_WHOLE_SIZE)==VK_SUCCESS);
+    const auto* resolved=static_cast<const unsigned char*>(mapped.pMappedData);
+    const size_t native_last=(1920ull*1080-1)*4;
+    for(size_t c=0;c<3;++c) assert(resolved[native_last+c]>=63 && resolved[native_last+c]<=65);
+    assert(resolved[native_last+3]==255 && resolved[native_last-4]==0);
+    std::puts("PASS: 4K colour resolve filters subpixel coverage instead of point sampling");
+    vmaDestroyBuffer(instance.GetAllocator(),buffer,allocation);
 }

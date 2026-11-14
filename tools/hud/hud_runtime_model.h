@@ -9,6 +9,7 @@
 
 namespace So5Hud {
 // Size and hashes identify the native layout XML chunk, never its ISF container.
+struct Identity;
 struct ResourceBinding {
     std::string_view resource;
     size_t group;
@@ -16,11 +17,14 @@ struct ResourceBinding {
     std::uint64_t english,french;
     Rect bounds;
 };
-extern const std::array<ResourceBinding,25> RuntimeResources;
+extern const std::array<ResourceBinding,31> RuntimeResources;
 // Minimap frame/reference bounds, shared with its separate procedural streams.
 extern const ResourceBinding MinimapComposite;
 extern const ResourceBinding BattleMenuBackground;
 extern const ResourceBinding Subtitles;
+extern const ResourceBinding PauseControls;
+// Select the pause footer subtree, independently of its animated background.
+bool IsPauseControls(const Identity&,std::span<const std::uint64_t>);
 extern const std::array<ResourceBinding,4> ProceduralResources;
 bool RuntimeSupported(size_t group);
 Rect GroupBounds(const ResourceBinding&);
@@ -58,6 +62,7 @@ struct Identity {
     int handle{};
     std::array<std::uint64_t,7> roots{};
     std::uint64_t excluded{};
+    bool leaf_only=false;
     const NativeResource* native{};
     std::vector<std::pair<std::uint64_t,std::uint32_t>> object_keys;
     bool Accepts(std::span<const std::uint64_t> ancestors) const;
@@ -65,6 +70,12 @@ struct Identity {
 Identity IdentifyHandle(const ResourceBinding*,int handle);
 Identity IdentifyHandle(const NativeResource*,int handle);
 struct Visual {float x,y,sx,sy;};
+bool IsBackgroundGroup(size_t group);
+// Fill the output from the centered, uniformly fitted native 1920x1080 plane.
+// Applied exclusively to identified background draws, never menu text/video.
+Visual BackgroundTransform(double width,double height);
+// Explicit JSON sizing wins over the automatic background policy.
+Visual BackgroundTransform(const Preset&,size_t group,double width,double height);
 // Keys follow resource -> outer ancestors -> leaf. Lookup is precompiled off
 // the render thread; no strings, parsing or allocations in this operation.
 std::optional<Visual> ElementTransform(Visual,const Identity&,std::span<const std::uint64_t>,

@@ -2,6 +2,7 @@
  * Priority-ordered semaphores are approximated by FIFO order. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "diagnostic_trace.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -80,6 +81,7 @@ static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) 
         *tail=&w; ++s->active;
         uint64_t deadline=timeout ? now_ns()+(uint64_t)*timeout*1000 : 0;
         struct timespec end={.tv_sec=(time_t)(deadline/1000000000),.tv_nsec=(long)(deadline%1000000000)};
+        So5DiagScope diagnostic=so5_diag_begin(SO5_DIAG_SEMAPHORE,id);
         while (!w.done) {
             int e=timeout ? pthread_cond_timedwait(&w.event,&lock,&end) : pthread_cond_wait(&w.event,&lock);
             if (e==ETIMEDOUT && !w.done) {
@@ -88,6 +90,7 @@ static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) 
                 *p=w.next; w.result=ERR(60); w.done=1; ++timed_out;
             } else if (e!=ETIMEDOUT) host_check(e);
         }
+        so5_diag_end(diagnostic);
         result=w.result;
         if (!result) ++acquired;
         if (timeout) {

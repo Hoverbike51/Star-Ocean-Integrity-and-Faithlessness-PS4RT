@@ -682,6 +682,18 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     const bool capture_performance = Ps4RtPerformanceProbe::Active() && !is_reusing_frame && is_game_frame;
     const auto performance_start = capture_performance ? std::chrono::steady_clock::now()
                                                        : std::chrono::steady_clock::time_point{};
+    Ps4RtPerformanceProbe::PresentTiming timing{};
+    auto checkpoint = performance_start;
+    const auto measure = [&](std::uint64_t& value) {
+        if (!capture_performance) return;
+        const auto now = std::chrono::steady_clock::now();
+        value = std::chrono::duration_cast<std::chrono::nanoseconds>(now-checkpoint).count();
+        checkpoint = now;
+    };
+    // Save queued-frame state before free_frame publishes it for reuse.
+    if (capture_performance) {
+        timing.reconstruction_state = frame->reconstruction_state;
+    }
     // Free the frame for reuse
     const auto free_frame = [&] {
         if (!is_reusing_frame) {
@@ -715,6 +727,11 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         }
     }
 
+    measure(timing.acquire_ns);
+    if (capture_performance) {
+        const auto size = swapchain.GetExtent();
+        timing.output_width=size.width; timing.output_height=size.height;
+    }
     // Reset fence for queue submission. Do it here instead of GetRenderFrame() because we may
     // skip frame because of slow swapchain recreation. If a frame skip occurs, we skip signal
     // the frame's present fence and future GetRenderFrame() call will hang waiting for this frame.
@@ -846,7 +863,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     info.AddWait(frame->ready_semaphore, frame->ready_tick);
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
+    measure(timing.compose_ns);
     scheduler.Flush(info);
+    measure(timing.submit_ns);
 
     // Present to swapchain.
     {
@@ -856,14 +875,16 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         }
     }
 
+    measure(timing.present_ns);
     free_frame();
     if (!is_reusing_frame && is_game_frame) {
         DebugState.IncFlipFrameNum();
     }
     if (capture_performance) {
-        const auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - performance_start).count();
-        Ps4RtPerformanceProbe::RecordFrame(static_cast<std::uint64_t>(nanoseconds));
+        measure(timing.retire_ns);
+        timing.total_ns = timing.acquire_ns + timing.compose_ns + timing.submit_ns +
+                          timing.present_ns + timing.retire_ns;
+        Ps4RtPerformanceProbe::RecordFrame(timing);
     }
 }
 
