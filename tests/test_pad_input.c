@@ -29,6 +29,7 @@ static SDL_Scancode test_scancode_from_key(SDL_Keycode key, SDL_Keymod *mods) {
 #undef SDL_GetScancodeFromKey
 #undef SDL_GetGamepads
 
+int runtime_pause_active(void) { return 0; } /* runtime_crowbar_pause.c: not paused in tests */
 static bool overlay_capture;
 int ps4rtgpu_overlay_captures_input(void) { return overlay_capture; }
 static uint32_t observed_leader_buttons;
