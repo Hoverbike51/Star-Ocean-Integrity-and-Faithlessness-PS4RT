@@ -18,6 +18,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 static pthread_mutex_t pause_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t pause_cond = PTHREAD_COND_INITIALIZER;
@@ -27,6 +30,7 @@ static int paused; /* written under pause_lock, read lock-free by runtime_pause_
  * clock costs one relaxed load. */
 static int enabled;
 static unsigned clock_seq;
+static uint64_t input_epoch; /* completed pauses, read atomically by the input adapter */
 static uint64_t paused_since_ns, paused_total_ns;
 static uint64_t last_movie_frame_ns; /* read and written with __atomic builtins */
 static char control_dir[1024];
@@ -69,6 +73,7 @@ int runtime_pause_gate(void) {
 
 /* The game is paused from Crowbar's Guide (read lock-free by the pad). */
 int runtime_pause_active(void) { return __atomic_load_n(&paused, __ATOMIC_ACQUIRE); }
+uint64_t runtime_pause_input_epoch(void) { return __atomic_load_n(&input_epoch, __ATOMIC_ACQUIRE); }
 
 /* A movie frame was just queued (runtime_videodec.c): a pause now would cut the movie. */
 void runtime_pause_movie_frame(void) { __atomic_store_n(&last_movie_frame_ns, host_now_ns(), __ATOMIC_RELEASE); }
@@ -82,9 +87,12 @@ static void write_state(long seq, const char *word) {
     fprintf(out, "%ld %s\n", seq, word);
     if (fclose(out) != 0) { remove(tmp); return; }
 #ifdef _WIN32
-    remove(path); /* rename does not replace an existing file on Windows */
-#endif
+    /* Publish one complete answer. Keep the previous state if replacement fails;
+     * deleting it first exposes a missing-file interval to Crowbar's reader. */
+    if (!MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) remove(tmp);
+#else
     if (rename(tmp, path) != 0) remove(tmp);
+#endif
 }
 
 /* Sequentially consistent, so a reader that still sees the old state read its host time before
@@ -105,7 +113,9 @@ static void set_paused(int on) {
     } else if (!on && paused) {
         clock_write_begin();
         __atomic_store_n(&paused_total_ns, paused_total_ns + (host_now_ns() - paused_since_ns), __ATOMIC_RELAXED);
-        __atomic_store_n(&paused, 0, __ATOMIC_RELAXED);
+        /* Publish before unpausing: a sampler that observes running can see the epoch. */
+        __atomic_add_fetch(&input_epoch, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&paused, 0, __ATOMIC_RELEASE);
         clock_write_end();
         pthread_cond_broadcast(&pause_cond);
     }

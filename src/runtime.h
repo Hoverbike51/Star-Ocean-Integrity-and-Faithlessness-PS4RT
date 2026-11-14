@@ -14,6 +14,8 @@ void runtime_restart(void);
 /* runtime_crowbar_pause.c: pause from Crowbar's Guide (PS4RT_CONTROL_DIR) */
 int runtime_pause_gate(void);
 int runtime_pause_active(void);
+/* Changes after each completed Crowbar pause, even if no pad sample ran while paused. */
+uint64_t runtime_pause_input_epoch(void);
 uint64_t runtime_pause_now_ns(void);
 void runtime_pause_movie_frame(void);
 #define ABI __attribute__((sysv_abi))

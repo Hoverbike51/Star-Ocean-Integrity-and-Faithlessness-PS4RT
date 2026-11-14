@@ -58,6 +58,10 @@ int main(void) {
     uint64_t b = guest_ns();
     set_paused(0);
     assert(b == a);
+    const uint64_t epoch=runtime_pause_input_epoch();
+    set_paused(0);assert(runtime_pause_input_epoch()==epoch);
+    set_paused(1);assert(runtime_pause_input_epoch()==epoch);
+    set_paused(0);assert(runtime_pause_input_epoch()==epoch+1);
     puts("crowbar pause: ok");
     return 0;
 }

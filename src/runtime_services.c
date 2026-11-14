@@ -518,8 +518,13 @@ static ABI int32_t trophy_unlock(int32_t ctx,int32_t handle,int32_t id,int32_t *
 /* Crowbar's trophy test profile (crowbar-sdk 1.3): the same unlock as the game's call. */
 int runtime_crowbar_unlock(int id) {
     if (id<0 || id>127) return -1;
-    int32_t platinum=-1;
-    trophy_unlock(0,0,id,&platinum);
+    /* Share the game's journal writer, but keep its always-successful guest API
+     * unchanged. Crowbar's acknowledgement must reflect actual persistence. */
+    enum TrophyFileResult recorded=trophy_file_note(id);
+    if(recorded!=TROPHY_FILE_SAVED && recorded!=TROPHY_FILE_UNCHANGED) {
+        fprintf(stderr,"Crowbar: trophy %d request refused (journal result %d)\n",id,recorded);
+        return -1;
+    }
     printf("Crowbar: trophy %d unlocked on request\n",id);
     return 0;
 }

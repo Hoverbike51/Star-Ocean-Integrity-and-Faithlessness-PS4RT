@@ -492,6 +492,24 @@ static void replay_sample(PadData *d) {
 /* After the menu or the text dialog closes, buttons still held (the Cross that accepted a
  * name) stay hidden until released: the game would take them as a new press. */
 static int hold_after_capture;
+/* Crowbar owns the buttons during its pause. The epoch catches a complete pause
+ * during which the game never polled the pad (it was parked at its flip gate). */
+static uint64_t crowbar_seen_epoch;
+static uint32_t crowbar_held_buttons;
+static void crowbar_filter_resumed_buttons(PadData *d) {
+    uint32_t held=d->buttons;
+    if(d->l2)held|=BTN_L2;
+    if(d->r2)held|=BTN_R2;
+    const uint64_t epoch=runtime_pause_input_epoch();
+    if(epoch!=crowbar_seen_epoch) {
+        crowbar_seen_epoch=epoch;
+        crowbar_held_buttons=held;
+    }
+    crowbar_held_buttons&=held; // Each button becomes available once individually released.
+    d->buttons&=~crowbar_held_buttons;
+    if(crowbar_held_buttons&BTN_L2)d->l2=0;
+    if(crowbar_held_buttons&BTN_R2)d->r2=0;
+}
 static void sample(PadData *d) {
     sample_host(d);
     if (ps4rtgpu_overlay_captures_input()) {
@@ -500,7 +518,7 @@ static void sample(PadData *d) {
     /* Paused from Crowbar's Guide: the controller drives Crowbar's menu, not the game; the button
      * that resumed the game stays hidden until released (crowbar-sdk 1.2, SPEC section 4). */
     if (runtime_pause_active()) {
-        ps4rtgpu_leader_input(0,1);hold_after_capture=1;click.side=-1;
+        ps4rtgpu_leader_input(0,1);click.side=-1;
         d->buttons=0; d->left_x=d->left_y=d->right_x=d->right_y=0x80; d->l2=d->r2=0;
         return;
     }
@@ -513,6 +531,7 @@ static void sample(PadData *d) {
     uint8_t *axes[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
     for (int i=0;i<4;++i) if (injected.stick[i]>=0) *axes[i]=(uint8_t)injected.stick[i];
     play_click(d);
+    crowbar_filter_resumed_buttons(d);
     if (hold_after_capture) {
         if (d->buttons) d->buttons=0;
         else hold_after_capture=0;

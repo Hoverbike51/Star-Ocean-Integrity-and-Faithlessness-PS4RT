@@ -88,7 +88,7 @@ MINGW*|MSYS*)
             dlss-validation-test dlss-device-gate-test transition-snapshot-gpu-test cpu-image-writeback-test \
             color-export-test image-subresource-test gpu-workarounds-test camera-layout-test \
             camera-probe-test camera-comfort-test native-tweaks-test exploration-leader-test \
-            scene-camera-history-test menu-input-test pad-input-test menu-sounds-test \
+            scene-camera-history-test menu-input-test pad-input-test crowbar-pause-test crowbar-state-test crowbar-unlock-test menu-sounds-test \
             graphics-settings-test memory-budget-test cockpit-test ahsl-cache-test \
             shader-capture-test scene-targets-gpu-test log-console-test fiber-test \
             half-precision-test native-cheats-test game-languages-test fast-forward-test \
