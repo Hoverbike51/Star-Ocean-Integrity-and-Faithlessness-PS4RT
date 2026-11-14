@@ -92,7 +92,7 @@ MINGW*|MSYS*)
             graphics-settings-test memory-budget-test cockpit-test ahsl-cache-test \
             shader-capture-test scene-targets-gpu-test log-console-test fiber-test \
             half-precision-test native-cheats-test game-languages-test fast-forward-test \
-            perf-sampling-test diagnostic-trace-test performance-report-test
+            perf-sampling-test diagnostic-trace-test performance-report-test fsr-sdk24-gpu-test
         ctest --test-dir out/gpu --output-on-failure
         python -m unittest discover -s tests -p 'test_*.py' -v
     fi

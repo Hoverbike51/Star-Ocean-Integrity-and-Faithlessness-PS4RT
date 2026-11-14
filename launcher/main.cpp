@@ -27,6 +27,7 @@
 #include "save_preview.h"
 #include "ps4rt_version.h"
 #include "updater.h"
+#include "amd_fsr_paths.h"
 #include "shortcuts.h"
 #include "pkg/progress.h"
 #include "../gpu/shim/ps4rt_upscaler_support.h"
@@ -607,7 +608,7 @@ void detect_environment() {
                 auto& adapter=app.graphics_adapters.back();
                 adapter.dlss_supported=So5ProbeDlss(instance,devices[i],program_path(app.root,L"Star Ocean 5.exe").parent_path());
                 adapter.fsr3_technical=Ps4RtUpscaler::ProbeFsr3(devices[i]);
-                const auto sdk_folder=program_path(app.root,L"Star Ocean 5.exe").parent_path()/L"amd-fsr-sdk24";
+                const auto sdk_folder=So5AmdFsr::SdkDirectory(program_path(app.root,L"Star Ocean 5.exe").parent_path());
                 std::error_code sdk_error;
                 adapter.fsr_sdk24_files=fs::is_regular_file(sdk_folder/L"amd_fidelityfx_loader_vk.dll",sdk_error)&&
                     fs::is_regular_file(sdk_folder/L"amd_fidelityfx_upscaler_vk.dll",sdk_error);

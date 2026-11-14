@@ -26,7 +26,9 @@ disabled reconstruction, and logs the reason. Check the active-provider readout.
 ## Distribution and build integrity
 
 Provider files live under `gpu/third_party/amd-fsr-sdk24/`. The packaged application loads
-only `bin/amd-fsr-sdk24/` beside the real game executable, without searching the working
+from the explicit application-root path `gpu/assets/amd-fsr-sdk24/`. This path is accepted
+by the updater shipped in v1.0.1. Existing/developer `bin/amd-fsr-sdk24/` or
+`out/amd-fsr-sdk24/` layouts remain supported. The loader never searches the working
 directory or PATH. Missing optional provider DLLs do not prevent application startup.
 
 The signed AMD Vulkan loader/upscaler DLLs are distributed unchanged, together with their
@@ -53,4 +55,4 @@ Settings persistence and unavailable-provider fallback are checked separately.
 
 The official SDK creates image views from the supplied Vulkan images. The integration supplies actual resource formats, depth/stencil usage and matching barrier aspects, rather than declaring every input as a color image. HDR and SDR paths use separate context flags; changing between them recreates the context. Unsupported formats are rejected before dispatch and use the existing fallback. Input formats and color space are logged when a context is created.
 
-![sample_AMD](docs/images/readme/AMD/So5_FSR_SDK.png)
+![sample_AMD](images/readme/AMD/So5_FSR_SDK.png)

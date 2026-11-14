@@ -2,6 +2,7 @@
 param(
     [switch]$Test,
     [switch]$PlayerFolder = $true,
+    [switch]$Package,
     [switch]$Dlss,
     [switch]$NoDlss,
     [string]$DlssSdk = $env:DLSS_SDK_ROOT,
@@ -75,13 +76,14 @@ if ($NoDlss) {
     }
 }
 
-if ($PlayerFolder) {
+if ($PlayerFolder -or $Package) {
     if (-not $NoDlss) {
         foreach ($name in @('ps4rt_dlss.dll','nvngx_dlss.dll')) {
             if (-not (Test-Path -LiteralPath (Join-Path $root "out\$name"))) { throw "Full player build is missing $name" }
         }
     }
-    $packageCommand = 'export MSYSTEM=CLANG64 MSYS2_ROOT="$2"; cd "$1"; bash packaging/windows/package.sh --folder-only'
+    $packageMode = if ($Package) { '' } else { ' --folder-only' }
+    $packageCommand = 'export MSYSTEM=CLANG64 MSYS2_ROOT="$2"; cd "$1"; bash packaging/windows/package.sh' + $packageMode
     if ($NoDlss) { $packageCommand = 'export PS4RT_PACKAGE_NO_DLSS=1; ' + $packageCommand }
     & $bash -lc $packageCommand -- $unixRoot $unixMsys2
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

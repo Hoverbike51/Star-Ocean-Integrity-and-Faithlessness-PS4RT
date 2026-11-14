@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // All installation targets are uniquely named disposable temporary fixtures.
 #include "updater.h"
+#include "update_compatibility_101.h"
+#include "amd_fsr_paths.h"
 #include "ps4rt_version.h"
 #include <windows.h>
 #include <shellapi.h>
@@ -75,6 +77,19 @@ void Metadata() {
     std::cout << "PASS: numerical versions, prerelease policy, Windows assets, digests, invalid replies, cancellation\n";
 }
 void Paths() {
+    for(const char* path:{"gpu/assets/amd-fsr-sdk24/amd_fidelityfx_loader_vk.dll",
+        "gpu/assets/amd-fsr-sdk24/amd_fidelityfx_upscaler_vk.dll",
+        "docs/third-party/AMD_FSR_SDK.md", "launcher/assets/guides/manual.pdf"}) {
+        assert(U::ProgramFile(path) && U::Legacy101::ProgramFile(path));
+        U::Package package; package.files.push_back(path); U::RequireLegacy101Compatibility(package);
+    }
+    for(const char* path:{"bin/amd-fsr-sdk24/amd_fidelityfx_loader_vk.dll","docs/AMD_FSR_SDK.md"}) {
+        assert(U::ProgramFile(path) && !U::Legacy101::ProgramFile(path));
+        U::Package package; package.files.push_back(path);
+        Reject([&]{ U::RequireLegacy101Compatibility(package); });
+    }
+    for(const char* path:{"Quick_Start_and_Glossary.pdf.lnk", "launcher/assets/guides/open.lnk",
+                         "SO5_User_Guides/manual.pdf"}) assert(!U::ProgramFile(path));
     assert(U::ProgramFile("docs/AMD_FSR_SDK.md"));
     for(const char* file:{"amd_fidelityfx_loader_vk.dll","amd_fidelityfx_upscaler_vk.dll",
             "msvcp140.dll","vcruntime140.dll","vcruntime140_1.dll"})
@@ -114,7 +129,7 @@ std::map<fs::path, std::string> UserFiles() {
         {"out/CUSA03219/user/gpu/cache.bin", "warm shader cache"}, {"mods/custom.txt", "custom mod"}, {"game/eboot.bin", "private game"}};
 }
 void Populate(const fs::path& target) {
-    Write(target / "VERSION", "0.3.5\n"); Write(target / "Star Ocean 5 Launcher.exe", "old launcher"); Write(target / "README.md", "old readme");
+    Write(target / "VERSION", "1.0.1\n"); Write(target / "Star Ocean 5 Launcher.exe", "old launcher"); Write(target / "README.md", "old readme");
     for (const auto& [relative, value] : UserFiles()) Write(target / relative, value);
 }
 void Preserved(const fs::path& target) { for (const auto& [relative, value] : UserFiles()) assert(Read(target / relative) == value); }
@@ -127,13 +142,13 @@ void Transactions(const fs::path& root) {
     auto failed = U::Install(package, target, target / "out/updates/test/previous", [](size_t count) {
         if (count == 4) throw std::runtime_error("Injected interruption after four replacements");
     });
-    assert(!failed.success && failed.recovered && Read(target / "VERSION") == "0.3.5\n");
+    assert(!failed.success && failed.recovered && Read(target / "VERSION") == "1.0.1\n");
     assert(Read(target / "Star Ocean 5 Launcher.exe") == "old launcher" && !fs::exists(target / "new.dll")); Preserved(target);
     assert(Read(failed.backup / "Star Ocean 5 Launcher.exe") == "old launcher" && fs::exists(failed.backup / "transaction.json"));
     HANDLE locked = CreateFileW((target / "Star Ocean 5 Launcher.exe").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     assert(locked != INVALID_HANDLE_VALUE);
     auto in_use = U::Install(package, target, target / "out/updates/locked/previous");
-    assert(!in_use.success && in_use.recovered && in_use.retryable && Read(target / "VERSION") == "0.3.5\n");
+    assert(!in_use.success && in_use.recovered && in_use.retryable && Read(target / "VERSION") == "1.0.1\n");
     assert(in_use.detail.find("Star Ocean 5 Launcher.exe")!=std::string::npos);CloseHandle(locked);
     auto success = U::Install(package, target, target / "out/updates/success/previous");
     assert(success.success && Read(target / "VERSION") == Current.String() + "\n" && Read(target / "new.dll") == "new dependency"); Preserved(target);
@@ -190,7 +205,21 @@ U::Package PlayerPackage(const fs::path& root, const fs::path& binaries) {
     for (const char* name : {"launcher/assets/launcher-background.png", "launcher/assets/launcher-icon.png", "launcher/assets/star-ocean-logo.png",
         "gpu/assets/star_ocean_overlay.png", "LICENSE"}) Write(root / name, "fixture data");
     Write(root / L"launcher/assets/背景.png", "non-ASCII asset");
-    auto package = U::ValidatePackage(root, Current); U::ProbePackage(package); return package;
+    auto package = U::ValidatePackage(root, Current); U::RequireLegacy101Compatibility(package); U::ProbePackage(package); return package;
+}
+void ProviderPaths(const fs::path& root) {
+    const auto app=root/"provider-layout";
+    assert(So5AmdFsr::SdkDirectory(app/"bin")==app/"bin/amd-fsr-sdk24");
+    assert(So5AmdFsr::SdkDirectory(app/"out")==app/"out/amd-fsr-sdk24");
+    const auto preferred=app/"gpu/assets/amd-fsr-sdk24";
+    Write(preferred/"amd_fidelityfx_loader_vk.dll","fixture loader");
+    assert(So5AmdFsr::SdkDirectory(app/"bin")==app/"bin/amd-fsr-sdk24");
+    Write(preferred/"amd_fidelityfx_upscaler_vk.dll","fixture upscaler");
+    assert(So5AmdFsr::SdkDirectory(app/"bin")==preferred);
+    assert(So5AmdFsr::SdkDirectory(app/"BIN")==preferred);
+    assert(So5AmdFsr::SdkDirectory(app)==preferred);
+    assert(So5AmdFsr::ContainsSdk(preferred));
+    std::cout<<"PASS: isolated AMD provider paths, legacy fallback and complete-pair selection\n";
 }
 void Handoff(const fs::path& root, const fs::path& binaries) {
     const auto workspace = root / "so5-update-{handoff}";
@@ -236,7 +265,7 @@ void Handoff(const fs::path& root, const fs::path& binaries) {
     }); }); cancel = false; assert(fs::is_empty(downloads));
     std::cout << "PASS: complete transfer pipeline, progress, SHA mismatch, truncated download and cancellation cleanup\n";
     const auto target = root / "player";
-    fs::copy(package.root, target, fs::copy_options::recursive); Write(target / "VERSION", "0.3.5\n");
+    fs::copy(package.root, target, fs::copy_options::recursive); Write(target / "VERSION", "1.0.1\n");
     // The installed helper is intentionally obsolete. Only the verified staged
     // helper may perform the new transaction, from outside the installation.
     Write(target / "bin/SO5-Updater.exe", "obsolete helper");
@@ -283,6 +312,6 @@ int main() {
     }
     if (argc == 2 && std::wstring(argv[1]) == L"--paths-only") { Paths(); return 0; }
     assert(argc == 2); const fs::path binaries = fs::absolute(argv[1]);
-    Fixture fixture; Metadata(); Paths(); Transactions(fixture.root); Archives(fixture.root); Handoff(fixture.root, binaries);
+    Fixture fixture; Metadata(); Paths(); Transactions(fixture.root); Archives(fixture.root); ProviderPaths(fixture.root); Handoff(fixture.root, binaries);
     return 0;
 }

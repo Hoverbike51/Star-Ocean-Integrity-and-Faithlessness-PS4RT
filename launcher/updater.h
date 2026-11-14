@@ -72,6 +72,8 @@ fs::path EntryPath(const std::string& name);
 bool ProgramFile(const fs::path& relative);
 bool PlayerInstall(const fs::path& root);
 Package ValidatePackage(const fs::path& root, Version expected);
+// Release gate: old installed clients must accept all payload paths before handoff.
+void RequireLegacy101Compatibility(const Package& package);
 Package Extract(const fs::path& archive, const fs::path& destination, Version expected,
                 const std::atomic_bool& cancel, const Progress& progress);
 Prepared Prepare(const Release& release, const fs::path& work_parent,

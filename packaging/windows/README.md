@@ -175,3 +175,38 @@ See the [launcher guide](../../docs/LAUNCHER_GUIDE.md),
 [in-game menu guide](../../docs/IN_GAME_MENU_GUIDE.md) and
 [Windows changelog](../../CHANGELOG.md). These public guides and their referenced screenshots
 are included in the clean player folder. Development-only documents are not required for packaging.
+
+## Build a validated release ZIP
+
+```powershell
+.\build-windows.cmd -Test -Package
+```
+
+`-Package` builds the normal full player binaries, creates the player folder and ZIP, checks
+both with the native updater, and writes a fresh `.zip.sha256` sidecar under `dist/`.
+The default command still creates only the player folder. Publish the generated ZIP and
+matching sidecar together; the PDF manuals are already included. Do not add shortcuts or
+other folders manually after the final check.
+
+## Release-update compatibility checks
+
+The updater installed in **v1.0.1** validates every downloaded path before it can run a newer
+installer. Future player ZIPs must therefore retain its path contract. The official AMD
+provider is packaged in `gpu/assets/amd-fsr-sdk24/`, its integration note in
+`docs/third-party/AMD_FSR_SDK.md`, and the preserved PDF guides in
+`launcher/assets/guides/`. Do not add a root `SO5_User_Guides` folder or Windows `.lnk`
+shortcuts to a release ZIP. This does not remove the updater's file/resource/hash checks.
+
+Packaging now validates the complete player folder and final ZIP with the native updater,
+including the frozen v1.0.1 path contract and clean-PATH application self-tests. This gate
+runs for normal builds, not only `-Test` builds. After **any** manual ZIP modification, run:
+
+```powershell
+.\packaging\windows\verify-update-package.ps1 -Package '.\dist\ps4rt-star-ocean-5-windows-x64-v1.1.1-latest.zip'
+```
+
+Use the version in your checkout's `VERSION` file. The validator comes from `out/SO5-Updater.exe`;
+rebuild it after source changes. A successful path/self-test gate does not replace migration
+tests covering installer handoff, locked files, rollback and user-data preservation. Rebuild
+and repackage the affected release before replacing a published ZIP; source changes alone
+do not repair an archive already downloaded by players.

@@ -1,8 +1,9 @@
-Star Ocean 5 - Windows 10/11 x64 - Experimental version 1.0.2
+Star Ocean 5 - Windows 10/11 x64 - Experimental version 1.1.1
 ==========================================================
 
 Start Star Ocean 5 Launcher.exe at the root of the extracted player folder.
-The real launcher, game runtime, updater, extractor and DLLs are in bin.
+The real launcher, game runtime, updater, extractor and core DLLs are in bin.
+The optional AMD provider and its dependencies are in gpu/assets/amd-fsr-sdk24/.
 Keep the complete folder together and use a writable location.
 
 No PS4 game data or firmware is included. Supply your own supported decrypted
@@ -40,3 +41,6 @@ globe and brief 16:9 transition composition still have limitations. Frame genera
 is not implemented. Full-playthrough and broader hardware validation remain necessary.
 
 See README.md, CHANGELOG.md, docs/LAUNCHER_GUIDE.md and docs/IN_GAME_MENU_GUIDE.md.
+
+PDF manuals, when included, are in launcher/assets/guides/. The illustrated Markdown
+manuals remain in docs/. Keep the complete folder structure when installing or updating.

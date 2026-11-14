@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "updater.h"
+#include "update_compatibility_101.h"
 #include "ps4rt_version.h"
 #include <windows.h>
 #include <winhttp.h>
@@ -325,6 +326,7 @@ fs::path EntryPath(const std::string& name) {
 
 bool ProgramFile(const fs::path& relative) {
     const std::string name = Lower(relative.generic_string());
+    if (name.ends_with(".lnk")) return false;
     if (name.starts_with("docs/third-party/") && (name.ends_with(".txt") || name.ends_with(".md"))) return true;
     const std::string parent=Lower(relative.parent_path().generic_string());
     if ((parent == "docs/images/readme/launcher" || parent == "docs/images/readme/custom_menu") &&
@@ -381,7 +383,7 @@ Package ValidatePackage(const fs::path& root, Version expected) {
         EntryPath(relative.generic_string());
         PlainUnder(root, relative);
         if (entry.is_directory()) continue;
-        if (!entry.is_regular_file() || !ProgramFile(relative)) throw Error(Code::InvalidPackage, "Unexpected file in update package.");
+        if (!entry.is_regular_file() || !ProgramFile(relative)) throw Error(Code::InvalidPackage, "Unexpected file in update package: " + relative.generic_string());
         package.files.push_back(relative);
         if (package.files.size() > 20000) throw Error(Code::InvalidPackage, "Too many update files.");
     }
@@ -394,6 +396,12 @@ Package ValidatePackage(const fs::path& root, Version expected) {
         if (!fs::is_regular_file(root / program_directory / name))
             throw Error(Code::InvalidPackage, std::string("Missing update dependency: ") + name);
     return package;
+}
+
+void RequireLegacy101Compatibility(const Package& package) {
+    for (const auto& relative : package.files)
+        if (!Legacy101::ProgramFile(relative))
+            throw Error(Code::InvalidPackage, "Package cannot be updated from v1.0.1: " + relative.generic_string());
 }
 
 Package Extract(const fs::path& archive, const fs::path& destination, Version expected,
@@ -426,7 +434,7 @@ Package Extract(const fs::path& archive, const fs::path& destination, Version ex
             (stat.m_external_attr & FILE_ATTRIBUTE_REPARSE_POINT) || stat.m_uncomp_size > MaxDownload ||
             stat.m_uncomp_size > MaxExpanded - total || !seen.insert(relative.wstring()).second)
             throw Error(Code::InvalidPackage, "Unsupported, duplicate, linked or oversized ZIP entry.");
-        if (!stat.m_is_directory && !ProgramFile(relative)) throw Error(Code::InvalidPackage, "Package contains a protected or unexpected path.");
+        if (!stat.m_is_directory && !ProgramFile(relative)) throw Error(Code::InvalidPackage, "Package contains a protected or unexpected path: " + relative.generic_string());
         total += stat.m_uncomp_size;
         entries.push_back({i, relative, bool(stat.m_is_directory), stat.m_uncomp_size});
     }

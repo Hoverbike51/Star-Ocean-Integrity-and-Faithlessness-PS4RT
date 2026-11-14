@@ -54,15 +54,24 @@ if [[ ${PS4RT_PACKAGE_NO_DLSS:-0} != 1 && -f out/ps4rt_dlss.dll && -f out/nvngx_
 fi
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$PWD/scripts/verify-amd-fsr-sdk.ps1")" -Root "$(cygpath -w "$PWD")"
-mkdir -p "$stage/bin/amd-fsr-sdk24"
-cp gpu/third_party/amd-fsr-sdk24/bin/*.dll "$stage/bin/amd-fsr-sdk24/"
+# v1.0.1 rejects bin subdirectories; gpu/assets is an established allowed payload root.
 cp -r gpu/assets/. "$stage/gpu/assets/"
+mkdir -p "$stage/gpu/assets/amd-fsr-sdk24"
+cp gpu/third_party/amd-fsr-sdk24/bin/*.dll "$stage/gpu/assets/amd-fsr-sdk24/"
 cp -r fsr4_shaders "$stage/"
 cp -r launcher/assets/. "$stage/launcher/assets/"
 cp LICENSE README.md CHANGELOG.md VERSION "$stage/"
 cp packaging/windows/README-Windows.txt "$stage/"
 cp docs/UPSTREAM_CREDITS.md docs/MINIZ_LICENSE.txt docs/LIBCXX_LICENSE.txt "$stage/docs/"
-cp docs/LAUNCHER_GUIDE.md docs/IN_GAME_MENU_GUIDE.md docs/AMD_FSR_SDK.md "$stage/docs/"
+cp docs/LAUNCHER_GUIDE.md docs/IN_GAME_MENU_GUIDE.md "$stage/docs/"
+mkdir -p "$stage/docs/third-party"
+cp docs/AMD_FSR_SDK.md "$stage/docs/third-party/AMD_FSR_SDK.md"
+# Keep local documentation links valid after the compatibility-preserving relocation.
+sed -i 's|(docs/AMD_FSR_SDK.md)|(docs/third-party/AMD_FSR_SDK.md)|g' "$stage/README.md"
+sed -i "s/Experimental version [0-9.]*/Experimental version ${version}/" "$stage/README-Windows.txt"
+mkdir -p "$stage/launcher/assets/guides"
+cp docs/images/readme/AMD/So5_FSR_SDK.png "$stage/launcher/assets/guides/AMD_FSR_SDK.png"
+sed -i 's|(images/readme/AMD/So5_FSR_SDK.png)|(../../launcher/assets/guides/AMD_FSR_SDK.png)|g' "$stage/docs/third-party/AMD_FSR_SDK.md"
 mkdir -p "$stage/docs/images/readme"
 cp -r docs/images/readme/launcher docs/images/readme/custom_menu "$stage/docs/images/readme/"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$PWD/packaging/windows/copy-notices.ps1")" \
@@ -74,7 +83,7 @@ forbidden=$(find "$stage" \( -iname eboot.bin -o -iname sce_module -o -iname sce
     -o -iname savedata -o -iname user -o -iname cache -o -iname '*.log' -o -iname '*.pkg' \
     -o -iname '*.sprx' -o -iname '*.prx' -o -iname '*.etl' -o -iname '*.wpaprofile' \
     -o -iname '*.csv' -o -iname 'performance*.json' -o -iname '*settings*.ini' \
-    -o -iname '*.ps1' -o -iname '*.cmd' -o -iname '*.py' \
+    -o -iname '*.ps1' -o -iname '*.cmd' -o -iname '*.py' -o -iname '*.lnk' \
     -o -iname '*HUD*Studio*' -o -iname 'HUD_*.md' -o -iname 'HUD_*.txt' \
     -o -iname 'HUD_*.m' -o -iname 'hud-map*.json' -o -iname 'hud-preset.schema.json' \
     -o -iname 'hud-private*.json' \) -print)
@@ -84,12 +93,22 @@ if [[ -n $forbidden ]]; then
     exit 1
 fi
 
+# Validate the complete staged payload even without -Test. This also checks the
+# frozen v1.0.1 allowlist: updating only the new launcher cannot fix old clients.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$PWD/packaging/windows/verify-update-package.ps1")" \
+    -Package "$(cygpath -w "$PWD/$stage")"
+
 if $folder_only; then
     echo "Created player folder $PWD/$stage"
     exit 0
 fi
 
 archive="dist/${name}.zip"
-rm -f "$archive"
+rm -f -- "$archive" "$archive.sha256"
 (cd dist && cmake -E tar cf "${name}.zip" --format=zip "$name")
+# Re-check the ZIP itself; added PDFs/shortcuts or accidental archive nesting must fail.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$PWD/packaging/windows/verify-update-package.ps1")" \
+    -Package "$(cygpath -w "$PWD/$archive")"
+(cd dist && cmake -E sha256sum "${name}.zip" > "${name}.zip.sha256")
 echo "Created $PWD/$archive"
+echo "Created $PWD/$archive.sha256"
