@@ -202,7 +202,7 @@ including the frozen v1.0.1 path contract and clean-PATH application self-tests.
 runs for normal builds, not only `-Test` builds. After **any** manual ZIP modification, run:
 
 ```powershell
-.\packaging\windows\verify-update-package.ps1 -Package '.\dist\ps4rt-star-ocean-5-windows-x64-v1.1.1-latest.zip'
+.\packaging\windows\verify-update-package.ps1 -Package '.\dist\ps4rt-star-ocean-5-windows-x64-v1.1.2-latest.zip'
 ```
 
 Use the version in your checkout's `VERSION` file. The validator comes from `out/SO5-Updater.exe`;

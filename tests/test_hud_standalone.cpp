@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "hud_runtime_model.h"
+#include "../gpu/shim/ps4rt_screen_mask.h"
 #include <algorithm>
 #include <cassert>
 #include <iostream>
@@ -33,6 +34,50 @@ int main(int argc,char** argv) {
         assert(std::abs(original.x+fill.x*unit)<.001&&std::abs(original.y+fill.y*unit)<.001);
         assert(std::abs(1920*fill.sx*unit-canvas.w)<.001&&std::abs(1080*fill.sy*unit-canvas.h)<.001);
     }
+    // Real GPU GUI path: a full-frame solid-black fade must bypass the
+    // aspect-preserving HUD projection, irrespective of its producer object.
+    using Ps4RtScreenMask::Topology;
+    using MaskVertex=Ps4RtScreenMask::Vertex;
+    const std::array<MaskVertex,6> mask{{{{-1,-1,0,1},0x7f000000},{{1,-1,0,1},0x7f000000},
+        {{1,1,0,1},0x7f000000},{{-1,-1,0,1},0x7f000000},{{1,1,0,1},0x7f000000},{{-1,1,0,1},0x7f000000}}};
+    assert(Ps4RtScreenMask::SolidShader(0x59cb445a,0xf8591c05));
+    assert(!Ps4RtScreenMask::SolidShader(0xc87f248e,0x4eab1bc3)); // textured UI
+    assert(Ps4RtScreenMask::FullFrame(mask,Topology::Triangles));
+    for(unsigned alpha:{0u,1u,127u,255u}) {
+        auto fade=mask;for(auto& v:fade)v.colour=alpha<<24;
+        assert(Ps4RtScreenMask::FullFrame(fade,Topology::Triangles));
+        for(auto aspect:{Aspect::FourThree,Aspect::SixteenTen,Aspect::Standard,Aspect::Wide,Aspect::Superwide}) {
+            const auto canvas=Canvas(aspect);
+            for(const auto& v:fade) {
+                const double x=(v.clip[0]+1)*canvas.w/2,y=(v.clip[1]+1)*canvas.h/2;
+                assert(x==0||x==canvas.w);assert(y==0||y==canvas.h);
+            }
+        }
+    }
+    auto rejected_mask=mask;rejected_mask[0].colour|=1;assert(!Ps4RtScreenMask::FullFrame(rejected_mask,Topology::Triangles));
+    rejected_mask=mask;rejected_mask[0].colour=0xff000000;assert(!Ps4RtScreenMask::FullFrame(rejected_mask,Topology::Triangles)); // gradient
+    rejected_mask=mask;for(auto& v:rejected_mask)v.clip[0]*=.5f;assert(!Ps4RtScreenMask::FullFrame(rejected_mask,Topology::Triangles)); // panel
+    rejected_mask=mask;rejected_mask[0].clip[2]=.5f;assert(!Ps4RtScreenMask::FullFrame(rejected_mask,Topology::Triangles)); // geometry
+    rejected_mask=mask;rejected_mask[3]=mask[0];rejected_mask[4]=mask[1];rejected_mask[5]=mask[2];
+    assert(!Ps4RtScreenMask::FullFrame(rejected_mask,Topology::Triangles)); // two copies of one triangle
+    const std::array<MaskVertex,4> strip{mask[0],mask[1],mask[5],mask[2]};
+    assert(Ps4RtScreenMask::FullFrame(strip,Topology::Strip));
+    // Actual cached GUI pipeline: primitive 19 (QuadList), four control points.
+    // Exercise both winding orders and every start corner, throughout the fade.
+    const std::array<MaskVertex,4> quad{mask[0],mask[1],mask[2],mask[5]};
+    for(unsigned alpha:{0u,1u,127u,255u}) for(unsigned start=0;start<4;++start) for(int step:{-1,1}) {
+        auto fade=quad;
+        for(int i=0;i<4;++i){fade[i]=quad[(int(start)+i*step+4)%4];fade[i].colour=alpha<<24;}
+        assert(Ps4RtScreenMask::FullFrame(fade,Topology::Quads));
+    }
+    assert(!Ps4RtScreenMask::FullFrame(strip,Topology::Quads)); // crossed perimeter
+    assert(!Ps4RtScreenMask::FullFrame(quad,Topology::Strip));
+    assert(!Ps4RtScreenMask::FullFrame(quad,Topology::Triangles));
+    auto panel=quad;for(auto& v:panel)v.clip[0]*=.5f;
+    assert(!Ps4RtScreenMask::FullFrame(panel,Topology::Quads));
+    panel=quad;panel[0].colour|=1;
+    assert(!Ps4RtScreenMask::FullFrame(panel,Topology::Quads));
+
     // Sizing overrides round-trip through files and use the same runtime path
     // for all background groups; foreground groups reject this property.
     for(auto aspect:{Aspect::FourThree,Aspect::SixteenTen,Aspect::Standard,Aspect::Wide,Aspect::Superwide}) {

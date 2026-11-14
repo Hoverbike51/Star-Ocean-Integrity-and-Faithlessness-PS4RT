@@ -1,4 +1,4 @@
-Star Ocean 5 - Windows 10/11 x64 - Experimental version 1.1.1
+Star Ocean 5 - Windows 10/11 x64 - Experimental version 1.1.2
 ==========================================================
 
 Start Star Ocean 5 Launcher.exe at the root of the extracted player folder.
@@ -33,6 +33,10 @@ Never share your game files, saves, settings or diagnostic captures as applicati
 Console output remains English and can be selected/copied or exported. Performance
 capture is optional and disabled by default. Enable its tools in Advanced, then arm
 Capture next session in Logs and diagnostics. Enabling tools alone does not record.
+
+Version 1.1.2 improves custom-aspect scene/UI composition and full-window black
+fades. Residual camera-dependent shader/texture patterns remain visible in some
+locations, including with reconstruction disabled; a definitive fix is not included.
 
 Known issue: FSR 4 v07 may show an outdoor/zone-transition bottom-edge line and reduced
 smoothing. No correction is included in this source update. Reconstruction off avoids

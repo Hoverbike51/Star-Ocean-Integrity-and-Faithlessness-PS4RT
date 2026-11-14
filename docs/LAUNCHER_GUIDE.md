@@ -1,12 +1,12 @@
 # Star Ocean 5 Launcher Guide
 
-**Windows 10/11 x64 · Version 1.1.1**
+**Windows 10/11 x64 · Version 1.1.2**
 
 🟦 **SET UP** · 🟩 **PLAY** · 🟨 **CUSTOMIZE** · 🟥 **TROUBLESHOOT**
 
 The Cockpit launcher prepares your own PS4 game files, manages settings and starts the
 Windows runtime. Screenshot paths and values are examples, not installation defaults.
-This guide follows Windows 1.1.1; existing screenshots illustrate the 1.1.0 interface.
+This guide follows Windows 1.1.2; existing screenshots illustrate the 1.1.0 interface.
 Some screenshots capture a pending setting, so the value selected in a screenshot is not necessarily the value already
 applied to a running game.
 
@@ -16,6 +16,17 @@ applied to a running game.
 > applied to the current configuration. **Ready** describes availability, not an enabled cheat.
 
 [README](../README.md) · [In-game menu](IN_GAME_MENU_GUIDE.md) · [Changelog](../CHANGELOG.md)
+
+> [!NOTE]
+> **1.1.2 update:** scene/UI composition and full-output black fades have been accepted
+> in local gameplay testing for the reported custom-aspect issues. Existing controls,
+> screenshots and presets remain applicable. See the [release notes](RELEASE.md#changes-in-v112).
+
+> [!WARNING]
+> **Remaining visual limitation:** camera-dependent shader/texture patterns can still
+> appear in some locations, including with reconstruction disabled. Their definitive
+> correction is not included in 1.1.2; include the ratio, applied render size and an
+> exported diagnostic when reporting them.
 
 ## Contents
 
@@ -248,7 +259,7 @@ entrance before using it; transition guards reduce repeated entrance triggers.
 
 > [!WARNING]
 > **Known issue — Fidel's follow behaviour:** Fidel can still fail to follow the party in
-> some locations when another character leads. This is not considered fixed in 1.1.1.
+> some locations when another character leads. This is not considered fixed in 1.1.2.
 > Restore Fidel as leader if this occurs. Save normally before testing a different leader.
 
 **Camera fixes** preserves manual rotation and collision handling. Damped follow softens
@@ -596,7 +607,8 @@ CPU or driver fault from a low aggregate usage reading alone.
 | Wrong or empty game information | Select the extracted game directory itself and wait for validation. |
 | A rendering preset is refused | Return to previous working preset; see the [experimental preset limits](IN_GAME_MENU_GUIDE.md#the-presets). Export diagnostics after the refusal. |
 | Pixelation, a bottom-edge line or a black scene | Note the active provider, preset and applied input size. Compare the same route with reconstruction disabled, then export diagnostics. Do not assume FXAA fixes a reconstruction failure. |
-| Fidel stops following another leader | Restore Fidel as leader. Location-dependent follower failures remain a known issue in 1.1.1. |
+| Camera-dependent patterns remain at a custom aspect ratio | Known residual rendering issue in 1.1.2. Compare the same scene with reconstruction off, note the ratio and applied render size, then export diagnostics; switching off reconstruction may not remove it. |
+| Fidel stops following another leader | Restore Fidel as leader. Location-dependent follower failures remain a known issue in 1.1.2. |
 | HUD preset has no effect | Refresh the library, check game/ratio compatibility and the apply status, then test a mapped group. Subtitle adjustment remains incomplete. |
 | Title-screen globe remains 16:9 | This scene still has a separate aspect-ratio limitation; do not stretch the complete UI/video presentation to compensate. |
 | Temporary 16:9 framing at a zone boundary | Some transition states can still restore the game's original framing briefly. This is separate from the full-window loading blackout. |

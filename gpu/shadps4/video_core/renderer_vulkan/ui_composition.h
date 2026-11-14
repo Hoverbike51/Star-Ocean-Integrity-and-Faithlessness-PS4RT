@@ -11,8 +11,10 @@ enum class Background { None, Copy, Temporal };
 
 // A current-frame camera is enough to identify 3D before camera history is
 // committed. Proxy validity only chooses the pixel source, never its aspect.
-constexpr bool NativeMenuBackground(bool frame_camera,bool tonemapped_scene) {
-    return !frame_camera && !tonemapped_scene;
+constexpr bool NativeMenuBackground(bool frame_camera,bool tonemapped_scene, bool scene_observed=false) {
+    // A later depth pass can invalidate camera recognition within the same frame.
+    // Already observed HDR scene geometry must still prevent an early UI snapshot.
+    return !frame_camera && !tonemapped_scene && !scene_observed;
 }
 constexpr bool WideSceneBackground(bool frame_camera,bool matching_scene) {
     // The exact tonemap target is authoritative even when a transition has
@@ -24,10 +26,12 @@ constexpr bool WideSceneBackground(bool frame_camera,bool matching_scene) {
 
 inline bool PerspectiveMenuBackground(bool native_gui, bool offscreen_rgba,
                                       bool native_viewport, float frame_aspect,
-                                      float output_aspect) {
+                                      float output_aspect, bool verified_title) {
     // A real, current-frame wide projection is required. A logo/atlas or a
     // previous frame alone cannot turn a movie or a flat menu into a 3D scene.
-    return native_gui && offscreen_rgba && native_viewport &&
+    // Gameplay also draws native GUI over a matching projection before tonemapping.
+    // Only a draw sampling the verified title atlas may snapshot this early.
+    return verified_title && native_gui && offscreen_rgba && native_viewport &&
            std::isfinite(frame_aspect) && std::isfinite(output_aspect) &&
            frame_aspect>0 && output_aspect>0 && std::abs(output_aspect-16.f/9)>.001f &&
            std::abs(frame_aspect-output_aspect)<.025f;

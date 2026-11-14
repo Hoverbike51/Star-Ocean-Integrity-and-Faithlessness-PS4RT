@@ -25,6 +25,9 @@ int main() {
     assert(history.lines.front().ends_with(L": 0") && history.lines[63].ends_with(L": 63"));
     assert(history.lines.back().ends_with(L": 399"));
     history.Clear();assert(history.lines.empty());
+    history.Keep(L"Screen mask: GPU solid-quad candidates=3, expanded=1");
+    history.Keep(L"Scene pass: vs=1 ps=2 raster=3200x900");
+    assert(history.lines.size()==2);history.Clear();
     INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_WIN95_CLASSES};assert(InitCommonControlsEx(&controls));
     const auto parent=CreateWindowExW(0,L"STATIC",L"Console fixture",WS_OVERLAPPED,0,0,800,600,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
     assert(parent);{

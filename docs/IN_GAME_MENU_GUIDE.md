@@ -1,6 +1,6 @@
 # Star Ocean 5 In-game Menu Guide
 
-**Windows 10/11 x64 · Version 1.1.1**
+**Windows 10/11 x64 · Version 1.1.2**
 
 🟦 **DISPLAY** · 🟩 **IMAGE** · 🟨 **TWEAKS** · 🟥 **DIAGNOSTICS**
 
@@ -14,6 +14,17 @@ differ from the currently applied render state.
 > [!TIP]
 > Open with **Insert** or **L2 + R3**. Select a tab, change a setting, then use **Resume**.
 > Scroll inside the page when additional settings extend below the visible area.
+
+> [!NOTE]
+> **1.1.2 update:** scene/UI composition and full-output black fades have been accepted
+> in local gameplay testing for the reported custom-aspect issues. Existing controls,
+> screenshots and presets remain applicable. See the [release notes](RELEASE.md#changes-in-v112).
+
+> [!WARNING]
+> **Remaining visual limitation:** camera-dependent shader/texture patterns can still
+> appear in some locations, including with reconstruction disabled. Their definitive
+> correction is not included in 1.1.2; include the ratio, applied render size and an
+> exported diagnostic when reporting them.
 
 ## Contents
 

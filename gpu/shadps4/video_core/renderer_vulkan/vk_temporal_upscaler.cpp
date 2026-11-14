@@ -1472,30 +1472,10 @@ void TemporalUpscaler::OnDraw(u64 vs_hash, VideoCore::ImageId color,
             }
         }
         if(!Ps4RtUltrawide::Enabled()) return;
-        if(!ui_phase && !done_this_frame && !ldr_target && color) {
-            const auto& image=texture_cache.GetImage(color);
-            const bool offscreen_rgba=image.info.size.width==1920 && image.info.size.height==1080 &&
-                image.info.pixel_format==vk::Format::eR8G8B8A8Unorm &&
-                !DisplayRegistry::IsDisplayBuffer(image.info.guest_address);
-            if(UiComposition::PerspectiveMenuBackground(Ps4RtHud::VertexProgram(vs_hash),offscreen_rgba,
-                native_viewport,camera_motion.FrameAspect(),Ps4RtUltrawide::Ratio(Ps4RtUltrawide::session_output))) {
-                // Forward-rendered 3D menus need no temporal reconstruction.
-                // Snapshot BEFORE the native logo/text draw. The camera already
-                // matches the output: presenting it full width does not stretch it.
-                ldr_target=color;
-                static bool reported=false;
-                if(!reported) {
-                    std::printf("Ultrawide 3D menu: current perspective %.6f; composing before native UI, original UI/movie proportions preserved\n",double(camera_motion.FrameAspect()));
-                    reported=true;
-                }
-                RunUiOnly(color,depth);
-                return;
-            }
-        }
         // Native 3D composition belongs at the explicit final scene-copy
         // boundary. An earlier Scaleform pass must not snapshot the wrong
         // image as a 16:9 menu and mark the entire frame complete.
-        if(!UiComposition::NativeMenuBackground(camera_motion.HasFrameCamera(),bool(ldr_target))) return;
+        if(!UiComposition::NativeMenuBackground(camera_motion.HasFrameCamera(),bool(ldr_target),bool(scene_color))) return;
     }
     (void)blended; // Kept in the shared OnDraw API for downstream ports.
     if (!Scaled() && vs_hash == ui_trigger_vs) done_this_frame = true;
@@ -1535,6 +1515,34 @@ void TemporalUpscaler::OnDraw(u64 vs_hash, VideoCore::ImageId color,
     case UiComposition::Background::Copy:
         RunUiOnly(color, depth);
         return;
+    }
+}
+
+void TemporalUpscaler::OnTitleDraw(u64 vs_hash, VideoCore::ImageId color,
+                                    VideoCore::ImageId depth, bool native_viewport) {
+    // Unlike a matching camera/viewport, the caller's verified, unmodified title
+    // atlas distinguishes a forward-rendered title from an in-scene GUI pass.
+    // Keep the existing 16:9 and non-native-scene paths completely unchanged.
+    if (!Ps4RtSettings::Get().native_scene || !Ps4RtUltrawide::Enabled()) return;
+    if(!ui_phase && !done_this_frame && !ldr_target && !scene_color && color) {
+        const auto& image=texture_cache.GetImage(color);
+        const bool offscreen_rgba=image.info.size.width==1920 && image.info.size.height==1080 &&
+            image.info.pixel_format==vk::Format::eR8G8B8A8Unorm &&
+            !DisplayRegistry::IsDisplayBuffer(image.info.guest_address);
+        if(UiComposition::PerspectiveMenuBackground(Ps4RtHud::VertexProgram(vs_hash),offscreen_rgba,
+            native_viewport,camera_motion.FrameAspect(),Ps4RtUltrawide::Ratio(Ps4RtUltrawide::session_output),true)) {
+            // Forward-rendered 3D menus need no temporal reconstruction.
+            // Snapshot BEFORE the native logo/text draw. The camera already
+            // matches the output: presenting it full width does not stretch it.
+            ldr_target=color;
+            static bool reported=false;
+            if(!reported) {
+                std::printf("Verified 3D title: current perspective %.6f; composing before native UI, original UI/movie proportions preserved\n",double(camera_motion.FrameAspect()));
+                reported=true;
+            }
+            RunUiOnly(color,depth);
+            return;
+        }
     }
 }
 

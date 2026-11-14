@@ -1,5 +1,5 @@
 STAR OCEAN 5 — ILLUSTRATED USER GUIDE PACK
-Windows Player 1.1.1 | English
+Windows Player 1.1.2 | English | PDF edition 1.1.1
 
 01_Cockpit_Launcher_Guide.pdf
   Full beginner-to-advanced visual guide to installation, preparation,
@@ -14,7 +14,8 @@ Windows Player 1.1.1 | English
   settings, plain-English definitions and troubleshooting.
 
 DOCUMENTATION NOTES
-- PDF body reflects source documentation for Windows player version 1.1.1.
+- The existing PDFs retain their 1.1.1 documentation edition. Updated 1.1.2
+  source guides and current rendering limitations are documented in docs/.
 - UI screenshots were supplied from version 1.1.0. Values pictured are
   examples; selected/requested settings may not be active/applied.
 - In-game screenshots are cropped to emphasize the on-screen menu.

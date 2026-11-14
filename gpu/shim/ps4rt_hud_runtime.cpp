@@ -2,6 +2,7 @@
 #include "ps4rt_hud_runtime.h"
 #include "ps4rt_hud_hook.h"
 #include "ps4rt_ultrawide.h"
+#include "ps4rt_screen_mask.h"
 #include "hud_runtime_model.h"
 #include "hud_live.h"
 #include <atomic>
@@ -474,7 +475,7 @@ void DrawObject(void* object,void* a,void* b,RenderFn original,int kind,std::uin
     if(const auto* damage=DamageIdentity(object))identity=damage;
     if(const auto* subtitle=SubtitleIdentity(object))identity=subtitle;
     const bool backdrop=FullBlackBackdrop(object,kind);
-    if(backdrop&&!identity) {
+    if(backdrop) {
         const auto fill=So5Hud::BackgroundTransform(output_width,output_height);
         struct Restore {DrawScope old;~Restore(){draw_scope=old;}} restore{draw_scope};
         draw_scope={true,fill};
@@ -665,6 +666,14 @@ void FrameBoundary(){if(Active()){
 void Report() {
     static std::atomic<bool> reported=false;
     if(!Active()||reported.exchange(true))return;
+    std::printf("Screen mask: GPU solid-quad candidates=%llu, expanded=%llu\n",static_cast<unsigned long long>(Ps4RtScreenMask::candidates.load()),static_cast<unsigned long long>(Ps4RtScreenMask::expanded.load()));
+    std::printf("Screen mask: rejected draw=%llu fetch=%llu format=%llu constants=%llu vertex=%llu coverage=%llu\n",
+        static_cast<unsigned long long>(Ps4RtScreenMask::rejected[0].load()),
+        static_cast<unsigned long long>(Ps4RtScreenMask::rejected[1].load()),
+        static_cast<unsigned long long>(Ps4RtScreenMask::rejected[2].load()),
+        static_cast<unsigned long long>(Ps4RtScreenMask::rejected[3].load()),
+        static_cast<unsigned long long>(Ps4RtScreenMask::rejected[4].load()),
+        static_cast<unsigned long long>(Ps4RtScreenMask::rejected[5].load()));
     std::printf("HUD layout: resources recognized=%u, unknown=%u, invalid visual objects=%u\n",recognized.load(),unknown.load(),refused.load());
     std::printf("HUD layout: GUI render calls=%llu, mapped objects=%llu\n",static_cast<unsigned long long>(render_calls.load()),static_cast<unsigned long long>(mapped_objects.load()));
     std::printf("HUD layout: transformed UI vertices=%llu\n",static_cast<unsigned long long>(transformed_vertices.load()));

@@ -92,8 +92,8 @@ int main(int argc,char** argv) {
         assert(modes&(1ull<<output));assert(!(modes&(1ull<<1)));
         assert(Vulkan::UiComposition::WideDisplayScene(true,Ratio(output),Ratio(output)));
         assert(!Vulkan::UiComposition::WideDisplayScene(false,Ratio(output),Ratio(output)));
-        assert(Vulkan::UiComposition::PerspectiveMenuBackground(true,true,true,Ratio(output),Ratio(output)));
-        assert(!Vulkan::UiComposition::PerspectiveMenuBackground(true,true,true,16.f/9,Ratio(output)));
+        assert(Vulkan::UiComposition::PerspectiveMenuBackground(true,true,true,Ratio(output),Ratio(output),true));
+        assert(!Vulkan::UiComposition::PerspectiveMenuBackground(true,true,true,16.f/9,Ratio(output),true));
     }
     session_output=1;
     assert(!(SessionModes(~0ull)&(1ull<<Ps4RtOutput::Find(1600,1200))));
@@ -108,6 +108,9 @@ int main(int argc,char** argv) {
     assert(!NativeMenuBackground(true,false)); // first camera before history commit
     assert(!NativeMenuBackground(false,true)); // tonemap remains authoritative
     assert(NativeMenuBackground(false,false)); // actual title/movie/menu frame
+    assert(!NativeMenuBackground(false,false,true)); // later depth pass lost the camera
+    assert(!NativeMenuBackground(true,false,true)); // HDR scene before the tonemap
+    assert(!NativeMenuBackground(false,true,true)); // transition lost camera history
     Vulkan::SceneResolution::Coherence pixels;
     pixels.ProxyWrite();pixels.NativeWrite();assert(!pixels.valid);
     assert(WideSceneBackground(true,true)); // native pixels still contain a wide projection
@@ -115,15 +118,15 @@ int main(int argc,char** argv) {
     assert(!WideSceneBackground(true,false)); // no matching scene target, never stretch movies
     assert(!WideSceneBackground(false,false));
     for(const float aspect:{21.f/9,32.f/9}) {
-        assert(PerspectiveMenuBackground(true,true,true,aspect,aspect));
-        assert(!PerspectiveMenuBackground(false,true,true,aspect,aspect)); // video/unknown shader
-        assert(!PerspectiveMenuBackground(true,false,true,aspect,aspect)); // already includes display UI
-        assert(!PerspectiveMenuBackground(true,true,false,aspect,aspect)); // shadow/other viewport
-        assert(!PerspectiveMenuBackground(true,true,true,0,aspect)); // no current camera
-        assert(!PerspectiveMenuBackground(true,true,true,16.f/9,aspect)); // never stretch a narrow projection
-        assert(!PerspectiveMenuBackground(true,true,true,std::numeric_limits<float>::quiet_NaN(),aspect));
+        assert(PerspectiveMenuBackground(true,true,true,aspect,aspect,true));
+        assert(!PerspectiveMenuBackground(false,true,true,aspect,aspect,true)); // video/unknown shader
+        assert(!PerspectiveMenuBackground(true,false,true,aspect,aspect,true)); // already includes display UI
+        assert(!PerspectiveMenuBackground(true,true,false,aspect,aspect,true)); // shadow/other viewport
+        assert(!PerspectiveMenuBackground(true,true,true,0,aspect,true)); // no current camera
+        assert(!PerspectiveMenuBackground(true,true,true,16.f/9,aspect,true)); // never stretch a narrow projection
+        assert(!PerspectiveMenuBackground(true,true,true,std::numeric_limits<float>::quiet_NaN(),aspect,true));
     }
-    assert(!PerspectiveMenuBackground(true,true,true,16.f/9,16.f/9));
+    assert(!PerspectiveMenuBackground(true,true,true,16.f/9,16.f/9,true));
     // Actual census: 484 transition frames had a 32:9 camera but no usual
     // tonemap target. Do not pillarbox these frames or sample the old UI image.
     for(const float aspect:{21.f/9,32.f/9}) {
@@ -136,7 +139,24 @@ int main(int argc,char** argv) {
     assert(!WideDisplayScene(true,16.f/9,16.f/9));
     assert(!WideDisplayScene(true,-4.f/3,-4.f/3));
     assert(!WideDisplayScene(true,0,0));
-    assert(!PerspectiveMenuBackground(true,true,true,-1,-1));
+    assert(!PerspectiveMenuBackground(true,true,true,-1,-1,true));
+    // Gameplay GUI may precede the tonemap and use the same RGBA8 size,
+    // viewport and camera aspect as a title. It must not finish the scene or
+    // disable raster scaling/jitter before the remaining depth/color passes.
+    for (const auto size : {Vulkan::SceneResolution::Size{1600,1200}, {1920,1200},
+                           {3440,1440}, {3200,900}, {1920,1080}}) {
+        const float aspect = float(size.width) / size.height;
+        assert(!PerspectiveMenuBackground(true,true,true,aspect,aspect,false));
+        assert(!PerspectiveMenuBackground(true,true,true,aspect,aspect+.1f,false));
+        const bool custom = std::abs(aspect-16.f/9)>.001f;
+        assert(PerspectiveMenuBackground(true,true,true,aspect,aspect,true)==custom);
+        // Titles stay spatial; gameplay waits for the explicit final scene copy.
+        const auto spatial=RouteDisplay(false,custom,0,0,size.width,size.height);
+        assert(spatial.redirect==custom && !spatial.sample_composed);
+        const auto temporal=RouteDisplay(true,custom,size.width,size.height,size.width,size.height);
+        assert(temporal.redirect && temporal.sample_composed);
+        assert(temporal.width==size.width && temporal.height==size.height);
+    }
     const auto transition=RouteDisplay(false,true,0,0,3200,900);
     assert(transition.redirect&&transition.width==3200&&transition.height==900&&!transition.sample_composed);
     const auto reconstructed=RouteDisplay(true,true,3440,1440,3200,900);

@@ -5,6 +5,7 @@
 #include <bit>
 #include <xxhash.h>
 #include "ps4rt_title_screen.h"
+#include "ps4rt_screen_mask.h"
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "video_core/renderer_vulkan/ps4rt_camera.h"
 #include "ps4rt_toggles.h"
@@ -327,6 +328,24 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     }
 }
 
+void Rasterizer::PrepareTitleComposition(const GraphicsPipeline* pipeline) {
+    // Reuse the title label's existing fingerprint: the shared GUI shader alone
+    // is not title evidence. Reuse cached identity without a new readback or driver query.
+    if (!Ps4RtTitle::UiShader(pipeline->GetStages()[u32(Shader::SwStage::Fragment)])) return;
+    for (const auto id : bound_images) {
+        const auto& image = texture_cache.GetImage(id);
+        if (!image.title_screen_atlas || True(image.flags & VideoCore::ImageFlagBits::GpuModified)) continue;
+        Ps4RtTitle::MarkDraw();
+        if (upscaler->Enabled() && std::popcount(pipeline->GetGraphicsKey().mrt_mask) == 1) {
+            const auto& viewport = Regs().viewports[0];
+            upscaler->OnTitleDraw(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
+                cb_descs[0].first, db_desc.first,
+                UiComposition::NativeViewport(viewport.xscale * 2, viewport.yscale * 2));
+        }
+        break;
+    }
+}
+
 static std::pair<u32, u32> GetDrawOffsets(
     const AmdGpu::Regs& regs, const Shader::Info& info,
     const std::optional<Shader::Gcn::FetchShaderData>& fetch_shader) {
@@ -341,6 +360,115 @@ static std::pair<u32, u32> GetDrawOffsets(
         }
     }
     return {vertex_offset, instance_offset};
+}
+
+bool Rasterizer::FullScreenBlackMask(const GraphicsPipeline* pipeline,bool indexed,u32 index_offset) {
+    const auto& regs=Regs();
+    if(!Ps4RtUltrawide::Enabled() || !Ps4RtHud::Active() || !cb_descs[0].first ||
+       !DisplayRegistry::IsDisplayBuffer(texture_cache.GetImage(cb_descs[0].first).info.guest_address)) return false;
+    const auto* vertex_stage=pipeline->GetStages()[u32(Shader::SwStage::Vertex)];
+    const auto* pixel_stage=pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    if(!vertex_stage || !pixel_stage || !Ps4RtScreenMask::SolidShader(vertex_stage->pgm_hash,pixel_stage->pgm_hash)) return false;
+    using Ps4RtScreenMask::Rejection;
+    const auto& vs=*vertex_stage;
+    ++Ps4RtScreenMask::candidates;
+    const auto& viewport=regs.viewports[0];
+    const bool strip=regs.primitive_type==AmdGpu::PrimitiveType::TriangleStrip;
+    const bool quads=regs.primitive_type==AmdGpu::PrimitiveType::QuadList;
+    const auto topology=quads?Ps4RtScreenMask::Topology::Quads:
+        strip?Ps4RtScreenMask::Topology::Strip:Ps4RtScreenMask::Topology::Triangles;
+    if((!strip && !quads && regs.primitive_type!=AmdGpu::PrimitiveType::TriangleList) ||
+       regs.num_indices!=((strip||quads)?4u:6u) || regs.num_instances.NumInstances()!=1 ||
+       regs.IsClipDisabled() || !UiComposition::NativeViewport(viewport.xscale*2,viewport.yscale*2)) return Ps4RtScreenMask::Reject(Rejection::Draw);
+    const auto& fetch=pipeline->GetFetchShader();
+    if(!fetch || fetch->attributes.size()!=2) return Ps4RtScreenMask::Reject(Rejection::Fetch);
+    const Shader::Gcn::VertexAttribute* position=nullptr;const Shader::Gcn::VertexAttribute* colour=nullptr;
+    for(const auto& attribute:fetch->attributes) {
+        if(attribute.GetStepRate()!=Shader::Gcn::VertexAttribute::None) return Ps4RtScreenMask::Reject(Rejection::Fetch);
+        if(attribute.semantic==0)position=&attribute;
+        if(attribute.semantic==1)colour=&attribute;
+    }
+    if(!position||!colour) return Ps4RtScreenMask::Reject(Rejection::Fetch);
+    const auto p=position->GetSharp(vs),c=colour->GetSharp(vs);
+    if(!p.Valid()||!c.Valid()||p.GetDataFmt()!=AmdGpu::DataFormat::Format32_32_32_32 ||
+       p.GetNumberFmt()!=AmdGpu::NumberFormat::Float || c.GetDataFmt()!=AmdGpu::DataFormat::Format8_8_8_8 ||
+       c.GetNumberFmt()!=AmdGpu::NumberFormat::Unorm || p.GetStride()<16 || c.GetStride()<4 ||
+       p.swizzle_enable || c.swizzle_enable) {
+        if(Ps4RtScreenMask::rejected[unsigned(Rejection::Format)].fetch_add(1)==0)
+            std::printf("Screen mask: unsupported vertex format position=%u/%u stride=%u colour=%u/%u stride=%u\n",
+                unsigned(p.GetDataFmt()),unsigned(p.GetNumberFmt()),p.GetStride(),
+                unsigned(c.GetDataFmt()),unsigned(c.GetNumberFmt()),c.GetStride());
+        return false;
+    }
+    const auto read=[&](VAddr address,void* destination,size_t bytes) {
+        if(!memory->IsValidGpuMapping(address,0)||memory->ClampRangeSize(address,bytes)<bytes)return false;
+        std::memcpy(destination,reinterpret_cast<const void*>(address),bytes);return true;
+    };
+    // This exact vertex shader uses eight scalar scale/offset coefficients.
+    std::array<float,8> transform{};unsigned constants=0;
+    for(const auto& resource:vs.buffers) if(!resource.IsSpecial()) {
+        const auto sharp=resource.GetSharp(vs);
+        if(!sharp.Valid()||sharp.GetSize()!=sizeof(transform)||!read(sharp.base_address,transform.data(),sizeof(transform)))return Ps4RtScreenMask::Reject(Rejection::Constants);
+        ++constants;
+    }
+    if(constants!=1)return Ps4RtScreenMask::Reject(Rejection::Constants);
+    for(float value:transform)if(!std::isfinite(value))return Ps4RtScreenMask::Reject(Rejection::Constants);
+    const auto [base_vertex,first_instance]=GetDrawOffsets(regs,vs,fetch);
+    if(first_instance)return Ps4RtScreenMask::Reject(Rejection::Vertex);
+    std::array<Ps4RtScreenMask::Vertex,6> vertices{};
+    for(u32 i=0;i<regs.num_indices;++i) {
+        u32 vertex=i;
+        if(indexed) {
+            const u32 bytes=regs.index_buffer_type.index_type==AmdGpu::IndexType::Index16?2u:4u;
+            vertex=0;
+            if(!read(regs.index_base_address.Address<VAddr>()+u64(index_offset+i)*bytes,&vertex,bytes))return Ps4RtScreenMask::Reject(Rejection::Vertex);
+        }
+        const auto at=s64(s32(base_vertex))+vertex;
+        if(at<0 || u64(at)>=p.num_records || u64(at)>=c.num_records)return Ps4RtScreenMask::Reject(Rejection::Vertex);
+        std::array<float,4> raw{};
+        if(!read(p.base_address+u64(at)*p.GetStride(),raw.data(),sizeof(raw)) ||
+           !read(c.base_address+u64(at)*c.GetStride(),&vertices[i].colour,4))return Ps4RtScreenMask::Reject(Rejection::Vertex);
+        for(unsigned k=0;k<4;++k)vertices[i].clip[k]=raw[k]*transform[k]+transform[k+4];
+    }
+    if(!Ps4RtScreenMask::FullFrame({vertices.data(),regs.num_indices},topology))return Ps4RtScreenMask::Reject(Rejection::Coverage);
+    if(Ps4RtScreenMask::expanded.fetch_add(1)==0)
+        std::printf("Screen mask: verified solid-black full-frame GUI quad; expanding both axes before HUD fitting\n");
+    return true;
+}
+
+void Rasterizer::TraceScenePass(const GraphicsPipeline* pipeline,const RenderState& state) {
+    // Reserve separate budgets so early opaque geometry cannot hide later EQUAL,
+    // read-only or auxiliary depth passes. No readback, driver query or GPU wait.
+    if(!Ps4RtUltrawide::Enabled() || !Ps4RtPerformanceProbe::Active() ||
+       !(camera_motion->HasFrameCamera() || camera_motion->Ready()) || !db_desc.first) return;
+    if(cb_descs[0].first && DisplayRegistry::IsDisplayBuffer(texture_cache.GetImage(cb_descs[0].first).info.guest_address)) return;
+    const auto* vertex=pipeline->GetStages()[u32(Shader::SwStage::Vertex)];
+    const auto* pixel=pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    if(!vertex || Ps4RtHud::VertexProgram(vertex->pgm_hash))return;
+    const auto& regs=Regs();
+    const auto& depth=texture_cache.GetImage(db_desc.first);
+    const auto colour=cb_descs[0].first?texture_cache.GetImage(cb_descs[0].first).info.pixel_format:vk::Format::eUndefined;
+    const bool jittered=draw_jitter[0]!=0 || draw_jitter[1]!=0;
+    const bool camera_depth=db_desc.first==camera_motion->Depth();
+    const unsigned group=regs.num_indices<=6?0:regs.depth_control.depth_func==AmdGpu::CompareFunc::Equal?1:
+        !regs.depth_control.depth_write_enable?2:3;
+    static thread_local std::array<std::unordered_set<u64>,4> seen;
+    if(seen[group].size()>=24)return;
+    const std::array<u64,7> key{vertex->pgm_hash,pixel?pixel->pgm_hash:0,
+        depth.image_uid,u64(push_data.scene_size),u64(std::bit_cast<u32>(regs.depth_control)),
+        u64(colour),u64(jittered)|(u64(camera_depth)<<1)};
+    if(!seen[group].insert(XXH3_64bits(key.data(),sizeof(key))).second)return;
+    const auto& vp=regs.viewports[0];
+    const auto depth_raster=push_data.scene_size?scene_targets->ProxySize(depth):
+        SceneResolution::Size{depth.info.size.width,depth.info.size.height};
+    std::printf("Scene pass: vs=%08llx ps=%08llx raster=%ux%u proxy=%u colour=%u depth_uid=%llu depth_guest=%ux%u depth_raster=%ux%u camera_depth=%u jitter=%.4f,%.4f func=%u write=%u stencil=%u clip_disabled=%u viewport=%.1fx%.1f indices=%u\n",
+        (unsigned long long)key[0],(unsigned long long)key[1],state.width,state.height,
+        push_data.scene_size,unsigned(colour),(unsigned long long)depth.image_uid,
+        depth.info.size.width,depth.info.size.height,depth_raster.width,depth_raster.height,
+        unsigned(camera_depth),double(draw_jitter[0]),double(draw_jitter[1]),
+        unsigned(regs.depth_control.depth_func),unsigned(regs.depth_control.depth_write_enable),
+        unsigned(regs.depth_control.stencil_enable),unsigned(regs.IsClipDisabled()),
+        double(vp.xscale*2),double(vp.yscale*2),regs.num_indices);
 }
 
 void Rasterizer::EliminateFastClear() {
@@ -1009,14 +1137,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     if (!bound) {
         return;
     }
-    if(Ps4RtTitle::UiShader(pipeline->GetStages()[u32(Shader::SwStage::Fragment)])) {
-        for(const auto id:bound_images) {
-            const auto& image=texture_cache.GetImage(id);
-            if(image.title_screen_atlas && False(image.flags & VideoCore::ImageFlagBits::GpuModified)) {
-                Ps4RtTitle::MarkDraw();break;
-            }
-        }
-    }
+    PrepareTitleComposition(pipeline);
     const auto state = BeginRendering(pipeline);
     
 
@@ -1127,9 +1248,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             });
         }
     }
+    const bool full_black_mask=FullScreenBlackMask(pipeline,is_indexed,index_offset);
     if(Ps4RtHud::VertexProgram(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash)) {
         push_data.motion_param=Ps4RtUltrawide::HudProjectionParam(target_scale[0],target_scale[1],
-            target_offset[0],target_offset[1],Ps4RtHud::Active()&&!Regs().IsClipDisabled());
+            target_offset[0],target_offset[1],Ps4RtHud::Active()&&!Regs().IsClipDisabled()&&!full_black_mask);
     }
     pipeline->BindResources(set_writes, push_data);
     // ps4rt: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
@@ -1140,6 +1262,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
         draw_jitter = upscaler->Jitter();
     }
+    TraceScenePass(pipeline,state);
     UpdateDynamicState(pipeline, is_indexed);
     ;
     scheduler.BeginRendering(state);
@@ -1239,6 +1362,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     if (!BindResources(pipeline)) {
         return;
     }
+    PrepareTitleComposition(pipeline);
     const auto state = BeginRendering(pipeline);
 
     BindVertexBuffers(pipeline);
@@ -1276,6 +1400,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
         Ps4RtCamera::JitterGeometry(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,Regs().IsClipDisabled())) {
         draw_jitter = upscaler->Jitter();
     }
+    TraceScenePass(pipeline,state);
     UpdateDynamicState(pipeline, is_indexed);
     ;
     scheduler.BeginRendering(state);
@@ -2945,12 +3070,19 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
                                 : has_stencil ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
                                               : vk::ImageLayout::eDepthReadOnlyOptimal;
         
+        auto depth_access = vk::AccessFlags2(vk::AccessFlagBits2::eDepthStencilAttachmentRead);
+        // NativeAccess uses these flags to invalidate the raster proxy. A read-only
+        // depth test must preserve its exact samples across later EQUAL passes;
+        // marking a read as a write forces a lossy native-size depth round trip.
+        // Retain the existing standard-aspect synchronization path unchanged.
+        if (!Ps4RtUltrawide::Enabled() || desc.view_info.is_storage || stencil_write ||
+            is_depth_clear || is_stencil_clear) {
+            depth_access |= vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
+        }
         if (!reduced) needs_barrier |= runtime.Transit(&image, new_layout,
                                          vk::PipelineStageFlagBits2::eEarlyFragmentTests |
                                              vk::PipelineStageFlagBits2::eLateFragmentTests,
-                                         vk::AccessFlagBits2::eDepthStencilAttachmentWrite |
-                                             vk::AccessFlagBits2::eDepthStencilAttachmentRead,
-                                         desc.view_info.range);
+                                         depth_access, desc.view_info.range);
 
         state.width = std::min<u32>(state.width, image.info.size.width);
         state.height = std::min<u32>(state.height, image.info.size.height);
