@@ -16,6 +16,7 @@ const CockpitTranslation kCockpit[] = {
 #include "localization_performance.inc"
 #include "localization_render.inc"
 #include "localization_shortcuts.inc"
+#include "localization_113.inc"
 };
 #undef M
 struct Translation {

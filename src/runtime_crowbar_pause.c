@@ -78,21 +78,62 @@ uint64_t runtime_pause_input_epoch(void) { return __atomic_load_n(&input_epoch, 
 /* A movie frame was just queued (runtime_videodec.c): a pause now would cut the movie. */
 void runtime_pause_movie_frame(void) { __atomic_store_n(&last_movie_frame_ns, host_now_ns(), __ATOMIC_RELEASE); }
 
-static void write_state(long seq, const char *word) {
+/* Only the control watcher publishes replies (startup queues ready before it starts).
+ * Keep the latest reply until publication succeeds. Retrying a reply never repeats
+ * pause, unlock or quit side effects, and a newer request supersedes an old reply. */
+static struct {
+    long seq;
+    char word[16];
+    int pending, warned;
+} state_reply;
+
+static int publish_state(long seq, const char *word) {
     char path[1100], tmp[1110];
     snprintf(path, sizeof(path), "%s/state", control_dir);
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     FILE *out = fopen(tmp, "wb");
-    if (!out) return;
-    fprintf(out, "%ld %s\n", seq, word);
-    if (fclose(out) != 0) { remove(tmp); return; }
+    if (!out) return 0;
+    int complete = fprintf(out, "%ld %s\n", seq, word) >= 0;
+    if (fclose(out) != 0) complete = 0;
+    if (!complete) { remove(tmp); return 0; }
 #ifdef _WIN32
-    /* Publish one complete answer. Keep the previous state if replacement fails;
-     * deleting it first exposes a missing-file interval to Crowbar's reader. */
-    if (!MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) remove(tmp);
+    /* Readers without FILE_SHARE_DELETE can briefly reject atomic replacement.
+     * Retry for at most 100 ms on this control thread, within the Guide response
+     * budget; never remove the last complete state or park game/audio threads. */
+    const uint64_t started = host_now_ns();
+    for (;;) {
+        if (MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return 1;
+        const DWORD error = GetLastError();
+        if ((error != ERROR_SHARING_VIOLATION && error != ERROR_LOCK_VIOLATION &&
+             error != ERROR_ACCESS_DENIED) || host_now_ns() - started >= 100000000ull) break;
+        Sleep(5);
+    }
 #else
-    if (rename(tmp, path) != 0) remove(tmp);
+    if (rename(tmp, path) == 0) return 1;
 #endif
+    remove(tmp);
+    return 0;
+}
+
+static int flush_state_reply(void) {
+    if (!state_reply.pending) return 1;
+    if (!publish_state(state_reply.seq, state_reply.word)) {
+        if (!state_reply.warned) {
+            fprintf(stderr, "Crowbar: state reply %ld pending; publication will be retried\n", state_reply.seq);
+            state_reply.warned = 1;
+        }
+        return 0;
+    }
+    state_reply.pending = state_reply.warned = 0;
+    return 1;
+}
+
+static int write_state(long seq, const char *word) {
+    state_reply.seq = seq;
+    snprintf(state_reply.word, sizeof(state_reply.word), "%s", word);
+    state_reply.pending = 1;
+    state_reply.warned = 0;
+    return flush_state_reply();
 }
 
 /* Sequentially consistent, so a reader that still sees the old state read its host time before
@@ -142,6 +183,9 @@ static void *watch(void *unused) {
     for (;;) {
         struct timespec nap = {0, 100000000};
         nanosleep(&nap, NULL);
+        /* A consumed request may still have an unpublished reply. Retry even
+         * when request is missing or its sequence number has not changed. */
+        flush_state_reply();
         FILE *in = fopen(path, "rb");
         if (!in) continue;
         long seq = 0;

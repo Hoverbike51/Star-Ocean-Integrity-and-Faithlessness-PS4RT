@@ -8,6 +8,39 @@ the original game's complete source code.
 
 [README](README.md) · [Launcher guide](docs/LAUNCHER_GUIDE.md) · [In-game menu guide](docs/IN_GAME_MENU_GUIDE.md)
 
+## 1.1.3 — Cockpit operation panels and Technical overlay
+
+- Replace the launcher update dialogs with the **Essentiel** Cockpit layout under
+  **SO5 PS4RT-WIN Updates**: installed/new versions, release notes, preserved data,
+  real transfer progress, phase labels and a compact result with an open-backup action.
+- Give PKG confirmation, progress and result dialogs the same presentation. Separate
+  the extraction destination from the package name and place **Change folder** beside it.
+- Make selection popups own the complete launcher surface, including the header.
+  Block background tab actions and caption-button focus while a selector is open;
+  support Escape, Enter and arrow navigation, skipping unavailable choices.
+- Present Technical telemetry in fixed columns with GPU, CPU and memory colors.
+  Keep the panel and value column stable across numeric/provider/device-name changes,
+  support six anchors and viewport fitting, and preserve unavailable readings as N/A.
+- Translate new operation text and telemetry labels across all 12 launcher languages.
+  Use the menu font's selected CJK fallback in the Technical overlay.
+- Limit progress redraws to the changing status/bar and cancel-button regions;
+  cache body measurement and coalesce identical log-driven refreshes.
+- Add isolated native UI fixtures and CPU-only ImGui geometry checks. These validate
+  interface behavior and draw cost; they do not certify game performance or GPU latency.
+- Include the merged Crowbar integration: Guide pause/resume, synchronized guest clocks,
+  controller filtering across resume, movie safeguards and orderly application exit.
+  Trophy test-profile replies reflect successful persistence through the game's journal.
+- Retain pending Crowbar state replies when Windows temporarily locks the state file,
+  retry publication without repeating commands, and keep the newest reply.
+- Set source/player version to **1.1.3**, Windows resources to **1.1.3.0**. Preserve
+  existing guide layouts and screenshots, append interface documentation to the Markdown
+  guides, and update PDF version references to **1.1.3** without claiming a full content audit.
+
+> [!WARNING]
+> Residual camera-dependent rendering artifacts, issue #11 and location-dependent
+> Fidel follower failures remain known limitations. This interface update does not
+> claim to resolve them.
+
 ## 1.1.2 — Aspect-ratio composition and update maintenance
 
 ### Rendering and black fades

@@ -1,4 +1,4 @@
-Star Ocean 5 - Windows 10/11 x64 - Experimental version 1.1.2
+Star Ocean 5 - Windows 10/11 x64 - Experimental version 1.1.3
 ==========================================================
 
 Start Star Ocean 5 Launcher.exe at the root of the extracted player folder.
@@ -34,7 +34,9 @@ Console output remains English and can be selected/copied or exported. Performan
 capture is optional and disabled by default. Enable its tools in Advanced, then arm
 Capture next session in Logs and diagnostics. Enabling tools alone does not record.
 
-Version 1.1.2 improves custom-aspect scene/UI composition and full-window black
+Version 1.1.3 refreshes update and PKG dialogs, protects selection popups and
+color-codes the stable Technical overlay. Its UI additions cover all 12 languages.
+The 1.1.2 rendering improvements remain: custom-aspect scene/UI composition and full-window black
 fades. Residual camera-dependent shader/texture patterns remain visible in some
 locations, including with reconstruction disabled; a definitive fix is not included.
 

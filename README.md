@@ -1,5 +1,5 @@
 > [!NOTE]
-> The current Windows source version is **1.1.2**, with improved aspect-ratio composition, full-output black fades and update-package maintenance. <br>
+> The current Windows source version is **1.1.3**, with refreshed Cockpit update/PKG panels, protected selection popups and a color-coded Technical overlay. <br>
 > Tested with `Ryzen 9 9950X3D2` CPU with `Radeon RX 9070 XT` GPU running Windows 11 x64 <br>
 > Tested with `Intel i5 7th Gen` CPU with `Nvidia GTX 1050 Ti` GPU running Windows 10 x64 (laptop)
 
@@ -19,7 +19,7 @@
 </p>
 
 
-Version **1.1.2**, for **Windows 10/11 x64**. This branch adapts the game-specific PS4RT
+Version **1.1.3**, for **Windows 10/11 x64**. This branch adapts the game-specific PS4RT
 compatibility runtime for Star Ocean: Integrity and Faithlessness (PS4).
 It is experimental and has not been validated across a complete playthrough or every PC.
 
@@ -34,7 +34,7 @@ but marked as untested; unrelated titles and PS3 editions are rejected.
 - [Complete Windows changelog](CHANGELOG.md): current changes, earlier development stages and known limits.
 
 > [!WARNING]
-> **1.1.2 known visual issue:** residual camera-dependent shader/texture patterns remain
+> **1.1.3 known visual issue:** residual camera-dependent shader/texture patterns remain
 > visible in some locations at custom aspect ratios, including with reconstruction off.
 > The black-fade correction has been validated locally; removal of all residual artifacts
 > is not considered complete. See the [1.1.2 release notes](docs/RELEASE.md#changes-in-v112).
@@ -125,7 +125,7 @@ From a terminal in the checkout:
 
 ```powershell
 .\build-windows.cmd
-& '.\dist\ps4rt-star-ocean-5-windows-x64-v1.1.2-latest\Star Ocean 5 Launcher.exe'
+& '.\dist\ps4rt-star-ocean-5-windows-x64-v1.1.3-latest\Star Ocean 5 Launcher.exe'
 ```
 
 The CMD build creates a separate, clean player folder without a ZIP by default.
@@ -141,7 +141,7 @@ OK: the native runtime, launcher, extractor and updater are complete without MSY
 ```
 Job is done!
 
-The folder is created under `dist/ps4rt-star-ocean-5-windows-x64-v1.1.2-latest/`.
+The folder is created under `dist/ps4rt-star-ocean-5-windows-x64-v1.1.3-latest/`.
 The name is read from `VERSION`; no user-specific absolute path is stored in the build scripts.
 Keep that entire folder for playing; source files and build intermediates stay in the checkout.
 The root launcher is a small native bootstrap, with no application DLLs at the root.

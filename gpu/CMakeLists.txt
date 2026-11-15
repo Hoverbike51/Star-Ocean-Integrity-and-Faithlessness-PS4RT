@@ -651,3 +651,19 @@ target_compile_definitions(user-paths-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(user-paths-test PRIVATE -UNDEBUG)
 target_link_libraries(user-paths-test PRIVATE fmt::fmt)
 add_test(NAME user-paths COMMAND user-paths-test)
+
+# Technical telemetry UI can be checked without linking or building the game renderer.
+add_executable(technical-overlay-test EXCLUDE_FROM_ALL ../tests/test_technical_overlay.cpp ../launcher/localization.cpp
+    third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp
+    third_party/imgui/imgui_tables.cpp third_party/imgui/imgui_widgets.cpp)
+target_include_directories(technical-overlay-test PRIVATE third_party/imgui)
+target_compile_definitions(technical-overlay-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_definitions(technical-overlay-test PRIVATE PS4RT_TEST_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf")
+target_compile_options(technical-overlay-test PRIVATE -UNDEBUG)
+add_test(NAME technical-overlay COMMAND technical-overlay-test "${CMAKE_CURRENT_BINARY_DIR}/technical-ui-reports")
+set_tests_properties(technical-overlay PROPERTIES TIMEOUT 90)
+if(TARGET ps4rt-launcher)
+    add_test(NAME launcher-operation-ui COMMAND ps4rt-launcher --operation-ui-test
+        "${CMAKE_CURRENT_BINARY_DIR}/operation-ui-reports" "${CMAKE_CURRENT_SOURCE_DIR}/..")
+    set_tests_properties(launcher-operation-ui PROPERTIES TIMEOUT 90)
+endif()

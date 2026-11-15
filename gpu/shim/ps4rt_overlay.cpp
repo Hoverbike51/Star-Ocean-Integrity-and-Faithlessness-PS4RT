@@ -33,6 +33,7 @@
 #include "ps4rt_ultrawide.h"
 #include "ps4rt_window_cursor.h"
 #include "ps4rt_perf_stats.h"
+#include "ps4rt_technical_overlay.h"
 
 extern "C" void runtime_restart(void); // src/loader.c: restart the native runtime process
 #include "common/elf_info.h"
@@ -905,94 +906,34 @@ void LoadingScreen() {
 void FpsCounter() {
     const auto& s = Ps4RtSettings::Get();
     const auto sample = OverlaySample();
-    const std::string text = Ps4RtPerfStats::Format(sample,
-        Ps4RtPerfStats::VisibleItems(s.overlay_items,s.overlay_layout),s.overlay_layout == 0);
-    if (text.empty()) {
+    if (s.overlay_layout == Ps4RtPerfStats::Technical) {
+        Ps4RtTechnicalOverlay::Config cfg;
+        cfg.base_scale = base_scale; cfg.scale = s.overlay_scale / 100.f;
+        cfg.opacity = s.overlay_opacity / 100.f; cfg.corner = s.overlay_corner;
+        cfg.render_width = s.active_render_width; cfg.render_height = s.active_render_height;
+        // The first font includes the selected Windows CJK fallback, unlike the Latin monitoring font.
+        cfg.font = ImGui::GetIO().Fonts->Fonts[0];
+        Ps4RtTechnicalOverlay::Draw(sample, frame_history, cfg,
+            [](const wchar_t* en, const wchar_t* fr) { return Tr(en, fr); });
         return;
     }
+    const std::string text = Ps4RtPerfStats::Format(sample, s.overlay_items, s.overlay_layout == 0);
+    if (text.empty()) return;
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     const float pad = 12.0f * base_scale;
     const auto anchor = Ps4RtPerfStats::PositionAnchor(s.overlay_corner);
     ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + pad + (viewport->WorkSize.x - 2 * pad) * anchor.x,
                                   viewport->WorkPos.y + pad + (viewport->WorkSize.y - 2 * pad) * anchor.y),
                             ImGuiCond_Always, ImVec2(anchor.x, anchor.y));
-    const bool technical = s.overlay_layout == Ps4RtPerfStats::Technical;
-    float font_scale = s.overlay_scale / 100.0f;
-    if (technical) {
-        // Reserve by labels/model names and fixed numeric envelopes, never live readings.
-        // Auto-fit made the right/center anchors move whenever a counter gained a digit.
-        ImFont* font = performance_font ? performance_font : ImGui::GetFont();
-        const float font_size = 18.0f * base_scale;
-        const auto width = [&](const char* value) {
-            return font->CalcTextSizeA(font_size, FLT_MAX, 0.0f, value).x;
-        };
-        const auto row_width = [&](const char* label, const char* reserve) {
-            return width(label) + width(reserve);
-        };
-        const auto& style = ImGui::GetStyle();
-        const float content_width = std::max({420.0f * base_scale,
-            width("AMD FSR 4 v7 (INT8) · Ultra Performance"),
-            row_width(sample.show_gpu_model ? sample.gpu_name.c_str() : "GPU", " 100%"),
-            row_width(sample.show_cpu_model ? sample.cpu_name.c_str() : "CPU", " 100%"),
-            row_width(Tr(L"Threads / logical CPUs", L"Threads / processeurs logiques"), ": 99999 / 9999"),
-            row_width(Tr(L"Sampling: interval / age / cost", L"Mesure : intervalle / âge / coût"),
-                      ": 9999 ms / 9999 ms / 999.99 ms"),
-            row_width(Tr(L"Applied render resolution", L"Résolution de rendu appliquée"), ": 99999 x 99999"),
-            row_width(Tr(L"Output resolution", L"Résolution de sortie"), ": 99999 x 99999"),
-            row_width(Tr(L"Frame time: average / peak", L"Temps par image : moyenne / pic"),
-                      ": 99999.9 / 99999.9 ms")});
-        const float fixed_height = 60.0f * base_scale + 10.0f * style.ItemSpacing.y +
-                                   2.0f * style.WindowPadding.y;
-        // Fifteen text lines plus one spare line; padding/graph do not follow text scale.
-        const float text_height = 16.0f * font_size;
-        const float available_width = std::max(1.0f, viewport->WorkSize.x - 2 * pad);
-        const float available_height = std::max(1.0f, viewport->WorkSize.y - 2 * pad);
-        font_scale = std::max(0.01f, std::min({font_scale,
-            (available_width - 2.0f * style.WindowPadding.x) / content_width,
-            (available_height - fixed_height) / text_height}));
-        ImGui::SetNextWindowSize(ImVec2(
-            std::min(available_width, std::ceil(content_width * font_scale + 2.0f * style.WindowPadding.x)),
-            std::min(available_height, std::ceil(text_height * font_scale + fixed_height))), ImGuiCond_Always);
-    }
     ImGui::SetNextWindowBgAlpha(s.overlay_opacity / 100.0f);
-    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+    ImGui::Begin("##fps", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
         ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings |
-        (technical ? ImGuiWindowFlags_None : ImGuiWindowFlags_AlwaysAutoResize);
-    ImGui::Begin("##fps", nullptr, flags);
+        ImGuiWindowFlags_AlwaysAutoResize);
     ImGui::SetWindowFontScale(1.0f);
-    if(performance_font) ImGui::PushFont(performance_font,18.0f);
-    ImGui::SetWindowFontScale(font_scale);
-    if (s.overlay_layout == Ps4RtPerfStats::Technical) {
-        ImGui::TextColored(ImVec4(.32f,.84f,1.0f,1.0f), "%s", Tr(L"Technical", L"Technique"));
-        ImGui::Separator();
-        ImGui::TextUnformatted(text.c_str());
-        ImGui::Text("%s: %u / %u", Tr(L"Threads / logical CPUs", L"Threads / processeurs logiques"),
-                    sample.thread_count, sample.logical_processors);
-        const int rw = s.active_render_width, rh = s.active_render_height;
-        if (rw > 0 && rh > 0)
-            ImGui::Text("%s: %d x %d", Tr(L"Applied render resolution", L"Résolution de rendu appliquée"),rw,rh);
-        else ImGui::Text("%s: N/A", Tr(L"Applied render resolution", L"Résolution de rendu appliquée"));
-        ImGui::Text("%s: %.0f x %.0f", Tr(L"Output resolution", L"Résolution de sortie"),
-                    viewport->Size.x,viewport->Size.y);
-        if (sample.sample_interval_ms >= 0.0 && sample.sample_age_ms >= 0.0)
-            ImGui::Text("%s: %.0f ms / %.0f ms / %.2f ms", Tr(L"Sampling: interval / age / cost", L"Mesure : intervalle / âge / coût"),
-                        sample.sample_interval_ms,sample.sample_age_ms,sample.sampling_ms);
-        else
-            ImGui::Text("%s: N/A", Tr(L"Sampling: interval / age / cost", L"Mesure : intervalle / âge / coût"));
-        ImGui::Separator();
-        ImGui::Text("%s: %.1f / %.1f ms", Tr(L"Frame time: average / peak", L"Temps par image : moyenne / pic"),
-                    frame_history.Mean(),frame_history.Peak());
-        const float graph_width = std::max(1.0f, ImGui::GetContentRegionAvail().x);
-        const float graph_max = std::clamp(frame_history.Peak() * 1.1f,33.4f,250.0f);
-        ImGui::PushStyleColor(ImGuiCol_PlotLines,ImVec4(.32f,.84f,1.0f,1.0f));
-        ImGui::PlotLines("##frametimes",frame_history.values.data(),int(frame_history.count),
-                         int(frame_history.Offset()),nullptr,0.0f,graph_max,
-                         ImVec2(graph_width,60.0f*base_scale));
-        ImGui::PopStyleColor();
-    } else {
-        ImGui::TextUnformatted(text.c_str());
-    }
-    if(performance_font) ImGui::PopFont();
+    if (performance_font) ImGui::PushFont(performance_font, 18.0f);
+    ImGui::SetWindowFontScale(s.overlay_scale / 100.0f);
+    ImGui::TextUnformatted(text.c_str());
+    if (performance_font) ImGui::PopFont();
     ImGui::End();
 }
 

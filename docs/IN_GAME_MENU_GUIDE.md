@@ -1,6 +1,6 @@
 # Star Ocean 5 In-game Menu Guide
 
-**Windows 10/11 x64 · Version 1.1.2**
+**Windows 10/11 x64 · Version 1.1.3**
 
 🟦 **DISPLAY** · 🟩 **IMAGE** · 🟨 **TWEAKS** · 🟥 **DIAGNOSTICS**
 
@@ -23,7 +23,7 @@ differ from the currently applied render state.
 > [!WARNING]
 > **Remaining visual limitation:** camera-dependent shader/texture patterns can still
 > appear in some locations, including with reconstruction disabled. Their definitive
-> correction is not included in 1.1.2; include the ratio, applied render size and an
+> correction is not included in 1.1.3; include the ratio, applied render size and an
 > exported diagnostic when reporting them.
 
 ## Contents
@@ -468,3 +468,39 @@ Select **Exit game** to open the confirmation dialog. Cancel returns to the menu
 requests game shutdown and returns you to the launcher when the process finishes. Save
 progress using the game's own save system first. For a performance investigation, prefer
 this exit path over terminating the process in Task Manager so reports can be finalized.
+
+## Technical overlay 1.1.3
+
+🟩 **FRAME RATE** · 🟦 **GPU** · 🟨 **CPU** · 🟪 **MEMORY**
+
+Enable the performance overlay and choose **Technical** as its layout in the launcher
+or the in-game performance controls. This layout keeps the full diagnostic view in
+fixed label/value columns. Long provider and hardware names occupy their own rows;
+changing counters cannot make the panel jump horizontally.
+
+![Native Technical overlay rendered with illustrative readings](images/ui-113/technical-overlay.png)
+
+| Color or field | Meaning |
+| --- | --- |
+| 🟩 **FPS** | Presentation rate. Frame time is shown separately in milliseconds. |
+| 🟦 **GPU / reconstruction** | Sampled activity for the selected process/adapter and the effective reconstruction/preset. |
+| 🟨 **CPU (process)** | Game-process CPU usage normalized across all logical processors. It is not total system CPU usage. |
+| 🟨 **CPU thread** | Busiest sampled process thread, expressed relative to one logical CPU; it can be high while normalized process usage is low. |
+| 🟪 **RAM / VRAM** | Used memory and available reported capacity. A missing total does not imply zero capacity. |
+| **Threads / logical CPUs** | Process thread count alongside logical processor count; these are different quantities. |
+| **Applied render / Output** | Applied internal render size and current output size. |
+| **Sampling: interval / age / cost** | Time between samples, age of the reading and collection cost. These are not three frame-time measurements. |
+| **Average / peak + graph** | Recent presented-frame history retained in fixed storage. |
+| **N/A** | A reading is unavailable; the overlay does not replace it with a misleading zero. |
+
+> [!TIP]
+> The panel fits the viewport at **4:3, 16:10, 16:9, 21:9 and 32:9**, with the same
+> six saved positions, opacity and scale controls. Its size may refit after a viewport,
+> scale, language or model-visibility change; live numbers and provider/model-name
+> length do not change its geometry. Hardware names that exceed their row are clipped.
+
+> [!IMPORTANT]
+> These are diagnostic readings, not a confirmed explanation of every slowdown.
+> CPU-only interface tests do not measure Vulkan submission, GPU rendering, font-texture
+> uploads or the game's actual frame cost. Residual rendering artifacts remain a separate
+> known issue in 1.1.3, including when reconstruction is disabled.

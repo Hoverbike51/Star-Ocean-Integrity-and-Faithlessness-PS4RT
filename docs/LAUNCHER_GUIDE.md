@@ -1,12 +1,12 @@
 # Star Ocean 5 Launcher Guide
 
-**Windows 10/11 x64 · Version 1.1.2**
+**Windows 10/11 x64 · Version 1.1.3**
 
 🟦 **SET UP** · 🟩 **PLAY** · 🟨 **CUSTOMIZE** · 🟥 **TROUBLESHOOT**
 
 The Cockpit launcher prepares your own PS4 game files, manages settings and starts the
 Windows runtime. Screenshot paths and values are examples, not installation defaults.
-This guide follows Windows 1.1.2; existing screenshots illustrate the 1.1.0 interface.
+This guide follows Windows 1.1.3; existing screenshots illustrate the 1.1.0 interface.
 Some screenshots capture a pending setting, so the value selected in a screenshot is not necessarily the value already
 applied to a running game.
 
@@ -25,7 +25,7 @@ applied to a running game.
 > [!WARNING]
 > **Remaining visual limitation:** camera-dependent shader/texture patterns can still
 > appear in some locations, including with reconstruction disabled. Their definitive
-> correction is not included in 1.1.2; include the ratio, applied render size and an
+> correction is not included in 1.1.3; include the ratio, applied render size and an
 > exported diagnostic when reporting them.
 
 ## Contents
@@ -40,6 +40,7 @@ applied to a running game.
 - [Advanced](#advanced)
 - [Logs and diagnostics](#logs-and-diagnostics)
 - [Performance probe 1.1.1](#performance-probe-111)
+- [Cockpit operation panels 1.1.3](#cockpit-operation-panels-113)
 - [Known issues and troubleshooting](#known-issues-and-troubleshooting)
 
 ## First launch
@@ -259,7 +260,7 @@ entrance before using it; transition guards reduce repeated entrance triggers.
 
 > [!WARNING]
 > **Known issue — Fidel's follow behaviour:** Fidel can still fail to follow the party in
-> some locations when another character leads. This is not considered fixed in 1.1.2.
+> some locations when another character leads. This is not considered fixed in 1.1.3.
 > Restore Fidel as leader if this occurs. Save normally before testing a different leader.
 
 **Camera fixes** preserves manual rotation and collision handling. Damped follow softens
@@ -607,8 +608,8 @@ CPU or driver fault from a low aggregate usage reading alone.
 | Wrong or empty game information | Select the extracted game directory itself and wait for validation. |
 | A rendering preset is refused | Return to previous working preset; see the [experimental preset limits](IN_GAME_MENU_GUIDE.md#the-presets). Export diagnostics after the refusal. |
 | Pixelation, a bottom-edge line or a black scene | Note the active provider, preset and applied input size. Compare the same route with reconstruction disabled, then export diagnostics. Do not assume FXAA fixes a reconstruction failure. |
-| Camera-dependent patterns remain at a custom aspect ratio | Known residual rendering issue in 1.1.2. Compare the same scene with reconstruction off, note the ratio and applied render size, then export diagnostics; switching off reconstruction may not remove it. |
-| Fidel stops following another leader | Restore Fidel as leader. Location-dependent follower failures remain a known issue in 1.1.2. |
+| Camera-dependent patterns remain at a custom aspect ratio | Known residual rendering issue in 1.1.3. Compare the same scene with reconstruction off, note the ratio and applied render size, then export diagnostics; switching off reconstruction may not remove it. |
+| Fidel stops following another leader | Restore Fidel as leader. Location-dependent follower failures remain a known issue in 1.1.3. |
 | HUD preset has no effect | Refresh the library, check game/ratio compatibility and the apply status, then test a mapped group. Subtitle adjustment remains incomplete. |
 | Title-screen globe remains 16:9 | This scene still has a separate aspect-ratio limitation; do not stretch the complete UI/video presentation to compensate. |
 | Temporary 16:9 framing at a zone boundary | Some transition states can still restore the game's original framing briefly. This is separate from the full-window loading blackout. |
@@ -619,3 +620,80 @@ CPU or driver fault from a low aggregate usage reading alone.
 
 - Save progress in the game's own save system before using **Exit game**. Closing the custom
 settings menu or the launcher is not a command to save game progress.
+
+## Cockpit operation panels 1.1.3
+
+🟦 **UPDATES** · 🟩 **PRESERVED DATA** · 🟨 **EXTRACTION DESTINATION**
+
+The **Essentiel** panels share the Cockpit's dark background, cyan actions and clear
+footer. Existing screenshots above remain useful for the unchanged launcher pages.
+The illustrations below render the native 1.1.3 interface with example data; the offered
+version and paths do not announce an available release or define your installation.
+
+### Application updates
+
+![Essentiel update panel with installed/new versions and actions](images/ui-113/update-available.png)
+
+| Panel or action | What it means |
+| --- | --- |
+| **SO5 PS4RT-WIN Updates** | Updates for this application. The title remains the same in every interface language. |
+| **Installed version → New version** | Compare the running application's version with the release offered by the updater. |
+| **Release notes** | Open that release's GitHub page. No installation starts from this action. |
+| **Later** or the panel's **×** | Dismiss the offer. |
+| **Download & install** | Start the existing download, digest check, package validation and installation workflow. |
+| **Open backup folder** | From the result panel, open the reported backup directory without displaying a long internal path in the dialog. |
+| **Done** | Close the result panel. |
+
+![Native update progress with a real-transfer style bar and phase label](images/ui-113/update-progress.png)
+
+> [!NOTE]
+> **The progress bar is retained.** Download and extraction use the updater's byte
+> counters. Verification, application checks and installer preparation can be
+> indeterminate: the panel names the current phase instead of presenting an invented
+> percentage. Cancel is disabled during installer handoff. The launcher restarts after
+> installation; the separate helper performs the existing protected update workflow.
+
+> [!IMPORTANT]
+> The interface redesign does not make a source archive an installable update.
+> Automatic updates still require a compatible player ZIP, its SHA-256 digest and
+> successful package checks. Read an error/result message before retrying. Saves and
+> settings are preserved by the updater; keep your own backups when testing releases.
+
+### Choose the PKG extraction folder
+
+![PKG confirmation with a separate destination and Change folder button](images/ui-113/pkg-destination.png)
+
+| Step | Action |
+| --- | --- |
+| **1 · Review** | Check the package filename and size. |
+| **2 · Choose** | Read **Extraction folder**. Select the adjacent **Change folder** button to pick another destination. |
+| **3 · Confirm again** | After the folder picker closes, review the destination shown in the confirmation panel. Canceling the picker retains the previous destination. |
+| **4 · Extract** | Start extraction only when the destination is correct. The native extractor can create the title's subfolder beneath that destination; progress shows the detected destination. |
+| **5 · Follow progress** | The bar uses actual extraction counters and shows elapsed time. Finalization remains below 100% until completion. |
+
+> [!TIP]
+> Choose a writable folder with enough free space for the extracted game. The selected
+> destination is remembered in the launcher settings. Long paths may be shortened on
+> screen; **Change folder** opens the folder selection interface for review.
+
+### Selection windows own navigation
+
+While a launcher selection popup is open, background tabs and caption buttons cannot
+take focus. Click outside the popup or press **Escape** to dismiss it, then change tabs.
+Use **Up/Down** to navigate available choices and **Enter** to apply the highlighted
+choice. Unavailable choices remain unavailable. This applies to language, graphics and
+other launcher selectors, not only the game-language list.
+
+### Technical overlay and response time
+
+Select **Advanced → Performance overlay → Layout → Technical**. The color legend and
+CPU interpretation are in the [in-game guide](IN_GAME_MENU_GUIDE.md#technical-overlay-113).
+Scale, opacity and all six positions remain available. Reading changes do not resize
+the panel or move its value column; changing its language, scale or viewport can refit it.
+
+> [!NOTE]
+> The 3 ms target concerns repeated UI drawing, not package transfer, extraction time,
+> game frame time or a promise for every PC. Progress redraws are restricted to the
+> status/bar and cancel action; repeated identical logs no longer force a full-window
+> repaint. Full initial paints, resizing, font loading and page changes have separate costs.
+> See [native UI validation](UI_VALIDATION.md) for reproducible checks and measured limits.

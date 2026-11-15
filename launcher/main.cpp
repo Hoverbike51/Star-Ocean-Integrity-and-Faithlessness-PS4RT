@@ -102,7 +102,8 @@ enum Hit {
 };
 
 enum class ModalAction { None, ClearCache, CloseIdle, CloseGame, ForceCloseGame, ConfirmExtraction, CancelExtraction,
-                         UpdateOffer, UpdateLink, UpdateProgress, ForceFsr3 };
+                         UpdateOffer, UpdateLink, UpdateProgress, ForceFsr3, UpdateResult };
+enum class ModalStyle { Plain, Update, UpdateSuccess, Pkg };
 
 struct UpdateEvent {
     enum Kind { Checked, Prepared, Installer } kind = Checked;
@@ -182,6 +183,12 @@ struct AppState {
     std::wstring modal_tertiary;
     ModalAction modal_action = ModalAction::None;
     bool modal_visible = false;
+    ModalStyle modal_style = ModalStyle::Plain;
+    fs::path modal_backup;
+    RECT modal_bounds{};
+    RECT modal_progress_bounds{};
+    RECT modal_action_bounds{};
+    uint64_t modal_revision = 0;
     bool extraction_active = false;
     std::atomic_bool extraction_cancel_requested{false};
     ULONGLONG extraction_started = 0;
@@ -496,9 +503,15 @@ void flush_log_stream() {
 
 void show_modal(const std::wstring& title, const std::wstring& body,
                 const std::wstring& primary, const std::wstring& secondary = {},
-                ModalAction action = ModalAction::None, const std::wstring& tertiary = {}) {
+                ModalAction action = ModalAction::None, const std::wstring& tertiary = {},
+                ModalStyle style = ModalStyle::Plain) {
     {
         std::lock_guard guard(app.mutex);
+        app.modal_style = style;
+        app.modal_backup.clear();
+        app.modal_progress_bounds = {};
+        app.modal_action_bounds = {};
+        ++app.modal_revision;
         app.modal_title = title;
         app.modal_body = body;
         app.modal_primary = primary;
@@ -508,6 +521,26 @@ void show_modal(const std::wstring& title, const std::wstring& body,
         app.modal_visible = true;
     }
     notify_log_updated();
+}
+
+constexpr const wchar_t* update_dialog_title() { return L"SO5 PS4RT-WIN Updates"; }
+void show_update_modal(const std::wstring& body, const std::wstring& primary,
+                       const std::wstring& secondary = {}, ModalAction action = ModalAction::None,
+                       const std::wstring& tertiary = {}) {
+    show_modal(update_dialog_title(), body, primary, secondary, action, tertiary, ModalStyle::Update);
+}
+void show_pkg_modal(const std::wstring& title, const std::wstring& body, const std::wstring& primary,
+                    const std::wstring& secondary = {}, ModalAction action = ModalAction::None,
+                    const std::wstring& tertiary = {}) {
+    show_modal(title, body, primary, secondary, action, tertiary, ModalStyle::Pkg);
+}
+void invalidate_modal() {
+    if (app.modal_progress_bounds.right > app.modal_progress_bounds.left) {
+        InvalidateRect(app.window, &app.modal_progress_bounds, FALSE);
+        InvalidateRect(app.window, &app.modal_action_bounds, FALSE);
+    }
+    else if (app.modal_bounds.right > app.modal_bounds.left) InvalidateRect(app.window, &app.modal_bounds, FALSE);
+    else InvalidateRect(app.window, nullptr, FALSE);
 }
 
 fs::path executable_directory() {
@@ -1379,10 +1412,13 @@ void confirm_pkg_extraction(const fs::path& pkg) {
     std::error_code ec;
     const auto bytes = fs::file_size(pkg, ec);
     app.pending_pkg = pkg;
+    app.extraction_source = pkg.filename().wstring();
+    app.extraction_destination = pkg_import_root().wstring();
+    app.extraction_size = ec ? 0 : bytes;
     const std::wstring details = pkg.filename().wstring() + L"\n" +
         loc(L"Taille : ",L"Size: ") + (ec ? L"—" : format_size(bytes)) + L"\n" +
         loc(L"Destination : ",L"Destination: ") + pkg_import_root().wstring();
-    show_modal(loc(L"Extraire ce PKG ?",L"Extract this PKG?"), details,
+    show_pkg_modal(loc(L"Extraire ce PKG ?",L"Extract this PKG?"), details,
                loc(L"Extraire",L"Extract"), loc(L"Annuler",L"Cancel"), ModalAction::ConfirmExtraction,
                loc(L"Changer le dossier",L"Change folder"));
 }
@@ -1392,7 +1428,7 @@ void extract_pkg(const fs::path& pkg) {
     const fs::path extractor = pkg_extractor_path();
     if (!fs::is_regular_file(extractor)) {
         app.status = loc(L"Extracteur PKG absent", L"PKG extractor is missing");
-        show_modal(loc(L"Extracteur indisponible",L"Extractor unavailable"),
+        show_pkg_modal(loc(L"Extracteur indisponible",L"Extractor unavailable"),
                    loc(L"PkgExtractor.exe doit être présent dans le paquet.",
                        L"PkgExtractor.exe must be present in the package."),
                    L"OK");
@@ -1418,7 +1454,7 @@ void extract_pkg(const fs::path& pkg) {
     app.status = loc(L"Extraction du PKG en cours…",L"Extracting PKG…");
     append_log(L"PKG extraction started: " + pkg.wstring());
     append_log(L"PKG extraction directory: " + destination.wstring());
-    show_modal(loc(L"Extraction du PKG",L"PKG extraction"),
+    show_pkg_modal(loc(L"Extraction du PKG",L"PKG extraction"),
                app.extraction_source + L"\n" + loc(L"Taille : ",L"Size: ") + format_size(app.extraction_size) +
                L"\n" + loc(L"Destination : ",L"Destination: ") + app.extraction_destination,
                loc(L"Annuler l’extraction",L"Cancel extraction"), {}, ModalAction::CancelExtraction);
@@ -1434,7 +1470,7 @@ void extract_pkg(const fs::path& pkg) {
                 app.busy = false; app.pkg_selected = false; app.extraction_active = false;
                 app.status = loc(L"Échec de l’extraction du PKG · consultez le journal",L"PKG extraction failed · see diagnostics");
             }
-            show_modal(loc(L"Échec de l’extraction",L"Extraction failed"),
+            show_pkg_modal(loc(L"Échec de l’extraction",L"Extraction failed"),
                        loc(L"Impossible de démarrer la capture des diagnostics.",L"Could not start the diagnostics capture."), L"OK");
             return;
         }
@@ -1463,7 +1499,7 @@ void extract_pkg(const fs::path& pkg) {
                 app.busy = false; app.pkg_selected = false; app.extraction_active = false;
                 app.status = loc(L"Échec de l’extraction du PKG · consultez le journal",L"PKG extraction failed · see diagnostics");
             }
-            show_modal(loc(L"Échec de l’extraction",L"Extraction failed"),
+            show_pkg_modal(loc(L"Échec de l’extraction",L"Extraction failed"),
                        loc(L"PkgExtractor.exe n’a pas pu démarrer. Consultez le journal pour le code Windows.",
                            L"PkgExtractor.exe could not start. See the log for the Windows error code."), L"OK");
             return;
@@ -1537,7 +1573,7 @@ void extract_pkg(const fs::path& pkg) {
             }
             append_log(cleanup_error ? L"ERROR · canceled PKG extraction left partial files in " + destination.wstring()
                                      : L"PKG extraction canceled · partial files removed");
-            show_modal(loc(L"Extraction annulée",L"Extraction canceled"),
+            show_pkg_modal(loc(L"Extraction annulée",L"Extraction canceled"),
                        cleanup_error ? loc(L"L’extraction a été arrêtée, mais certains fichiers partiels n’ont pas pu être supprimés.",
                                            L"Extraction stopped, but some partial files could not be removed.")
                                      : loc(L"L’extraction a été arrêtée et les fichiers partiels ont été supprimés.",
@@ -1546,12 +1582,12 @@ void extract_pkg(const fs::path& pkg) {
             save_settings(); append_log(L"PKG extraction complete: " + game.wstring());
             if (extracted_identity == GameIdentity::Untested) {
                 append_log(L"WARNING · recognized but untested Star Ocean 5 PS4 TITLE_ID: " + extracted_title_id);
-                show_modal(loc(L"Version de jeu non testée",L"Untested game version"),
+                show_pkg_modal(loc(L"Version de jeu non testée",L"Untested game version"),
                            loc(L"Le PKG a été extrait et cette édition PS4 de Star Ocean 5 a été sélectionnée. Elle n’a pas encore été validée avec ce runtime : ",
                                L"The PKG was extracted and this PS4 edition of Star Ocean 5 was selected. It has not yet been validated with this runtime: ") + extracted_title_id,
                            loc(L"Continuer",L"Continue"));
             } else {
-                show_modal(loc(L"Extraction terminée",L"Extraction complete"),
+                show_pkg_modal(loc(L"Extraction terminée",L"Extraction complete"),
                            loc(L"Le jeu PS4 a été extrait et sélectionné automatiquement. Vous pouvez maintenant le préparer ou le lancer.",
                                L"The PS4 game was extracted and selected automatically. You can now prepare or launch it."),
                            loc(L"Continuer",L"Continue"));
@@ -1560,7 +1596,7 @@ void extract_pkg(const fs::path& pkg) {
             save_settings();
             append_log(L"ERROR · extracted PS4 TITLE_ID is not supported: " +
                        (extracted_title_id.empty() ? std::wstring(L"unreadable") : extracted_title_id));
-            show_modal(loc(L"Jeu non pris en charge",L"Unsupported game"),
+            show_pkg_modal(loc(L"Jeu non pris en charge",L"Unsupported game"),
                        extracted_identity == GameIdentity::Rejected
                            ? loc(L"Le PKG a été extrait, mais le TITLE_ID ne correspond pas à Star Ocean 5. Le lancement est bloqué : ",
                                  L"The PKG was extracted, but its TITLE_ID does not belong to Star Ocean 5. Launch is blocked: ") + extracted_title_id
@@ -1569,7 +1605,7 @@ void extract_pkg(const fs::path& pkg) {
                        L"OK");
         } else {
             append_log(L"ERROR · PKG extraction did not produce a valid PS4 game directory (exit code " + std::to_wstring(code) + L")");
-            show_modal(loc(L"Échec de l’extraction",L"Extraction failed"),
+            show_pkg_modal(loc(L"Échec de l’extraction",L"Extraction failed"),
                        code == 0 ? loc(L"L’extraction est terminée, mais aucun dossier de jeu PS4 valide n’a été trouvé.",
                                            L"Extraction completed, but no valid PS4 game directory was found.")
                                  : loc(L"L’extracteur a signalé une erreur. Consultez Journal et diagnostic.",
@@ -1974,9 +2010,10 @@ void open_selector(int setting, const std::vector<std::wstring>& values) {
 
 void draw_selector(Graphics& g, REAL width, REAL height) {
     if (app.popup_hit == HitNone || app.popup_values.empty()) return;
-    hit(1999, 0, kHeaderHeight, width, height - kHeaderHeight);
+    app.hits.clear();
+    hit(1999, 0, 0, width, height);
     SolidBrush veil(Color(155, 0, 5, 12));
-    g.FillRectangle(&veil, 0.0f, REAL(kHeaderHeight), width, height - kHeaderHeight);
+    g.FillRectangle(&veil, 0.0f, 0.0f, width, height);
     const REAL panel_width = std::min<REAL>(590, width - 100);
     const REAL row_height = 48;
     const int visible=std::min<int>(app.popup_values.size(),std::max(1,int((height-kHeaderHeight-90)/row_height)));
@@ -2007,7 +2044,13 @@ void draw_selector(Graphics& g, REAL width, REAL height) {
     }
 }
 
+#include "cockpit_dialog.inc"
+
 void draw_modal(Graphics& g, REAL width, REAL height) {
+    if (app.modal_visible && app.modal_style != ModalStyle::Plain) {
+        draw_operation_modal(g, width, height);
+        return;
+    }
     if (!app.modal_visible) return;
     hit(HitModalBackdrop, 0, 0, width, height);
     SolidBrush veil(Color(205, 0, 5, 12));
@@ -2701,13 +2744,22 @@ REAL launcher_scale(int width,int height) {
 }
 void render_launcher(Graphics& g, int width, int height) {
     const auto layout_state=g.Save();
+    // Worker threads may publish a modal; selector storage belongs to the UI thread.
+    if (app.modal_visible && app.popup_hit != HitNone) {
+        app.popup_hit = HitNone; app.popup_values.clear(); app.popup_enabled.clear();
+    }
+    // Initialize physical edge pixels too. Antialiasing the scaled base rectangle
+    // left translucent edge pixels accumulating across retained-canvas redraws.
+    g.SetSmoothingMode(SmoothingModeNone);
+    g.SetCompositingMode(CompositingModeSourceCopy);
+    SolidBrush base(Color(255,1,8,17)); g.FillRectangle(&base,0,0,width,height);
+    g.SetCompositingMode(CompositingModeSourceOver);
     app.ui_scale=launcher_scale(width,height);
     g.ScaleTransform(app.ui_scale,app.ui_scale);
     width=int(width/app.ui_scale);height=int(height/app.ui_scale);
     g.SetSmoothingMode(SmoothingModeAntiAlias);
     g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
     g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
-    SolidBrush base(Color(255,1,8,17)); g.FillRectangle(&base,0,0,width,height);
     image_cover(g, app.background.get(), 0, 0, static_cast<REAL>(width), static_cast<REAL>(height));
     LinearGradientBrush shade(RectF(0, 0, static_cast<REAL>(width), static_cast<REAL>(height)),
                               Color(80, 1, 8, 17), Color(178, 2, 10, 20), LinearGradientModeVertical);
@@ -2740,7 +2792,7 @@ void render_launcher(Graphics& g, int width, int height) {
     case Page::Advanced: draw_advanced(g, x, page_y, content_width, content_height + scroll); break;
     case Page::Logs: draw_logs(g, x, page_y, content_width, content_height + scroll); break;
     }
-    app.log_console.Show(app.page==Page::Logs && !app.modal_visible);
+    app.log_console.Show(app.page==Page::Logs && !app.modal_visible && app.popup_hit==HitNone);
     app.clipping_content_hits = false;
     g.Restore(content_state);
     const int viewport = height - kHeaderHeight - 28;
@@ -2759,8 +2811,8 @@ void render_launcher(Graphics& g, int width, int height) {
 }
 
 void paint(HWND window) {
-    if (IsWindowEnabled(app.minimize_button) == app.modal_visible) EnableWindow(app.minimize_button, !app.modal_visible);
-    if (IsWindowEnabled(app.close_button) == app.modal_visible) EnableWindow(app.close_button, !app.modal_visible);
+    if (IsWindowEnabled(app.minimize_button) == (app.modal_visible || app.popup_hit != HitNone)) EnableWindow(app.minimize_button, !app.modal_visible && app.popup_hit == HitNone);
+    if (IsWindowEnabled(app.close_button) == (app.modal_visible || app.popup_hit != HitNone)) EnableWindow(app.close_button, !app.modal_visible && app.popup_hit == HitNone);
     // Preserve the actual disjoint invalid rectangles. rcPaint is only their
     // bounding box and can span an entire page between two distant controls.
     HRGN dirty=CreateRectRgn(0,0,0,0);
@@ -2993,7 +3045,6 @@ void show_update_notice() {
     if (!app.update_notice || app.modal_visible || app.close_when_idle || (app.busy && !app.update_interactive) || IsIconic(app.window)) return;
     const auto result = std::move(*app.update_notice); app.update_notice.reset();
     const bool interactive = app.update_interactive; app.update_interactive = false;
-    const auto title = loc(L"Mises à jour Windows",L"Windows updates");
     using C = So5Update::Code;
     std::wstring body = std::wstring(loc(L"Version installée : ",L"Installed version: ")) + kVersion;
     if (result.release) {
@@ -3004,32 +3055,32 @@ void show_update_notice() {
         if (result.code == C::Available && So5Update::PlayerInstall(app.root)) {
             body += L"\n\n" + std::wstring(loc(L"Vous allez télécharger et installer cette mise à jour. Le lanceur redémarrera. Vos sauvegardes et paramètres seront conservés.",
                 L"You will download and install this update. The launcher will restart. Saves and settings will be kept."));
-            show_modal(title, body, loc(L"Télécharger",L"Download"), loc(L"Non",L"No"), ModalAction::UpdateOffer,
-                       loc(L"Ouvrir GitHub",L"Open GitHub"));
+            show_update_modal(body, loc(L"Télécharger et installer",L"Download & install"), loc(L"Plus tard",L"Later"), ModalAction::UpdateOffer,
+                       loc(L"Notes de version",L"Release notes"));
         } else {
             body += L"\n\n" + std::wstring(result.code == C::NoDigest
                 ? loc(L"Le paquet n’a pas d’empreinte SHA-256. L’installation automatique est indisponible.",L"The package has no SHA-256 digest. Automatic installation is unavailable.")
                 : result.code == C::NoPackage
                 ? loc(L"Aucun paquet Windows x64 n’est joint à cette version.",L"No Windows x64 package is attached to this release.")
                 : update_error(C::Development));
-            show_modal(title, body, loc(L"Ouvrir GitHub",L"Open GitHub"), loc(L"Non",L"No"), ModalAction::UpdateLink);
+            show_update_modal(body, loc(L"Ouvrir GitHub",L"Open GitHub"), loc(L"Non",L"No"), ModalAction::UpdateLink);
         }
     } else if (interactive) {
         body += L"\n\n" + std::wstring(result.code == C::Current ? loc(L"Aucune version Windows plus récente n’est disponible.",L"No newer Windows release is available.") :
             result.code == C::NoPackage ? loc(L"Aucun paquet Windows destiné aux joueurs n’est publié actuellement.",L"No Windows player package is currently published.") : update_error(result.code));
-        show_modal(title, body, L"OK");
+        show_update_modal(body, L"OK");
     }
 }
 
 void begin_update_download() {
     if (!app.update_release || app.update_running) return;
     if (app.busy) {
-        show_modal(loc(L"Mises à jour Windows",L"Windows updates"),
+        show_update_modal(
             loc(L"Fermez toutes les instances de l’application avant d’installer une mise à jour.",L"Close all running copies of the application before installing an update."), L"OK");
         return;
     }
     if (!So5Update::PlayerInstall(app.root)) {
-        show_modal(loc(L"Mises à jour Windows",L"Windows updates"), update_error(So5Update::Code::Development), L"OK"); return;
+        show_update_modal( update_error(So5Update::Code::Development), L"OK"); return;
     }
     PWSTR known = nullptr; fs::path parent;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_CREATE, nullptr, &known))) {
@@ -3039,7 +3090,7 @@ void begin_update_download() {
     app.update_running = app.update_transfer = true; app.update_cancel = false;
     app.update_phase = So5Update::Phase::Download; app.update_done = 0; app.update_total = release.size;
     save_settings();
-    show_modal(loc(L"Mise à jour de STAR OCEAN 5",L"Updating STAR OCEAN 5"),
+    show_update_modal(
         loc(L"Téléchargement et vérification du paquet Windows. L’installation actuelle restera intacte jusqu’à la fin des vérifications.",
             L"Downloading and checking the Windows package. Your installation will remain unchanged until verification succeeds."),
         loc(L"Annuler",L"Cancel"), {}, ModalAction::UpdateProgress);
@@ -3110,7 +3161,7 @@ void receive_update_event() {
             try { So5Update::RemoveWorkspace(app.update_prepared->workspace); } catch (...) {}
             app.update_prepared.reset();
         }
-        show_modal(loc(L"Mises à jour Windows",L"Windows updates"), update_error(event->code), L"OK");
+        show_update_modal( update_error(event->code), L"OK");
     }
     InvalidateRect(app.window, nullptr, FALSE);
 }
@@ -3189,9 +3240,25 @@ void apply_selector(int index) {
     app.popup_hit = HitNone; app.popup_values.clear();app.popup_enabled.clear(); save_settings(); sync_chrome();
 }
 
+void navigate_selector(int step) {
+    const int count = int(app.popup_values.size());
+    if (app.popup_hit == HitNone || !count) return;
+    int index = app.hover >= 2000 && app.hover < 2000 + count ? app.hover - 2000 : app.popup_scroll - step;
+    for (int n = 0; n < count; ++n) {
+        index = (index + step + count) % count;
+        if (app.popup_enabled.empty() || (size_t(index) < app.popup_enabled.size() && app.popup_enabled[index])) {
+            app.hover = 2000 + index; app.popup_scroll = std::max(0, index - 2); return;
+        }
+    }
+}
+
 void activate(int id) {
     if (app.modal_visible) {
         if (id == HitModalBackdrop) return;
+        if (id == HitModalTertiary && app.modal_action == ModalAction::UpdateResult) {
+            if (!app.modal_backup.empty()) ShellExecuteW(app.window, L"open", app.modal_backup.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            return;
+        }
         if (id == HitModalTertiary && app.modal_action == ModalAction::UpdateOffer) {
             if (app.update_release) {
                 const auto& page = app.update_release->page;
@@ -3274,6 +3341,8 @@ void activate(int id) {
         }
         return;
     }
+    if (app.popup_hit != HitNone && id != 1997 && id != 1998 && id != 1999 &&
+        !(id >= 2000 && id < 2000 + int(app.popup_values.size()))) return;
     if (id >= kBindingHitBase && id < kBindingHitBase + static_cast<int>(app.key_bindings.size())) {
         app.capture_binding = id - kBindingHitBase;
         app.popup_hit = HitNone;
@@ -3729,7 +3798,14 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
         if (app.modal_visible && (wparam == VK_ESCAPE || wparam == VK_RETURN)) {
-            activate(app.modal_secondary.empty() ? HitModalPrimary : HitModalSecondary);
+            activate(wparam == VK_RETURN && app.modal_style != ModalStyle::Plain ? HitModalPrimary :
+                     app.modal_secondary.empty() ? HitModalPrimary : HitModalSecondary);
+            InvalidateRect(window, nullptr, FALSE); return 0;
+        }
+        if (app.popup_hit != HitNone) {
+            if (wparam == VK_ESCAPE) activate(1999);
+            else if (wparam == VK_RETURN && app.hover >= 2000) activate(app.hover);
+            else if (wparam == VK_UP || wparam == VK_DOWN) navigate_selector(wparam == VK_UP ? -1 : 1);
             InvalidateRect(window, nullptr, FALSE); return 0;
         }
         if (!app.modal_visible && wparam == VK_TAB && app.capture_binding < 0) {
@@ -3862,6 +3938,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             if(SetTimer(window,6,33,nullptr))return 0;
         }
         app.log_update_pending = false;
+        static uint64_t previous_modal_revision = 0;
         static bool previous_busy=false;
         static std::wstring previous_status;
         bool state_changed;
@@ -3874,15 +3951,18 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         if(app.extraction_active && app.modal_action==ModalAction::CancelExtraction) {
             std::lock_guard guard(app.mutex);
             if(!app.extraction_title.empty()) {
-                app.extraction_destination=(pkg_import_root()/app.extraction_title).wstring();
+                const auto destination = (pkg_import_root()/app.extraction_title).wstring();
+                if (destination != app.extraction_destination) state_changed = true;
+                app.extraction_destination=destination;
                 app.modal_body=app.extraction_source+L"\n"+loc(L"Destination : ",L"Destination: ")+app.extraction_destination;
             }
         }
-        EnableWindow(app.minimize_button, !app.modal_visible);
-        EnableWindow(app.close_button, !app.modal_visible);
+        EnableWindow(app.minimize_button, !app.modal_visible && app.popup_hit == HitNone);
+        EnableWindow(app.close_button, !app.modal_visible && app.popup_hit == HitNone);
         if (app.modal_visible && GetActiveWindow() == window && GetFocus() != window) SetFocus(window);
         if (!IsIconic(window)) {
-            if(app.modal_visible || state_changed)InvalidateRect(window,nullptr,FALSE);
+            if(state_changed || previous_modal_revision != app.modal_revision) InvalidateRect(window,nullptr,FALSE);
+            else if(app.modal_visible && app.extraction_active) invalidate_modal();
             else if(app.page==Page::Logs) {
                 if(app.log_console.Handle()) {
                     if(app.native_logs_revision!=app.logs_revision.load()) {
@@ -3893,6 +3973,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
                 } else InvalidateRect(window,nullptr,FALSE);
             }
         }
+        previous_modal_revision = app.modal_revision;
         return 0;
     }
     case WM_UPDATE_DONE: receive_update_event(); return 0;
@@ -3954,7 +4035,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         }
         if (wparam == 3) {
             show_update_notice();
-            if (app.modal_action == ModalAction::UpdateProgress) InvalidateRect(window, nullptr, FALSE);
+            if (app.modal_action == ModalAction::UpdateProgress) invalidate_modal();
             if (!app.update_running && !app.update_notice) KillTimer(window, 3);
             return 0;
         }
@@ -4002,6 +4083,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     }
     return DefWindowProcW(window, message, wparam, lparam);
 }
+#include "cockpit_dialog_test.inc"
 } // namespace
 
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
@@ -4010,6 +4092,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     int argument_count = 0;
     LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argument_count);
     const auto launch_mode = So5Shortcuts::Mode(argument_count, arguments);
+    if (arguments && argument_count == 4 && std::wstring(arguments[1]) == L"--operation-ui-test") {
+        const fs::path output = arguments[2]; app.root = arguments[3]; LocalFree(arguments);
+        return operation_ui_test(output);
+    }
     if(arguments && argument_count==3 && std::wstring(arguments[1])==L"--native-resolution-self-test") {
         const fs::path fixture=fs::absolute(arguments[2]);LocalFree(arguments);
         // Never reuse an existing folder or touch owner settings during this test.
@@ -4036,7 +4122,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
         std::ofstream(fixture/L"result.json")<<"{\"passed\":true,\"languages\":12,\"manual_choices\":48,\"temporal_override_blocked\":48}\n";
         return 0;
     }
-    if(arguments && argument_count==3 && std::wstring(arguments[1])==L"--ui-benchmark") {
+    if(arguments && (argument_count==3 || argument_count==4) && std::wstring(arguments[1])==L"--ui-benchmark") {
+        if (argument_count == 4) app.root = arguments[3];
         const fs::path report=arguments[2]; LocalFree(arguments);
         return render_benchmark(report);
     }
@@ -4124,8 +4211,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
                 : result->recovered ? loc(L"La mise à jour a échoué. La version précédente a été restaurée.",L"Update failed. The previous version was restored.")
                 : loc(L"La mise à jour a échoué et la récupération nécessite une intervention. Consultez le dossier de secours et Journal et diagnostic.",
                       L"Update failed and recovery needs attention. See the backup folder and Logs and diagnostics.");
-            if (!result->backup.empty()) body += L"\n\n" + std::wstring(loc(L"Dossier de secours : ",L"Backup folder: ")) + result->backup.wstring();
-            show_modal(loc(L"Mises à jour Windows",L"Windows updates"), body, L"OK");
+            show_modal(update_dialog_title(), body, loc(L"Terminé",L"Done"), {}, ModalAction::UpdateResult,
+                result->backup.empty() ? L"" : loc(L"Ouvrir le dossier de secours",L"Open backup folder"),
+                result->success ? ModalStyle::UpdateSuccess : ModalStyle::Update);
+            app.modal_backup = result->backup;
         }
         app.update_cleanup = So5Update::PendingCleanup(app.root);
         if (app.update_cleanup) SetTimer(app.window, 4, 1500, nullptr);
@@ -4135,7 +4224,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
         PostMessageW(app.window, WM_AUTOPLAY, 0, 0);
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
-        if (!app.modal_visible && app.capture_binding < 0 && IsDialogMessageW(app.window, &message)) continue;
+        if (!app.modal_visible && app.popup_hit == HitNone && app.capture_binding < 0 && IsDialogMessageW(app.window, &message)) continue;
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }

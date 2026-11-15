@@ -1,4 +1,4 @@
-# Star Ocean 5 for Windows - v1.1.2
+# Star Ocean 5 for Windows - v1.1.3
 
 **Windows 10/11 x64 player build**
 
@@ -8,6 +8,33 @@
 This Windows adaptation combines a native Cockpit launcher, C++ game preparation and a
 game-specific compatibility runtime. It requires your own supported PS4 game files;
 the original game's complete source code has not been reconstructed.
+
+## Changes in v1.1.3
+
+- Refresh update and PKG extraction dialogs with the **Essentiel** Cockpit design.
+  Update windows use **SO5 PS4RT-WIN Updates**, show version details and real progress,
+  and offer a compact completion view with access to the backup folder.
+- Make the extraction destination and **Change folder** action easier to find.
+- Block background tabs while a selection popup is open; retain keyboard navigation
+  and prevent unavailable options from being applied.
+- Color-code the Technical overlay and fix its columns/geometry so changing readings
+  and hardware/provider names cannot make it jump. Retain scale, opacity and six anchors.
+- Translate additions into all 12 launcher languages, retain CJK font fallback, and
+  reduce redraw work for progress and repeated log notifications.
+- Add support for Crowbar Guide pause/resume and orderly exit, with synchronized guest
+  clocks, controller filtering across resume, movie safeguards and persisted trophy
+  test-profile replies.
+- Retry Crowbar state publication after temporary Windows file locks without repeating
+  the associated control command.
+- Add native operation-panel fixtures and CPU-only overlay geometry/performance checks.
+  UI timings describe the measured local draw paths, not game/GPU performance guarantees.
+
+> [!NOTE]
+> Existing guide layouts and screenshots are preserved. PDF version references now target
+> 1.1.3; that label update is not a full content audit. The Markdown guides add
+> [operation-panel instructions](LAUNCHER_GUIDE.md#cockpit-operation-panels-113) and a
+> Technical-overlay color legend. Residual rendering artifacts and Fidel's follower
+> limitation remain unresolved.
 
 ## Changes in v1.1.2
 
@@ -67,7 +94,7 @@ the original game's complete source code has not been reconstructed.
 - More robust update installation handoff and temporary file-lock handling.
 - Separate launcher/quick-play desktop shortcuts and timestamped console records.
 
-These changes are available in the source checkout. Build the 1.1.2 player package locally; this documentation update does not publish or replace any GitHub release asset.
+These changes are available in the source checkout. Build the 1.1.3 player package locally; this documentation update does not publish or replace any GitHub release asset.
 
 ## Highlights since v0.4.0
 
@@ -116,7 +143,7 @@ passcodes cannot be imported by the native extractor.
 ## Clean player folder
 
 The expected distribution folder is
-`ps4rt-star-ocean-5-windows-x64-v1.1.2-latest`.
+`ps4rt-star-ocean-5-windows-x64-v1.1.3-latest`.
 
 | Entry | Purpose |
 | --- | --- |
@@ -131,7 +158,7 @@ game data, personal settings, saves, caches or diagnostic captures. The optional
 probe is disabled by default; its session controls appear when enabled in Advanced.
 For source builds, **build-windows.cmd** creates the player folder under **dist**.
 
-Executable version resources follow **1.1.2 / 1.1.2.0**, with **HoverMods Vault** as the
+Executable version resources follow **1.1.3 / 1.1.3.0**, with **HoverMods Vault** as the
 application company. Third-party code, shader models and game artwork retain their own
 authors, licenses and notices. Preserve corresponding-source obligations when redistributing.
 
@@ -139,7 +166,7 @@ authors, licenses and notices. Preserve corresponding-source obligations when re
 
 - Residual camera-dependent shader/texture patterns remain visible in some locations
   at custom aspect ratios. They can persist with reconstruction off; a definitive fix
-  is not included in 1.1.2.
+  is not included in 1.1.3.
 
 - FSR 4 v07 can lose smoothing and display a bottom-edge line outdoors or after a zone
   transition. No validated fix is included. Disabling reconstruction avoids the reported
@@ -161,8 +188,9 @@ The ending-crash correction was validated in gameplay: credits and subsequent vi
 play without crashing. All 18 loader regression tests and the two targeted trophy/time
 checks passed before that gameplay validation.
 
-The source version is now **1.1.2**. Local gameplay testing accepted the update
-including the full-output black fade; residual shader/texture artifacts remain open. Isolated compilation and regression checks do not
+The source version is now **1.1.3**. Previous local gameplay testing accepted the
+full-output black fade in 1.1.2; residual shader/texture artifacts remain open.
+The 1.1.3 operation panels and Technical layout have separate native UI checks. Isolated compilation and regression checks do not
 replace the installed test build or generate a player ZIP. Build and validate the final player package
 before publishing it; broader hardware and rendering issues remain separate.
 
